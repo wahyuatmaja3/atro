@@ -5,6 +5,7 @@ PyQt6>=6.7
 python-dotenv>=1.0
 requests>=2.31
 opencv-python-headless>=4.11,<5
+edge-tts>=7.0
 pytest>=8.0
 pytest-asyncio>=0.23
 pyinstaller>=6.10

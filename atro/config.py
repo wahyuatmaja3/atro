@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
-from atro.core.schemas import FramingMode
+from atro.core.schemas import EditFormat, FramingMode
 
 LLMProvider = Literal["gemini", "openai_compatible"]
 
@@ -43,7 +43,10 @@ class AppSettings(BaseModel):
     default_max_duration_sec: int = Field(default=60, ge=10, le=600)
     default_aspect_ratio: Literal["16:9", "9:16"] = "9:16"
     default_padding_sec: float = Field(default=0.4, ge=0.3, le=0.5)
+    default_edit_format: EditFormat = "podcast"
     default_framing_mode: FramingMode = "smart_face"
+    tts_voice: str = "id-ID-GadisNeural"
+    tts_rate: str = "+8%"
     workspace_dir: Path = Field(default_factory=lambda: get_app_base_dir() / "workspace")
     bin_dir: Path = Field(default_factory=lambda: get_app_base_dir() / "bin")
     backsound_dir: Path = Field(default_factory=lambda: get_app_base_dir() / "backsound")

@@ -25,6 +25,7 @@ class JobStatus(str, Enum):
 
 SourceType = Literal["youtube_url", "local_file"]
 AspectRatio = Literal["16:9", "9:16"]
+EditFormat = Literal["podcast", "game"]
 FramingMode = Literal["smart_face", "fit_all_blur", "center_crop", "face_tracking"]
 TranscriptSource = Literal["yt_dlp_manual_sub", "yt_dlp_auto_sub", "faster_whisper"]
 
@@ -41,9 +42,11 @@ class JobRequest(BaseModel):
     max_duration_sec: int = Field(default=60, ge=10, le=600)
     aspect_ratio: AspectRatio = "9:16"
     padding_sec: float = Field(default=0.4, ge=0.3, le=0.5)
+    edit_format: EditFormat = "podcast"
     framing_mode: FramingMode = "smart_face"
     enable_subtitles: bool = True
     enable_hook_title: bool = True
+    enable_opening_tts: bool = True
     enable_backsound: bool = True
     enable_viral_polish: bool = True
 
@@ -230,6 +233,9 @@ class RenderedClip(BaseModel):
     subtitles_burned: bool = False
     backsound_used: Optional[str] = None
     framing_summary: str = ""
+    edit_format: str = "podcast"
+    opening_tts_used: bool = False
+    intro_duration_sec: float = 0.0
 
 
 class RenderResult(BaseModel):
