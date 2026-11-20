@@ -1,0 +1,20 @@
+# Python & Virtual Environment
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+
+# Build & Packaging
+build/work/
+dist/
+*.spec.bak
+
+# Runtime Workspace & Secrets
+workspace/
+.env
+config.json
+bin/
+*.log

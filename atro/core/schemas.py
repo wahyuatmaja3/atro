@@ -1,0 +1,264 @@
+"""Pydantic v2 data contracts shared across all ATRO pipeline modules."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from enum import Enum
+from pathlib import Path
+from typing import Literal, Optional
+
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+
+class JobStatus(str, Enum):
+    """Execution status of a pipeline job."""
+
+    QUEUED = "QUEUED"
+    DOWNLOADING = "DOWNLOADING"
+    TRANSCRIBING = "TRANSCRIBING"
+    ANALYZING = "ANALYZING"
+    CUTTING = "CUTTING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+
+
+SourceType = Literal["youtube_url", "local_file"]
+AspectRatio = Literal["16:9", "9:16"]
+FramingMode = Literal["smart_face", "fit_all_blur", "center_crop", "face_tracking"]
+TranscriptSource = Literal["yt_dlp_manual_sub", "yt_dlp_auto_sub", "faster_whisper"]
+
+
+class JobRequest(BaseModel):
+    """Input configuration submitted by user to create an AutoClip job."""
+
+    source_type: SourceType = "youtube_url"
+    url: Optional[str] = None
+    local_video_path: Optional[str] = None
+    local_subtitle_path: Optional[str] = None
+    clip_count: int = Field(default=4, ge=1, le=10)
+    min_duration_sec: int = Field(default=30, ge=5, le=300)
+    max_duration_sec: int = Field(default=60, ge=10, le=600)
+    aspect_ratio: AspectRatio = "9:16"
+    padding_sec: float = Field(default=0.4, ge=0.3, le=0.5)
+    framing_mode: FramingMode = "smart_face"
+    enable_subtitles: bool = True
+    enable_hook_title: bool = True
+    enable_backsound: bool = True
+    enable_viral_polish: bool = True
+
+    @model_validator(mode="after")
+    def _validate_request_fields(self) -> "JobRequest":
+        if self.source_type == "youtube_url":
+            cleaned_url = (self.url or "").strip()
+            if not cleaned_url or not (
+                cleaned_url.startswith("http://") or cleaned_url.startswith("https://")
+            ):
+                raise ValueError("URL harus diawali http:// atau https://")
+            self.url = cleaned_url
+        elif self.source_type == "local_file":
+            cleaned_video = (self.local_video_path or "").strip()
+            if not cleaned_video:
+                raise ValueError("Path video lokal tidak boleh kosong")
+            self.local_video_path = cleaned_video
+
+            if self.local_subtitle_path is not None:
+                cleaned_sub = self.local_subtitle_path.strip()
+                if cleaned_sub:
+                    ext = Path(cleaned_sub).suffix.lower()
+                    if ext not in {".vtt", ".srt"}:
+                        raise ValueError("Subtitle lokal harus berformat .vtt atau .srt")
+                    self.local_subtitle_path = cleaned_sub
+                else:
+                    self.local_subtitle_path = None
+
+        if self.max_duration_sec <= self.min_duration_sec:
+            raise ValueError("max_duration_sec harus lebih besar dari min_duration_sec")
+        return self
+
+    @property
+    def display_source(self) -> str:
+        """Human-friendly source label for UI cards and CLI listings."""
+        if self.source_type == "local_file" and self.local_video_path:
+            return Path(self.local_video_path).name
+        return self.url or ""
+
+
+class JobArtifacts(BaseModel):
+    """File paths to JSON contract outputs produced by each module."""
+
+    metadata_json: Optional[str] = None
+    transcript_json: Optional[str] = None
+    analysis_json: Optional[str] = None
+    render_result_json: Optional[str] = None
+
+
+class JobState(BaseModel):
+    """Persistent per-job state saved to ./workspace/<job_id>/state.json."""
+
+    job_id: str
+    status: JobStatus
+    current_stage: str
+    progress_pct: float = Field(default=0.0, ge=0.0, le=100.0)
+    created_at: datetime
+    updated_at: datetime
+    workspace_dir: str
+    log_path: str
+    request: JobRequest
+    artifacts: JobArtifacts = Field(default_factory=JobArtifacts)
+    error: Optional[str] = None
+
+
+class SubtitleCandidate(BaseModel):
+    """Subtitle file downloaded alongside source video."""
+
+    lang: str
+    is_auto_generated: bool
+    ext: str
+    local_path: str
+
+
+class DownloadResult(BaseModel):
+    """Output contract of Module 1 (downloader) -> metadata.json."""
+
+    job_id: str
+    url: str = ""
+    video_id: str
+    title: str
+    channel: str = ""
+    duration_sec: float = Field(gt=0.0)
+    width: int = Field(gt=0)
+    height: int = Field(gt=0)
+    fps: float = Field(gt=0.0)
+    has_audio: bool = True
+    language: Optional[str] = None
+    source_video_path: str
+    subtitle_candidates: list[SubtitleCandidate] = Field(default_factory=list)
+
+
+class TranscriptSegment(BaseModel):
+    """Single timestamped transcript unit."""
+
+    index: int = Field(ge=0)
+    start: float = Field(ge=0.0)
+    end: float = Field(gt=0.0)
+    text: str
+
+    @model_validator(mode="after")
+    def _validate_span(self) -> "TranscriptSegment":
+        if self.end <= self.start:
+            raise ValueError("TranscriptSegment.end harus lebih besar dari start")
+        return self
+
+
+class TranscriptResult(BaseModel):
+    """Output contract of Module 2 (transcriber) -> transcript.json."""
+
+    job_id: str
+    source: TranscriptSource
+    language: Optional[str] = None
+    model_used: Optional[str] = None
+    quality_notes: str = ""
+    segments: list[TranscriptSegment]
+
+
+class GeminiClipItem(BaseModel):
+    """Gemini Structured Output schema item (kept simple without exclusiveMinimum)."""
+
+    title: str = Field(description="Judul singkat dan menarik untuk klip video.")
+    start_time: float = Field(description="Waktu mulai klip dalam detik (>= 0).")
+    end_time: float = Field(description="Waktu selesai klip dalam detik (> start_time).")
+    virality_score: int = Field(description="Skor potensi viral klip dari 1 sampai 10.")
+    reason: str = Field(description="Alasan pemilihan klip mencakup kekuatan hook 3 detik pertama dan klimaks.")
+
+
+class GeminiClipSelectionSchema(BaseModel):
+    """Top-level response_schema passed to gemini-4-neon Structured Output."""
+
+    clips: list[GeminiClipItem] = Field(
+        description="Daftar klip terbaik yang berdiri sendiri, tidak tumpang tindih, dan tidak terpotong di tengah kalimat."
+    )
+
+
+class ClipCandidate(BaseModel):
+    """Validated clip candidate produced by Module 3 (analyzer)."""
+
+    title: str
+    start_time: float = Field(ge=0.0)
+    end_time: float = Field(gt=0.0)
+    virality_score: int = Field(ge=1, le=10)
+    reason: str
+
+    @field_validator("title", "reason")
+    @classmethod
+    def _non_empty(cls, v: str) -> str:
+        cleaned = v.strip()
+        if not cleaned:
+            raise ValueError("Field teks klip tidak boleh kosong")
+        return cleaned
+
+    @model_validator(mode="after")
+    def _validate_times(self) -> "ClipCandidate":
+        if self.end_time <= self.start_time:
+            raise ValueError("end_time harus lebih besar dari start_time")
+        return self
+
+
+class AnalysisResult(BaseModel):
+    """Output contract of Module 3 (analyzer) -> analysis.json."""
+
+    job_id: str
+    model: str = "gemini-4-neon"
+    clips: list[ClipCandidate]
+    validation_warnings: list[str] = Field(default_factory=list)
+
+
+class RenderedClip(BaseModel):
+    """Single rendered MP4 clip metadata."""
+
+    clip_index: int = Field(ge=1)
+    title: str
+    virality_score: int = Field(ge=1, le=10)
+    reason: str
+    requested_start_sec: float = Field(ge=0.0)
+    requested_end_sec: float = Field(gt=0.0)
+    padded_start_sec: float = Field(ge=0.0)
+    padded_end_sec: float = Field(gt=0.0)
+    output_duration_sec: float = Field(gt=0.0)
+    output_path: str
+    file_size_bytes: int = Field(ge=0)
+    subtitles_burned: bool = False
+    backsound_used: Optional[str] = None
+    framing_summary: str = ""
+
+
+class RenderResult(BaseModel):
+    """Output contract of Module 4 (cutter) -> render_result.json."""
+
+    job_id: str
+    aspect_ratio: AspectRatio
+    framing_strategy: str
+    padding_sec: float = Field(ge=0.3, le=0.5)
+    output_dir: str
+    rendered_clips: list[RenderedClip]
+
+
+class PreflightBinaryInfo(BaseModel):
+    """Availability details of a required external binary."""
+
+    name: str
+    available: bool
+    path: Optional[str] = None
+    version: Optional[str] = None
+    error: Optional[str] = None
+
+
+class PreflightReport(BaseModel):
+    """Startup dependency verification report."""
+
+    ok: bool
+    yt_dlp: PreflightBinaryInfo
+    ffmpeg: PreflightBinaryInfo
+    ffprobe: PreflightBinaryInfo
+    errors: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)

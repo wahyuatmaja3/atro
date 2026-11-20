@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=65.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "atro"
+version = "0.1.0"
+description = "ATRO - Local AutoClip Pipeline Desktop Application"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.7,<3",
+    "google-genai>=1.0",
+    "faster-whisper>=1.1",
+    "PyQt6>=6.7",
+    "python-dotenv>=1.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["atro*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+pythonpath = ["."]
+testpaths = ["tests"]
