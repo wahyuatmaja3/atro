@@ -280,6 +280,7 @@ async def test_viral_editor_full_integration_real_ffmpeg(tmp_path: Path) -> None
         framing_mode="smart_face",
         enable_subtitles=True,
         enable_hook_title=True,
+        enable_opening_tts=False,
         enable_backsound=True,
         enable_viral_polish=True,
     )

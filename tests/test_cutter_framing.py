@@ -139,6 +139,7 @@ async def test_cutter_integration_real_ffmpeg(tmp_path: Path) -> None:
         max_duration_sec=10,
         aspect_ratio="9:16",
         padding_sec=0.4,
+        enable_opening_tts=False,
     )
     res_916 = await cutter.run(
         job_id="job_01",
@@ -186,6 +187,7 @@ async def test_cutter_integration_real_ffmpeg(tmp_path: Path) -> None:
         max_duration_sec=10,
         aspect_ratio="16:9",
         padding_sec=0.4,
+        enable_opening_tts=False,
     )
     res_169 = await cutter.run(
         job_id="job_01",

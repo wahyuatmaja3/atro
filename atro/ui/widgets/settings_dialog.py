@@ -195,6 +195,15 @@ class SettingsDialog(QDialog):
         bgm_opts_row.addWidget(self.bgm_ducking_chk, 1)
         common_form.addRow("Volume Backsound", bgm_opts_row)
 
+        self.tts_voice_combo = QComboBox()
+        self.tts_voice_combo.addItem("Indonesia Cewek - Santai (Gadis)", "id-ID-GadisNeural")
+        self.tts_voice_combo.addItem("Indonesia Cowok - Santai (Ardi)", "id-ID-ArdiNeural")
+        self.tts_voice_combo.addItem("English Female (Jenny)", "en-US-JennyNeural")
+        self.tts_voice_combo.addItem("English Male (Guy)", "en-US-GuyNeural")
+        tts_idx = self.tts_voice_combo.findData(self._settings.tts_voice)
+        self.tts_voice_combo.setCurrentIndex(max(0, tts_idx))
+        common_form.addRow("Suara Opening (TTS)", self.tts_voice_combo)
+
         layout.addLayout(common_form)
 
         # Sync initial stack page and compact height
@@ -320,6 +329,7 @@ class SettingsDialog(QDialog):
             self._settings.backsound_dir = Path(bgm_text)
         self._settings.backsound_volume = round(self.bgm_volume_spin.value() / 100.0, 2)
         self._settings.enable_backsound_ducking = self.bgm_ducking_chk.isChecked()
+        self._settings.tts_voice = self.tts_voice_combo.currentData() or "id-ID-GadisNeural"
         self.accept()
 
     def updated_settings(self) -> AppSettings:

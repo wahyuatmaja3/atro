@@ -269,6 +269,12 @@ class MainWindow(QMainWindow):
         self.aspect_combo.addItems(["9:16", "16:9"])
         self.aspect_combo.setCurrentText(self._settings.default_aspect_ratio)
 
+        self.format_combo = QComboBox()
+        self.format_combo.addItem("Podcast", "podcast")
+        self.format_combo.addItem("Game", "game")
+        fmt_idx = self.format_combo.findData(self._settings.default_edit_format)
+        self.format_combo.setCurrentIndex(max(0, fmt_idx))
+
         self.padding_spin = QDoubleSpinBox()
         self.padding_spin.setRange(0.30, 0.50)
         self.padding_spin.setSingleStep(0.05)
@@ -282,14 +288,16 @@ class MainWindow(QMainWindow):
         self.framing_combo.addItem("Center Crop", "center_crop")
         f_idx = self.framing_combo.findData(self._settings.default_framing_mode)
         self.framing_combo.setCurrentIndex(max(0, f_idx))
-        self.aspect_combo.currentTextChanged.connect(self._on_aspect_changed)
-        self._on_aspect_changed(self.aspect_combo.currentText())
+        self.aspect_combo.currentTextChanged.connect(lambda _t: self._sync_framing_availability())
+        self.format_combo.currentIndexChanged.connect(lambda _i: self._sync_framing_availability())
+        self._sync_framing_availability()
 
         for label_text, widget in (
             ("Jumlah Klip", self.clip_count_spin),
             ("Durasi Min", self.min_dur_spin),
             ("Durasi Max", self.max_dur_spin),
             ("Rasio Aspek", self.aspect_combo),
+            ("Format", self.format_combo),
             ("Padding", self.padding_spin),
             ("Framing", self.framing_combo),
         ):
@@ -306,7 +314,7 @@ class MainWindow(QMainWindow):
 
         # Compact Viral Edit Options Row
         viral_row = QHBoxLayout()
-        viral_row.setSpacing(16)
+        viral_row.setSpacing(14)
         viral_lbl = QLabel("Edit Viral")
         viral_lbl.setObjectName("FieldLabel")
         viral_row.addWidget(viral_lbl)
@@ -315,6 +323,8 @@ class MainWindow(QMainWindow):
         self.subtitles_chk.setChecked(True)
         self.hook_title_chk = QCheckBox("Hook Judul")
         self.hook_title_chk.setChecked(True)
+        self.opening_tts_chk = QCheckBox("Suara Opening")
+        self.opening_tts_chk.setChecked(True)
         self.backsound_chk = QCheckBox("Backsound")
         self.backsound_chk.setChecked(True)
         self.viral_polish_chk = QCheckBox("Efek Viral")
@@ -326,6 +336,7 @@ class MainWindow(QMainWindow):
 
         viral_row.addWidget(self.subtitles_chk)
         viral_row.addWidget(self.hook_title_chk)
+        viral_row.addWidget(self.opening_tts_chk)
         viral_row.addWidget(self.backsound_chk)
         viral_row.addWidget(self.viral_polish_chk)
         viral_row.addStretch()
@@ -515,8 +526,20 @@ class MainWindow(QMainWindow):
         if chosen:
             self.local_sub_input.setText(chosen)
 
-    def _on_aspect_changed(self, aspect: str) -> None:
-        self.framing_combo.setEnabled(aspect == "9:16")
+    def _sync_framing_availability(self) -> None:
+        aspect = self.aspect_combo.currentText()
+        edit_fmt = self.format_combo.currentData() or "podcast"
+        if aspect == "16:9":
+            self.framing_combo.setEnabled(False)
+            self.framing_combo.setToolTip("Rasio 16:9 memakai layout asli penuh")
+        elif edit_fmt == "game":
+            self.framing_combo.setEnabled(False)
+            self.framing_combo.setToolTip(
+                "Format Game otomatis memakai layout 40% Facecam + 60% Gameplay"
+            )
+        else:
+            self.framing_combo.setEnabled(True)
+            self.framing_combo.setToolTip("")
 
     def _refresh_backsound_status(self) -> None:
         tracks = scan_backsound_tracks(self._settings.backsound_dir)
@@ -602,9 +625,11 @@ class MainWindow(QMainWindow):
                 max_duration_sec=max_dur,
                 aspect_ratio=self.aspect_combo.currentText(),  # type: ignore[arg-type]
                 padding_sec=round(self.padding_spin.value(), 2),
+                edit_format=self.format_combo.currentData() or "podcast",  # type: ignore[arg-type]
                 framing_mode=self.framing_combo.currentData() or "smart_face",  # type: ignore[arg-type]
                 enable_subtitles=self.subtitles_chk.isChecked(),
                 enable_hook_title=self.hook_title_chk.isChecked(),
+                enable_opening_tts=self.opening_tts_chk.isChecked(),
                 enable_backsound=self.backsound_chk.isChecked(),
                 enable_viral_polish=self.viral_polish_chk.isChecked(),
             )

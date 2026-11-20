@@ -72,6 +72,10 @@ class ClipCard(QFrame):
         root.addWidget(timing_lbl)
 
         edit_tags: list[str] = []
+        if clip.edit_format:
+            edit_tags.append(f"Format: {'Game' if clip.edit_format == 'game' else 'Podcast'}")
+        if clip.opening_tts_used:
+            edit_tags.append("Suara Opening: Ya")
         if clip.subtitles_burned:
             edit_tags.append("Subtitle: Ya")
         if clip.backsound_used:

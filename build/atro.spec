@@ -28,6 +28,8 @@ hiddenimports = [
     "huggingface_hub",
     "av",
     "cv2",
+    "edge_tts",
+    "aiohttp",
 ]
 
 for pkg in ("faster_whisper", "certifi", "cv2"):

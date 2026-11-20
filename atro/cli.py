@@ -70,12 +70,15 @@ async def _run_pipeline_cli(
     max_dur: int,
     aspect: str,
     padding: float,
+    edit_format: str,
     framing: str,
     enable_subtitles: bool,
     enable_hook_title: bool,
+    enable_opening_tts: bool,
     enable_backsound: bool,
     enable_viral_polish: bool,
     backsound_dir: Optional[str],
+    tts_voice: Optional[str],
     provider: Optional[str],
     model: Optional[str],
     base_url: Optional[str],
@@ -85,6 +88,8 @@ async def _run_pipeline_cli(
     settings = load_settings()
     if backsound_dir:
         settings.backsound_dir = Path(backsound_dir)
+    if tts_voice:
+        settings.tts_voice = tts_voice.strip()
     if provider:
         settings.llm_provider = provider  # type: ignore[assignment]
     if base_url:
@@ -139,9 +144,11 @@ async def _run_pipeline_cli(
                 max_duration_sec=max_dur,
                 aspect_ratio=aspect,  # type: ignore[arg-type]
                 padding_sec=padding,
+                edit_format=edit_format,  # type: ignore[arg-type]
                 framing_mode=framing,  # type: ignore[arg-type]
                 enable_subtitles=enable_subtitles,
                 enable_hook_title=enable_hook_title,
+                enable_opening_tts=enable_opening_tts,
                 enable_backsound=enable_backsound,
                 enable_viral_polish=enable_viral_polish,
             )
@@ -157,9 +164,11 @@ async def _run_pipeline_cli(
                 max_duration_sec=max_dur,
                 aspect_ratio=aspect,  # type: ignore[arg-type]
                 padding_sec=padding,
+                edit_format=edit_format,  # type: ignore[arg-type]
                 framing_mode=framing,  # type: ignore[arg-type]
                 enable_subtitles=enable_subtitles,
                 enable_hook_title=enable_hook_title,
+                enable_opening_tts=enable_opening_tts,
                 enable_backsound=enable_backsound,
                 enable_viral_polish=enable_viral_polish,
             )
@@ -223,16 +232,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--aspect", choices=["16:9", "9:16"], default=settings.default_aspect_ratio, help="Rasio aspek output.")
     p_run.add_argument("--padding", type=float, default=settings.default_padding_sec, help="Padding awal/akhir (0.3-0.5s).")
     p_run.add_argument(
+        "--format",
+        dest="edit_format",
+        choices=["podcast", "game"],
+        default=settings.default_edit_format,
+        help="Format editan klip (podcast atau game).",
+    )
+    p_run.add_argument(
         "--framing",
         choices=["smart_face", "fit_all_blur", "center_crop", "face_tracking"],
         default=settings.default_framing_mode,
-        help="Strategi framing 9:16.",
+        help="Strategi framing 9:16 untuk format podcast.",
     )
     p_run.add_argument("--no-subtitles", action="store_true", help="Nonaktifkan burn-in subtitle viral.")
     p_run.add_argument("--no-hook-title", action="store_true", help="Nonaktifkan banner hook judul di awal klip.")
+    p_run.add_argument("--no-opening-tts", action="store_true", help="Nonaktifkan suara opening pembaca judul (TTS).")
     p_run.add_argument("--no-backsound", action="store_true", help="Nonaktifkan musik latar dari folder backsound.")
     p_run.add_argument("--no-viral-polish", action="store_true", help="Nonaktifkan progress bar, fade, dan color polish.")
     p_run.add_argument("--backsound-dir", default=None, help="Override folder backsound lokal.")
+    p_run.add_argument("--tts-voice", default=None, help="Override voice ID untuk suara opening TTS.")
     p_run.add_argument("--provider", choices=["gemini", "openai_compatible"], default=None, help="Provider AI untuk analisis klip.")
     p_run.add_argument("--model", default=None, help="Override nama model AI (Gemini / OpenAI-Compatible).")
     p_run.add_argument("--base-url", default=None, help="Override Base URL untuk provider OpenAI-Compatible.")
@@ -282,12 +300,15 @@ def main(argv: Optional[list[str]] = None) -> int:
                 max_dur=args.max_dur,
                 aspect=args.aspect,
                 padding=args.padding,
+                edit_format=args.edit_format,
                 framing=args.framing,
                 enable_subtitles=not args.no_subtitles,
                 enable_hook_title=not args.no_hook_title,
+                enable_opening_tts=not args.no_opening_tts,
                 enable_backsound=not args.no_backsound,
                 enable_viral_polish=not args.no_viral_polish,
                 backsound_dir=args.backsound_dir,
+                tts_voice=args.tts_voice,
                 provider=args.provider,
                 model=args.model,
                 base_url=args.base_url,
@@ -308,12 +329,15 @@ def main(argv: Optional[list[str]] = None) -> int:
                 max_dur=60,
                 aspect="9:16",
                 padding=0.4,
+                edit_format="podcast",
                 framing="smart_face",
                 enable_subtitles=True,
                 enable_hook_title=True,
+                enable_opening_tts=True,
                 enable_backsound=True,
                 enable_viral_polish=True,
                 backsound_dir=args.backsound_dir,
+                tts_voice=None,
                 provider=args.provider,
                 model=args.model,
                 base_url=args.base_url,
