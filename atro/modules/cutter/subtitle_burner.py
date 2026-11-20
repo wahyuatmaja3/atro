@@ -1,4 +1,4 @@
-"""Dynamic viral ASS subtitle and hook-title generator for burned-in short-form captions."""
+"""Dynamic viral ASS subtitle and hook-title generator for Podcast and Game formats."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from atro.core.schemas import AspectRatio, TranscriptSegment
+from atro.core.schemas import AspectRatio, EditFormat, TranscriptSegment
 
 
 @dataclass(slots=True)
@@ -82,7 +82,6 @@ def build_viral_caption_chunks(
         if not raw_words:
             continue
 
-        # Distribute segment span proportionally by word character length
         weights = [max(1, len(w)) for w in raw_words]
         total_weight = sum(weights)
         seg_span = rel_end - rel_start
@@ -100,7 +99,6 @@ def build_viral_caption_chunks(
             word_timings.append(CaptionWord(text=word, start=round(cursor, 3), end=round(w_end, 3)))
             cursor = w_end
 
-        # Group into balanced 1..max_words chunks (avoid trailing 1-word orphan when splitting 5 words -> 3 + 2)
         groups: list[list[CaptionWord]] = []
         i = 0
         n = len(word_timings)
@@ -131,28 +129,88 @@ def generate_clip_ass_file(
     clip_end_sec: float,
     enable_subtitles: bool,
     enable_hook_title: bool,
+    edit_format: EditFormat = "podcast",
+    opening_duration_sec: float = 0.0,
+    source_credit: str = "",
 ) -> Optional[Path]:
-    """Generate an ASS subtitle/hook-title file ready for FFmpeg libass burn-in."""
+    """Generate an ASS subtitle/hook-title file tailored to Podcast or Game Shorts format."""
     if not enable_subtitles and not enable_hook_title:
         return None
 
     is_vertical = aspect_ratio == "9:16"
+    is_game = edit_format == "game"
     play_res_x, play_res_y = (1080, 1920) if is_vertical else (1920, 1080)
+    intro_shift = max(0.0, float(opening_duration_sec))
+
+    # Format-specific typography, colors (ASS BGR), and safe-zone placement
     sub_font_size = 64 if is_vertical else 50
-    sub_margin_v = 370 if is_vertical else 85
+    if is_game:
+        sub_margin_v = 330 if is_vertical else 85
+        highlight_bgr = "&H00F8BD38&"  # Electric cyan (#38BDF8)
+    else:
+        sub_margin_v = 370 if is_vertical else 85
+        highlight_bgr = "&H0015CCFA&"  # Viral yellow (#FACC15)
+
     hook_font_size = 54 if is_vertical else 44
-    hook_margin_v = 175 if is_vertical else 60
+    if is_game:
+        # Modern Crisp Light Card (white pill card, black bold text)
+        hook_primary = "&H00170F0F"
+        hook_box = "&H08F8FAFC"
+        hook_outline_w = 18
+        if intro_shift > 0.0:
+            hook_align = 5
+            hook_margin_v = 0
+        elif is_vertical:
+            hook_align = 8
+            hook_margin_v = 690
+        else:
+            hook_align = 8
+            hook_margin_v = 60
+    else:
+        # Modern Dark Glass Card (dark translucent box, crisp white bold text)
+        hook_primary = "&H00FFFFFF"
+        hook_box = "&H5517110F"
+        hook_outline_w = 16
+        if intro_shift > 0.0:
+            hook_align = 5
+            hook_margin_v = 0
+        elif is_vertical:
+            hook_align = 8
+            hook_margin_v = 175
+        else:
+            hook_align = 8
+            hook_margin_v = 60
 
     dialogue_lines: list[str] = []
 
     if enable_hook_title and clip_title.strip() and clip_duration_sec >= 0.8:
-        hook_end = min(3.8, max(0.8, round(clip_duration_sec - 0.2, 3)))
-        wrapped_title = _wrap_hook_title(clip_title, max_chars=28)
+        if intro_shift > 0.0:
+            hook_start = 0.05
+            hook_end = max(0.8, round(intro_shift - 0.05, 3))
+            anim_tag = "{\\fscx90\\fscy90\\t(0,110,\\fscx100\\fscy100)\\fad(120,220)}"
+        else:
+            hook_start = 0.15
+            hook_end = min(3.8, max(0.8, round(clip_duration_sec - 0.2, 3)))
+            anim_tag = (
+                "{\\fscx90\\fscy90\\t(0,110,\\fscx100\\fscy100)\\fad(120,220)}"
+                if is_game
+                else "{\\fad(220,350)}"
+            )
+        wrapped_title = _wrap_hook_title(clip_title, max_chars=26 if is_vertical else 34)
         if wrapped_title:
             dialogue_lines.append(
-                f"Dialogue: 2,{_format_ass_time(0.15)},{_format_ass_time(hook_end)},"
-                f"HookTitle,,0,0,0,,{{\\fad(220,350)}}{wrapped_title}"
+                f"Dialogue: 2,{_format_ass_time(hook_start)},{_format_ass_time(hook_end)},"
+                f"HookTitle,,0,0,0,,{anim_tag}{wrapped_title}"
             )
+
+    clean_credit = source_credit.strip()
+    if is_game and clean_credit and clean_credit.lower() != "local file":
+        handle = clean_credit if clean_credit.startswith("@") else f"@{clean_credit}"
+        credit_text = _escape_ass_text(f"Source: {handle}")
+        dialogue_lines.append(
+            f"Dialogue: 0,{_format_ass_time(0.0)},{_format_ass_time(clip_duration_sec)},"
+            f"SourceCredit,,0,0,0,,{credit_text}"
+        )
 
     if enable_subtitles and segments:
         chunks = build_viral_caption_chunks(
@@ -163,12 +221,13 @@ def generate_clip_ass_file(
         )
         for chunk in chunks:
             for active_idx, word_obj in enumerate(chunk.words):
-                ev_start = word_obj.start
-                ev_end = (
+                ev_start = round(word_obj.start + intro_shift, 3)
+                raw_end = (
                     chunk.words[active_idx + 1].start
                     if active_idx + 1 < len(chunk.words)
                     else chunk.end
                 )
+                ev_end = min(clip_duration_sec, round(raw_end + intro_shift, 3))
                 if ev_end <= ev_start:
                     ev_end = min(clip_duration_sec, ev_start + 0.08)
                 if ev_end <= ev_start:
@@ -179,7 +238,7 @@ def generate_clip_ass_file(
                     upper_esc = _escape_ass_text(w.text.upper())
                     if j == active_idx:
                         rendered_words.append(
-                            "{\\c&H0015CCFA&\\fscx108\\fscy108}"
+                            f"{{\\c{highlight_bgr}\\fscx108\\fscy108}}"
                             + upper_esc
                             + "{\\c&H00FFFFFF&\\fscx100\\fscy100}"
                         )
@@ -196,6 +255,7 @@ def generate_clip_ass_file(
     if not dialogue_lines:
         return None
 
+    credit_margin_v = 792 if is_vertical else 24
     header = "\n".join(
         [
             "[Script Info]",
@@ -209,10 +269,12 @@ def generate_clip_ass_file(
             "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, "
             "Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
             "Alignment, MarginL, MarginR, MarginV, Encoding",
-            f"Style: ViralSub,Arial Black,{sub_font_size},&H00FFFFFF,&H0015CCFA,&H00000000,&H80000000,"
+            f"Style: ViralSub,Arial Black,{sub_font_size},&H00FFFFFF,{highlight_bgr},&H00000000,&H80000000,"
             f"-1,0,0,0,100,100,0,0,1,5,2,2,48,48,{sub_margin_v},1",
-            f"Style: HookTitle,Arial Black,{hook_font_size},&H00FFFFFF,&H00FFFFFF,&H660F1117,&H660F1117,"
-            f"-1,0,0,0,100,100,0,0,3,16,0,8,60,60,{hook_margin_v},1",
+            f"Style: HookTitle,Arial Black,{hook_font_size},{hook_primary},{hook_primary},{hook_box},{hook_box},"
+            f"-1,0,0,0,100,100,0,0,3,{hook_outline_w},0,{hook_align},60,60,{hook_margin_v},1",
+            f"Style: SourceCredit,Arial,24,&HB0FFFFFF,&HB0FFFFFF,&H80000000,&H00000000,"
+            f"-1,0,0,0,100,100,0,0,1,2,1,7,28,28,{credit_margin_v},1",
             "",
             "[Events]",
             "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",

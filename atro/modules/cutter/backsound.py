@@ -1,4 +1,4 @@
-"""Local background music scanning, selection, and FFmpeg sidechain-ducking audio mixing."""
+"""Local background music mixing, opening voiceover concatenation, and sidechain ducking."""
 
 from __future__ import annotations
 
@@ -36,17 +36,45 @@ def build_audio_filter_chain(
     bgm_volume: float,
     enable_ducking: bool,
     enable_voice_polish: bool,
+    intro_tts_input_idx: Optional[int] = None,
+    intro_duration_sec: float = 0.0,
+    bgm_input_idx: int = 1,
 ) -> tuple[list[str], Optional[str]]:
     """Build FFmpeg filter_complex audio lines and return `(lines, output_label)`."""
-    dur = max(0.5, round(float(duration_sec), 3))
+    dur_main = max(0.5, round(float(duration_sec), 3))
+    dur_intro = max(0.0, round(float(intro_duration_sec), 3))
+    has_intro = intro_tts_input_idx is not None and dur_intro > 0.0
+    total_dur = round(dur_main + (dur_intro if has_intro else 0.0), 3)
     vol = max(0.0, min(1.0, float(bgm_volume)))
 
-    if not has_source_audio and not has_backsound:
+    if not has_source_audio and not has_backsound and not has_intro:
         return [], None
 
     lines: list[str] = []
+    has_speech_stream = has_source_audio or has_intro
 
-    if has_source_audio:
+    if has_intro:
+        lines.append(
+            f"[{intro_tts_input_idx}:a]aresample=48000,aformat=sample_rates=48000:channel_layouts=stereo,"
+            f"silenceremove=start_periods=1:start_threshold=-40dB,"
+            f"apad=whole_dur={dur_intro:.3f},atrim=0:{dur_intro:.3f},asetpts=PTS-STARTPTS,"
+            f"dynaudnorm=f=100:g=11:p=0.92:m=4[a_intro]"
+        )
+        if has_source_audio:
+            voice_parts = ["aresample=async=1:first_pts=0"]
+            if enable_voice_polish:
+                voice_parts.append("highpass=f=80,dynaudnorm=f=150:g=15:p=0.90:m=5")
+            voice_parts.append("aformat=sample_rates=48000:channel_layouts=stereo")
+            voice_parts.append(f"atrim=0:{dur_main:.3f},asetpts=PTS-STARTPTS")
+            lines.append(f"[0:a]{','.join(voice_parts)}[a_main]")
+        else:
+            lines.append(f"anullsrc=channel_layout=stereo:sample_rate=48000:d={dur_main:.3f}[a_main]")
+
+        target_lbl = "voice_clean" if has_backsound else "aout"
+        lines.append(f"[a_intro][a_main]concat=n=2:v=0:a=1[{target_lbl}]")
+        if not has_backsound:
+            return lines, "aout"
+    elif has_source_audio:
         voice_parts = ["aresample=async=1:first_pts=0"]
         if enable_voice_polish:
             voice_parts.append("highpass=f=80,dynaudnorm=f=150:g=15:p=0.90:m=5")
@@ -59,18 +87,18 @@ def build_audio_filter_chain(
         lines.append(f"[0:a]{voice_chain}[voice_clean]")
 
     if has_backsound:
-        fade_in = round(min(1.2, dur * 0.25), 3)
-        fade_out = round(min(1.5, dur * 0.30), 3)
-        fade_out_start = max(0.0, round(dur - fade_out, 3))
+        fade_in = round(min(1.2, total_dur * 0.25), 3)
+        fade_out = round(min(1.5, total_dur * 0.30), 3)
+        fade_out_start = max(0.0, round(total_dur - fade_out, 3))
         lines.append(
-            f"[1:a]atrim=0:{dur:.3f},asetpts=PTS-STARTPTS,"
+            f"[{bgm_input_idx}:a]atrim=0:{total_dur:.3f},asetpts=PTS-STARTPTS,"
             f"aformat=sample_rates=48000:channel_layouts=stereo,"
             f"volume={vol:.3f},"
             f"afade=t=in:st=0:d={fade_in:.3f},"
             f"afade=t=out:st={fade_out_start:.3f}:d={fade_out:.3f}[bgm_base]"
         )
 
-        if has_source_audio:
+        if has_speech_stream:
             if enable_ducking:
                 lines.append("[voice_clean]asplit=2[voice_main][voice_sc]")
                 lines.append(
