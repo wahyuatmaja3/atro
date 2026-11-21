@@ -28,6 +28,7 @@ hiddenimports = [
     "huggingface_hub",
     "av",
     "cv2",
+    "numpy",
     "edge_tts",
     "aiohttp",
 ]

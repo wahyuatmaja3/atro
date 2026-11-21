@@ -12,8 +12,7 @@ $SpecFile = Join-Path $ScriptDir "atro.spec"
 $WorkDir = Join-Path $ScriptDir "work"
 $DistDir = Join-Path $ProjectRoot "dist"
 $OnedirTarget = Join-Path $DistDir "ATRO"
-$PreserveDir = Join-Path $WorkDir "_preserve_dist"
-$UserItems = @("config.json", ".env", "workspace", "bin", "backsound")
+$StageDist = Join-Path $WorkDir "_stage_dist"
 
 if (-not (Test-Path $PyInstaller)) {
     throw "PyInstaller tidak ditemukan di '$PyInstaller'. Pastikan .venv sudah terinstall."
@@ -26,35 +25,22 @@ if ($running) {
 
 if ($OneFile) {
     $env:ATRO_ONEFILE = "1"
+    $PyDistPath = $DistDir
     Write-Host "[ATRO Build] Mode: --onefile"
 } else {
     $env:ATRO_ONEFILE = "0"
-    Write-Host "[ATRO Build] Mode: --onedir"
-}
-
-# Backup user runtime data from dist\ATRO before PyInstaller --onedir cleans it
-$BackedUpItems = @()
-if (-not $OneFile -and (Test-Path $OnedirTarget)) {
-    if (Test-Path $PreserveDir) {
-        Remove-Item -Path $PreserveDir -Recurse -Force
+    $PyDistPath = $StageDist
+    if (Test-Path $StageDist) {
+        Remove-Item -Path $StageDist -Recurse -Force
     }
-    New-Item -ItemType Directory -Path $PreserveDir -Force | Out-Null
-
-    foreach ($item in $UserItems) {
-        $src = Join-Path $OnedirTarget $item
-        if (Test-Path $src) {
-            $dst = Join-Path $PreserveDir $item
-            Move-Item -Path $src -Destination $dst -Force
-            $BackedUpItems += $item
-            Write-Host "[ATRO Build] Mengamankan data user: $item"
-        }
-    }
+    New-Item -ItemType Directory -Path $StageDist -Force | Out-Null
+    Write-Host "[ATRO Build] Mode: --onedir (staging ke $StageDist agar data user tetap aman)"
 }
 
 $argsList = @(
     "--noconfirm",
     "--workpath", $WorkDir,
-    "--distpath", $DistDir
+    "--distpath", $PyDistPath
 )
 if ($Clean) {
     $argsList += "--clean"
@@ -67,23 +53,35 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "PyInstaller gagal dengan exit code $LASTEXITCODE"
     }
-} finally {
-    if (-not $OneFile -and $BackedUpItems.Count -gt 0) {
+
+    if (-not $OneFile) {
+        $StagedTarget = Join-Path $StageDist "ATRO"
+        $StagedExe = Join-Path $StagedTarget "ATRO.exe"
+        $StagedInternal = Join-Path $StagedTarget "_internal"
+        if (-not (Test-Path $StagedExe)) {
+            throw "Staged executable tidak ditemukan di '$StagedExe'"
+        }
+
         New-Item -ItemType Directory -Path $OnedirTarget -Force | Out-Null
-        foreach ($item in $BackedUpItems) {
-            $src = Join-Path $PreserveDir $item
-            $dst = Join-Path $OnedirTarget $item
-            if (Test-Path $src) {
-                if (Test-Path $dst) {
-                    Remove-Item -Path $dst -Recurse -Force
-                }
-                Move-Item -Path $src -Destination $dst -Force
-                Write-Host "[ATRO Build] Memulihkan data user: $item"
-            }
+        $DestExe = Join-Path $OnedirTarget "ATRO.exe"
+        $DestInternal = Join-Path $OnedirTarget "_internal"
+
+        if (Test-Path $DestExe) {
+            Remove-Item -Path $DestExe -Force
         }
-        if (Test-Path $PreserveDir) {
-            Remove-Item -Path $PreserveDir -Recurse -Force
+        if (Test-Path $DestInternal) {
+            Remove-Item -Path $DestInternal -Recurse -Force
         }
+
+        Move-Item -Path $StagedExe -Destination $DestExe -Force
+        if (Test-Path $StagedInternal) {
+            Move-Item -Path $StagedInternal -Destination $DestInternal -Force
+        }
+        Write-Host "[ATRO Build] Memperbarui ATRO.exe & _internal tanpa menyentuh workspace/config user."
+    }
+} finally {
+    if (-not $OneFile -and (Test-Path $StageDist)) {
+        Remove-Item -Path $StageDist -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 
