@@ -8,8 +8,73 @@ from pathlib import Path
 from typing import Optional
 
 from atro.core.logging_utils import JobLogger
-from atro.core.schemas import TranscriptSegment
+from atro.core.schemas import TranscriptSegment, TranscriptWord
 from atro.core.subprocess_utils import JobCancelledError, run_subprocess_streaming
+
+_PUNCT_ONLY = set(".,!?;:…'\"”’)]}")
+
+
+def build_segments_from_whisper_words(
+    raw_words: list[tuple[str, float, float]],
+    fallback_start: float,
+    fallback_end: float,
+    fallback_text: str,
+    start_index: int = 0,
+    pause_split_sec: float = 0.35,
+) -> list[TranscriptSegment]:
+    """Build pause-split TranscriptSegments with exact word onsets from Whisper word timestamps."""
+    cleaned_words: list[TranscriptWord] = []
+    for raw_tok, raw_s, raw_e in raw_words:
+        tok = (raw_tok or "").strip()
+        if not tok:
+            continue
+        w_start = round(max(0.0, float(raw_s)), 3)
+        w_end = round(max(w_start + 0.04, float(raw_e)), 3)
+        if cleaned_words and all(ch in _PUNCT_ONLY for ch in tok):
+            prev = cleaned_words[-1]
+            cleaned_words[-1] = TranscriptWord(
+                word=prev.word + tok,
+                start=prev.start,
+                end=max(prev.end, w_end),
+            )
+        else:
+            cleaned_words.append(TranscriptWord(word=tok, start=w_start, end=w_end))
+
+    if not cleaned_words:
+        text = (fallback_text or "").strip()
+        start = round(max(0.0, float(fallback_start)), 3)
+        end = round(float(fallback_end), 3)
+        if not text or end <= start:
+            return []
+        return [TranscriptSegment(index=start_index, start=start, end=end, text=text)]
+
+    groups: list[list[TranscriptWord]] = [[cleaned_words[0]]]
+    for w in cleaned_words[1:]:
+        prev_w = groups[-1][-1]
+        gap = w.start - prev_w.end
+        if gap >= pause_split_sec:
+            groups.append([w])
+        else:
+            groups[-1].append(w)
+
+    segments: list[TranscriptSegment] = []
+    idx = start_index
+    for grp in groups:
+        seg_start = round(max(0.0, grp[0].start), 3)
+        seg_end = round(max(seg_start + 0.08, grp[-1].end), 3)
+        seg_text = " ".join(w.word for w in grp).strip()
+        if seg_text and seg_end > seg_start:
+            segments.append(
+                TranscriptSegment(
+                    index=idx,
+                    start=seg_start,
+                    end=seg_end,
+                    text=seg_text,
+                    words=grp,
+                )
+            )
+            idx += 1
+    return segments
 
 
 async def extract_audio_wav(
@@ -67,7 +132,17 @@ def _run_faster_whisper_sync(
             f"Memuat faster-whisper model='{model_name}', device='{device}', compute_type='{compute_type}'...",
         )
         model = WhisperModel(model_name, device=device, compute_type=compute_type)
-        segments_iter, info = model.transcribe(str(audio_path), vad_filter=True, beam_size=5)
+        segments_iter, info = model.transcribe(
+            str(audio_path),
+            vad_filter=True,
+            vad_parameters=dict(
+                min_silence_duration_ms=300,
+                speech_pad_ms=80,
+            ),
+            word_timestamps=True,
+            condition_on_previous_text=False,
+            beam_size=5,
+        )
 
         results: list[TranscriptSegment] = []
         last_pct = -1.0
@@ -75,21 +150,25 @@ def _run_faster_whisper_sync(
             if cancel_event and cancel_event.is_set():
                 raise JobCancelledError("Transkripsi Whisper dibatalkan.")
 
-            text = (raw_seg.text or "").strip()
-            start = round(max(0.0, float(raw_seg.start)), 3)
-            end = round(float(raw_seg.end), 3)
-            if not text or end <= start:
-                continue
-
-            results.append(
-                TranscriptSegment(
-                    index=len(results),
-                    start=start,
-                    end=end,
-                    text=text,
+            raw_words_attr = getattr(raw_seg, "words", None) or []
+            raw_word_tuples = [
+                (
+                    str(getattr(w, "word", "") or ""),
+                    float(getattr(w, "start", raw_seg.start)),
+                    float(getattr(w, "end", raw_seg.end)),
                 )
+                for w in raw_words_attr
+            ]
+            built = build_segments_from_whisper_words(
+                raw_words=raw_word_tuples,
+                fallback_start=float(raw_seg.start),
+                fallback_end=float(raw_seg.end),
+                fallback_text=str(raw_seg.text or ""),
+                start_index=len(results),
             )
-            pct = min(100.0, (end / max(video_duration_sec, 1.0)) * 100.0)
+            results.extend(built)
+            seg_end_val = built[-1].end if built else float(raw_seg.end)
+            pct = min(100.0, (seg_end_val / max(video_duration_sec, 1.0)) * 100.0)
             if pct - last_pct >= 2.0 or pct >= 100.0:
                 last_pct = pct
                 _emit_progress(pct)
