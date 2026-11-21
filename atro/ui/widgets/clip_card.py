@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
+from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -30,6 +31,8 @@ def _fmt_sec(sec: float) -> str:
 
 class ClipCard(QFrame):
     """Displays metadata and playback actions for one rendered MP4 clip."""
+
+    customize_requested = pyqtSignal(int)
 
     def __init__(self, clip: RenderedClip, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -73,7 +76,14 @@ class ClipCard(QFrame):
 
         edit_tags: list[str] = []
         if clip.edit_format:
-            edit_tags.append(f"Format: {'Game' if clip.edit_format == 'game' else 'Podcast'}")
+            fmt_labels = {
+                "game": "Game",
+                "gaming_split": "Gaming Split",
+                "twitch_comment": "Twitch Comment",
+                "subathon": "Subathon",
+                "podcast": "Podcast",
+            }
+            edit_tags.append(f"Format: {fmt_labels.get(clip.edit_format, clip.edit_format)}")
         if clip.opening_tts_used:
             edit_tags.append("Suara Opening: Ya")
         if clip.subtitles_burned:
@@ -91,7 +101,7 @@ class ClipCard(QFrame):
         # Reason text
         reason_lbl = QLabel(clip.reason)
         reason_lbl.setWordWrap(True)
-        reason_lbl.setStyleSheet("color: #CBD5E1; font-size: 12px;")
+        reason_lbl.setStyleSheet("color: #D6D3D1; font-size: 12px;")
         root.addWidget(reason_lbl)
 
         # Actions row
@@ -103,10 +113,15 @@ class ClipCard(QFrame):
         locate_btn.setObjectName("SmallAction")
         locate_btn.clicked.connect(self._reveal_in_explorer)
 
+        customize_btn = QPushButton("Ubah Style & Live Preview ->")
+        customize_btn.setObjectName("SmallAction")
+        customize_btn.clicked.connect(lambda: self.customize_requested.emit(self._clip.clip_index))
+
         play_btn = QPushButton("Putar Klip")
         play_btn.setObjectName("PrimaryButton")
         play_btn.clicked.connect(self._open_clip)
 
+        actions.addWidget(customize_btn)
         actions.addWidget(locate_btn)
         actions.addWidget(play_btn)
         root.addLayout(actions)

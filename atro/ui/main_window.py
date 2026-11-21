@@ -1,4 +1,4 @@
-"""Main flat modern PyQt6 window for ATRO."""
+"""WinUI 3 Fluent Step-by-Step Wizard UI for ATRO (Orange Base Theme)."""
 
 from __future__ import annotations
 
@@ -7,8 +7,10 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QCloseEvent
+import cv2
+import numpy as np
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QCloseEvent, QMouseEvent
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -16,35 +18,48 @@ from PyQt6.QtWidgets import (
     QDoubleSpinBox,
     QFileDialog,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMainWindow,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QSpinBox,
-    QSplitter,
     QStackedWidget,
-    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from atro import APP_NAME, __version__
 from atro.config import AppSettings, load_settings, save_settings
+from atro.core.presets import (
+    CAPTION_RECIPES,
+    READY_TEMPLATES,
+    build_ready_template_config,
+    normalize_ready_template_id,
+)
 from atro.core.schemas import (
     JobRequest,
     JobState,
     JobStatus,
     PreflightReport,
     RenderResult,
+    TranscriptSegment,
+    TranscriptWord,
 )
 from atro.modules.cutter.backsound import scan_backsound_tracks
+from atro.modules.cutter.service import apply_initial_style_overrides
 from atro.pipeline.state_store import list_all_jobs
 from atro.ui.theme import build_stylesheet
-from atro.ui.widgets import ClipCard, JobCard, LogViewer, SettingsDialog
+from atro.ui.widgets import ClipCard, ClipStudioWidget, JobCard, LogViewer, SettingsDialog
+from atro.ui.widgets.clip_studio import ColorSwatchButton, ReadyTemplateCard
+from atro.ui.widgets.preview_canvas import LivePreviewCanvas9x16
 from atro.ui.worker_bridge import WorkerBridge
+
+StylePresetCard = ReadyTemplateCard
 
 
 def _repolish(widget: QWidget) -> None:
@@ -55,7 +70,7 @@ def _repolish(widget: QWidget) -> None:
 
 
 class MainWindow(QMainWindow):
-    """Flat modern desktop interface for the ATRO async AutoClip pipeline."""
+    """4-Step WinUI 3 Fluent interface for ATRO AutoClip & Live Composer."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -64,19 +79,24 @@ class MainWindow(QMainWindow):
         self._jobs: dict[str, JobState] = {}
         self._job_cards: dict[str, JobCard] = {}
         self._selected_job_id: Optional[str] = None
+        self._style_cards: dict[str, StylePresetCard] = {}
+        self._current_step: int = 0
 
-        self.setWindowTitle(f"{APP_NAME} — Local AutoClip Studio")
-        self.resize(1180, 760)
-        self.setMinimumSize(940, 620)
+        self.setWindowTitle(f"{APP_NAME} — AutoClip Studio")
+        self.resize(1340, 860)
+        self.setMinimumSize(1020, 680)
 
         self._bridge = WorkerBridge(settings_provider=self._get_settings, parent=self)
         self._bridge.preflight_ready.connect(self._on_preflight_ready)
         self._bridge.job_updated.connect(self._on_job_updated)
         self._bridge.log_received.connect(self._on_log_received)
         self._bridge.bridge_error.connect(self._on_bridge_error)
+        self._bridge.custom_clip_rendered.connect(self._on_custom_clip_rendered)
+        self._bridge.standalone_clip_rendered.connect(self._on_standalone_clip_rendered)
 
         self._build_ui()
         self._load_existing_jobs()
+        self.go_to_step(0)
 
         self._bridge.start()
         self._bridge.refresh_preflight()
@@ -88,52 +108,72 @@ class MainWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         main_layout = QVBoxLayout(central)
-        main_layout.setContentsMargins(16, 16, 16, 16)
+        main_layout.setContentsMargins(14, 14, 14, 14)
         main_layout.setSpacing(12)
 
-        # 1. Top Bar
+        # 1. WinUI Top Navigation & 4-Step Stepper Bar
         top_bar = QFrame()
         top_bar.setObjectName("TopBar")
         top_layout = QHBoxLayout(top_bar)
-        top_layout.setContentsMargins(16, 12, 16, 12)
+        top_layout.setContentsMargins(14, 10, 14, 10)
         top_layout.setSpacing(10)
 
         brand = QLabel(APP_NAME)
         brand.setObjectName("BrandTitle")
         version_pill = QLabel(f"v{__version__}")
         version_pill.setObjectName("VersionPill")
-        self.subtitle_label = QLabel(f"AutoClip Pipeline • {self._settings.active_provider_summary()}")
+        self.subtitle_label = QLabel(self._settings.active_provider_summary())
         self.subtitle_label.setObjectName("MutedText")
 
         top_layout.addWidget(brand)
         top_layout.addWidget(version_pill)
-        top_layout.addSpacing(4)
         top_layout.addWidget(self.subtitle_label)
+        top_layout.addSpacing(8)
+
+        # 4-Step Interactive Stepper Bar
+        self.step_buttons: list[QPushButton] = []
+        for idx, title in enumerate(
+            (
+                "1. Daftar Job",
+                "2. Pilih Klip & Style",
+                "3. Proses & Hasil",
+                "4. Live Preview",
+            )
+        ):
+            btn = QPushButton(title)
+            btn.setObjectName("StepperNode")
+            btn.setProperty("active", False)
+            btn.setProperty("done", False)
+            btn.clicked.connect(lambda _c=False, s=idx: self.go_to_step(s))
+            self.step_buttons.append(btn)
+            top_layout.addWidget(btn)
+        self.step_btn_1, self.step_btn_2, self.step_btn_3, self.step_btn_4 = self.step_buttons
+
         top_layout.addStretch()
 
-        self.ytdlp_pill = QLabel("yt-dlp: ...")
+        self.ytdlp_pill = QLabel("YouTube: ...")
         self.ytdlp_pill.setObjectName("StatusPill")
         self.ytdlp_pill.setProperty("tone", "neutral")
 
-        self.ffmpeg_pill = QLabel("ffmpeg: ...")
+        self.ffmpeg_pill = QLabel("Mesin Video: ...")
         self.ffmpeg_pill.setObjectName("StatusPill")
         self.ffmpeg_pill.setProperty("tone", "neutral")
 
-        self.apikey_pill = QLabel("API Key: ...")
+        self.apikey_pill = QLabel("AI: ...")
         self.apikey_pill.setObjectName("StatusPill")
         self.apikey_pill.setProperty("tone", "neutral")
 
         self.settings_btn = QPushButton("Pengaturan")
+        self.settings_btn.setObjectName("SmallAction")
         self.settings_btn.clicked.connect(self._open_settings)
 
         top_layout.addWidget(self.ytdlp_pill)
         top_layout.addWidget(self.ffmpeg_pill)
         top_layout.addWidget(self.apikey_pill)
-        top_layout.addSpacing(6)
         top_layout.addWidget(self.settings_btn)
         main_layout.addWidget(top_bar)
 
-        # 2. Startup Alert Banner (shown only on error/warning)
+        # Startup Alert Banner
         self.alert_banner = QFrame()
         self.alert_banner.setObjectName("AlertBanner")
         self.alert_banner.setVisible(False)
@@ -144,136 +184,526 @@ class MainWindow(QMainWindow):
         alert_layout.addWidget(self.alert_label, 1)
         main_layout.addWidget(self.alert_banner)
 
-        # 3. Input Card
-        input_card = QFrame()
-        input_card.setObjectName("Card")
-        input_layout = QVBoxLayout(input_card)
-        input_layout.setContentsMargins(16, 14, 16, 14)
-        input_layout.setSpacing(12)
+        # 2. 4-Step Wizard Stack
+        self.wizard_stack = QStackedWidget()
+        self.wizard_stack.addWidget(self._build_step1_jobs_page())
+        self.wizard_stack.addWidget(self._build_step2_config_page())
+        self.wizard_stack.addWidget(self._build_step3_results_page())
+        self.wizard_stack.addWidget(self._build_step4_studio_page())
+        main_layout.addWidget(self.wizard_stack, 1)
 
-        # Source Mode Switch Row
-        mode_row = QHBoxLayout()
-        mode_row.setSpacing(8)
+    # --- STEP 1: Daftar Job & Project ---
+    def _build_step1_jobs_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
 
-        self.mode_youtube_btn = QPushButton("URL YouTube")
+        # WinUI Hero Card
+        hero = QFrame()
+        hero.setObjectName("HeroCard")
+        hero_layout = QHBoxLayout(hero)
+        hero_layout.setContentsMargins(20, 18, 20, 18)
+        hero_layout.setSpacing(16)
+
+        hero_text = QVBoxLayout()
+        hero_text.setSpacing(4)
+        hero_title = QLabel("Buat Klip Video Viral Secara Step-by-Step")
+        hero_title.setObjectName("HeroTitle")
+        hero_sub = QLabel(
+            "1. Pilih video & tentukan style klip di awal  •  2. Biarkan AI memotong otomatis  •  "
+            "3. Sesuaikan lagi di Live Preview 9:16 jika perlu."
+        )
+        hero_sub.setObjectName("MutedText")
+        hero_sub.setWordWrap(True)
+        hero_text.addWidget(hero_title)
+        hero_text.addWidget(hero_sub)
+        hero_layout.addLayout(hero_text, 1)
+
+        self.quick_studio_btn = QPushButton("Buka Studio Live Preview")
+        self.quick_studio_btn.clicked.connect(lambda: self.go_to_step(3))
+
+        self.new_project_btn = QPushButton("+ Buat Project Klip Baru ->")
+        self.new_project_btn.setObjectName("HeroButton")
+        self.new_project_btn.clicked.connect(lambda: self.go_to_step(1))
+
+        hero_layout.addWidget(self.quick_studio_btn)
+        hero_layout.addWidget(self.new_project_btn)
+        layout.addWidget(hero)
+
+        # Jobs List Card
+        jobs_card = QFrame()
+        jobs_card.setObjectName("WinUICard")
+        jl = QVBoxLayout(jobs_card)
+        jl.setContentsMargins(16, 14, 16, 14)
+        jl.setSpacing(10)
+
+        hdr = QHBoxLayout()
+        step_badge = QLabel("Langkah 1")
+        step_badge.setObjectName("StepBadge")
+        title = QLabel("Daftar Job & Riwayat Pembuatan Klip")
+        title.setObjectName("SectionTitle")
+        self.job_count_pill = QLabel("0")
+        self.job_count_pill.setObjectName("VersionPill")
+        hint = QLabel("Klik salah satu job untuk melihat progres, hasil klip, atau mengedit ulang di Live Preview.")
+        hint.setObjectName("MutedText")
+
+        hdr.addWidget(step_badge)
+        hdr.addWidget(title)
+        hdr.addWidget(self.job_count_pill)
+        hdr.addSpacing(8)
+        hdr.addWidget(hint, 1)
+        jl.addLayout(hdr)
+
+        self.jobs_scroll = QScrollArea()
+        self.jobs_scroll.setWidgetResizable(True)
+        self.jobs_container = QWidget()
+        self.jobs_vbox = QVBoxLayout(self.jobs_container)
+        self.jobs_vbox.setContentsMargins(0, 0, 4, 0)
+        self.jobs_vbox.setSpacing(8)
+        self.jobs_empty_label = QLabel(
+            "Belum ada daftar job.\nKlik tombol '+ Buat Project Klip Baru ->' di atas untuk memulai."
+        )
+        self.jobs_empty_label.setObjectName("MutedText")
+        self.jobs_empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.jobs_empty_label.setWordWrap(True)
+        self.jobs_vbox.addWidget(self.jobs_empty_label)
+        self.jobs_vbox.addStretch()
+        self.jobs_scroll.setWidget(self.jobs_container)
+        jl.addWidget(self.jobs_scroll, 1)
+
+        layout.addWidget(jobs_card, 1)
+        return page
+
+    # --- STEP 2: Sumber Video, Jumlah Klip & Style Klip Awal ---
+    def _build_step2_config_page(self) -> QWidget:
+        page = QWidget()
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(10)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        body = QWidget()
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 6, 0)
+        body_layout.setSpacing(12)
+
+        # Card 2A: Sumber Video
+        src_card = QFrame()
+        src_card.setObjectName("WinUICard")
+        src_l = QVBoxLayout(src_card)
+        src_l.setContentsMargins(16, 14, 16, 14)
+        src_l.setSpacing(10)
+
+        src_hdr = QHBoxLayout()
+        b2a = QLabel("2A")
+        b2a.setObjectName("StepBadge")
+        t2a = QLabel("Pilih Sumber Video")
+        t2a.setObjectName("SectionTitle")
+        self.mode_youtube_btn = QPushButton("Dari Link YouTube")
         self.mode_youtube_btn.setObjectName("ModeSwitch")
         self.mode_youtube_btn.setCheckable(True)
         self.mode_youtube_btn.setChecked(True)
         self.mode_youtube_btn.clicked.connect(lambda: self._set_source_mode("youtube_url"))
 
-        self.mode_local_btn = QPushButton("Video Lokal")
+        self.mode_local_btn = QPushButton("Dari File Video Komputer")
         self.mode_local_btn.setObjectName("ModeSwitch")
         self.mode_local_btn.setCheckable(True)
         self.mode_local_btn.clicked.connect(lambda: self._set_source_mode("local_file"))
 
-        mode_hint = QLabel("Upload video MP4/MKV/MOV dari komputer jika YouTube dibatasi")
-        mode_hint.setObjectName("MutedText")
+        src_hdr.addWidget(b2a)
+        src_hdr.addWidget(t2a)
+        src_hdr.addSpacing(10)
+        src_hdr.addWidget(self.mode_youtube_btn)
+        src_hdr.addWidget(self.mode_local_btn)
+        src_hdr.addStretch()
+        src_l.addLayout(src_hdr)
 
-        mode_row.addWidget(self.mode_youtube_btn)
-        mode_row.addWidget(self.mode_local_btn)
-        mode_row.addSpacing(8)
-        mode_row.addWidget(mode_hint, 1)
-        input_layout.addLayout(mode_row)
-
-        # Stacked Source Input Pages
         self.source_stack = QStackedWidget()
 
-        # Page 0: YouTube URL
         yt_page = QWidget()
-        yt_page_layout = QVBoxLayout(yt_page)
-        yt_page_layout.setContentsMargins(0, 0, 0, 0)
-        url_row = QHBoxLayout()
-        url_row.setSpacing(10)
+        yt_l = QHBoxLayout(yt_page)
+        yt_l.setContentsMargins(0, 0, 0, 0)
+        yt_l.setSpacing(10)
         self.url_input = QLineEdit()
-        self.url_input.setPlaceholderText("Tempel URL video YouTube di sini (contoh: https://www.youtube.com/watch?v=...)")
+        self.url_input.setPlaceholderText("Tempel link video YouTube di sini (contoh: https://www.youtube.com/watch?v=...)")
         self.url_input.returnPressed.connect(self._submit_job)
-
-        self.yt_start_btn = QPushButton("Mulai AutoClip")
+        self.yt_start_btn = QPushButton("Mulai Proses Sekarang ->")
         self.yt_start_btn.setObjectName("PrimaryButton")
         self.yt_start_btn.clicked.connect(self._submit_job)
+        yt_l.addWidget(self.url_input, 1)
+        yt_l.addWidget(self.yt_start_btn)
 
-        url_row.addWidget(self.url_input, 1)
-        url_row.addWidget(self.yt_start_btn)
-        yt_page_layout.addLayout(url_row)
-        yt_page_layout.addStretch()
-
-        # Page 1: Local Video Upload + Optional Subtitle
         local_page = QWidget()
-        local_page_layout = QVBoxLayout(local_page)
-        local_page_layout.setContentsMargins(0, 0, 0, 0)
-        local_page_layout.setSpacing(8)
-
-        local_video_row = QHBoxLayout()
-        local_video_row.setSpacing(8)
+        loc_l = QVBoxLayout(local_page)
+        loc_l.setContentsMargins(0, 0, 0, 0)
+        loc_l.setSpacing(8)
+        lv_row = QHBoxLayout()
+        lv_row.setSpacing(8)
         self.local_video_input = QLineEdit()
         self.local_video_input.setPlaceholderText("Pilih file video lokal (.mp4, .mkv, .mov, .webm)...")
         self.local_video_input.returnPressed.connect(self._submit_job)
-
         browse_video_btn = QPushButton("Pilih Video...")
         browse_video_btn.clicked.connect(self._browse_local_video)
-
-        self.local_start_btn = QPushButton("Mulai AutoClip")
+        self.local_start_btn = QPushButton("Mulai Proses Sekarang ->")
         self.local_start_btn.setObjectName("PrimaryButton")
         self.local_start_btn.clicked.connect(self._submit_job)
+        lv_row.addWidget(self.local_video_input, 1)
+        lv_row.addWidget(browse_video_btn)
+        lv_row.addWidget(self.local_start_btn)
+        loc_l.addLayout(lv_row)
 
-        local_video_row.addWidget(self.local_video_input, 1)
-        local_video_row.addWidget(browse_video_btn)
-        local_video_row.addWidget(self.local_start_btn)
-        local_page_layout.addLayout(local_video_row)
-
-        local_sub_row = QHBoxLayout()
-        local_sub_row.setSpacing(8)
+        ls_row = QHBoxLayout()
+        ls_row.setSpacing(8)
         self.local_sub_input = QLineEdit()
         self.local_sub_input.setPlaceholderText(
-            "Opsional: file subtitle (.vtt / .srt) — kosongkan agar otomatis pakai faster-whisper"
+            "Opsional: file subtitle (.vtt / .srt) — biarkan kosong agar ditranskrip otomatis oleh AI"
         )
-
         browse_sub_btn = QPushButton("Pilih Subtitle")
         browse_sub_btn.setObjectName("SmallAction")
         browse_sub_btn.clicked.connect(self._browse_local_subtitle)
-
         clear_sub_btn = QPushButton("Hapus")
         clear_sub_btn.setObjectName("SmallAction")
         clear_sub_btn.clicked.connect(self.local_sub_input.clear)
-
-        local_sub_row.addWidget(self.local_sub_input, 1)
-        local_sub_row.addWidget(browse_sub_btn)
-        local_sub_row.addWidget(clear_sub_btn)
-        local_page_layout.addLayout(local_sub_row)
+        ls_row.addWidget(self.local_sub_input, 1)
+        ls_row.addWidget(browse_sub_btn)
+        ls_row.addWidget(clear_sub_btn)
+        loc_l.addLayout(ls_row)
 
         self.source_stack.addWidget(yt_page)
         self.source_stack.addWidget(local_page)
         self.source_stack.setCurrentIndex(0)
         self._sync_stack_height()
-        input_layout.addWidget(self.source_stack)
+        src_l.addWidget(self.source_stack)
+        body_layout.addWidget(src_card)
 
-        # Optional parameters row
-        params_row = QHBoxLayout()
-        params_row.setSpacing(14)
+        # Card 2B: Jumlah Klip & Durasi
+        cnt_card = QFrame()
+        cnt_card.setObjectName("WinUICard")
+        cnt_l = QVBoxLayout(cnt_card)
+        cnt_l.setContentsMargins(16, 14, 16, 14)
+        cnt_l.setSpacing(10)
 
+        cnt_hdr = QHBoxLayout()
+        b2b = QLabel("2B")
+        b2b.setObjectName("StepBadge")
+        t2b = QLabel("Tentukan Berapa Klip & Durasi yang Diinginkan")
+        t2b.setObjectName("SectionTitle")
+        cnt_hdr.addWidget(b2b)
+        cnt_hdr.addWidget(t2b)
+        cnt_hdr.addStretch()
+        cnt_l.addLayout(cnt_hdr)
+
+        cnt_row = QHBoxLayout()
+        cnt_row.setSpacing(16)
         self.clip_count_spin = QSpinBox()
         self.clip_count_spin.setRange(1, 10)
         self.clip_count_spin.setValue(self._settings.default_clip_count)
 
         self.min_dur_spin = QSpinBox()
         self.min_dur_spin.setRange(5, 300)
-        self.min_dur_spin.setSuffix(" s")
+        self.min_dur_spin.setSuffix(" detik")
         self.min_dur_spin.setValue(self._settings.default_min_duration_sec)
 
         self.max_dur_spin = QSpinBox()
         self.max_dur_spin.setRange(10, 600)
-        self.max_dur_spin.setSuffix(" s")
+        self.max_dur_spin.setSuffix(" detik")
         self.max_dur_spin.setValue(self._settings.default_max_duration_sec)
 
         self.aspect_combo = QComboBox()
         self.aspect_combo.addItems(["9:16", "16:9"])
         self.aspect_combo.setCurrentText(self._settings.default_aspect_ratio)
 
+        for lbl_t, w in (
+            ("Jumlah Klip:", self.clip_count_spin),
+            ("Durasi Minimal:", self.min_dur_spin),
+            ("Durasi Maksimal:", self.max_dur_spin),
+            ("Bentuk Video:", self.aspect_combo),
+        ):
+            grp = QHBoxLayout()
+            grp.setSpacing(6)
+            lbl = QLabel(lbl_t)
+            lbl.setObjectName("FieldLabel")
+            grp.addWidget(lbl)
+            grp.addWidget(w)
+            cnt_row.addLayout(grp)
+        cnt_row.addStretch()
+        cnt_l.addLayout(cnt_row)
+        body_layout.addWidget(cnt_card)
+
+        # Card 2C: Pilih Style Klip di Awal (Sebelum Transcribe & Clipping)
+        sty_card = QFrame()
+        sty_card.setObjectName("WinUICard")
+        sty_l = QVBoxLayout(sty_card)
+        sty_l.setContentsMargins(16, 14, 16, 14)
+        sty_l.setSpacing(12)
+
+        sty_hdr = QHBoxLayout()
+        b2c = QLabel("2C")
+        b2c.setObjectName("StepBadge")
+        t2c = QLabel("Pilih Style Klip Awal (Dipakai Sebelum Transcribe & Clipping)")
+        t2c.setObjectName("SectionTitle")
+        reassure = QLabel("Tenang: semua style ini masih bisa Anda ubah lagi di Langkah 4 (Live Preview) setelah klip jadi.")
+        reassure.setObjectName("MutedText")
+        sty_hdr.addWidget(b2c)
+        sty_hdr.addWidget(t2c)
+        sty_hdr.addSpacing(8)
+        sty_hdr.addWidget(reassure, 1)
+        sty_l.addLayout(sty_hdr)
+
+        # Hidden/synced combo for compatibility
         self.format_combo = QComboBox()
         self.format_combo.addItem("Podcast", "podcast")
         self.format_combo.addItem("Game", "game")
-        fmt_idx = self.format_combo.findData(self._settings.default_edit_format)
-        self.format_combo.setCurrentIndex(max(0, fmt_idx))
+        self.format_combo.addItem("Twitch Comment", "twitch_comment")
+        self.format_combo.addItem("Subathon", "subathon")
+        self.format_combo.setVisible(False)
+
+        cards_grid = QGridLayout()
+        cards_grid.setSpacing(10)
+        for idx, (tid, meta) in enumerate(READY_TEMPLATES.items()):
+            sc = ReadyTemplateCard(
+                tid,
+                str(meta["badge"]),
+                str(meta["title"]),
+                str(meta["description"]),
+            )
+            sc.clicked.connect(self._select_initial_style)
+            self._style_cards[tid] = sc
+            cards_grid.addWidget(sc, idx // 4, idx % 4)
+        sty_l.addLayout(cards_grid)
+
+        self._selected_template_id: str = "podcast"
+        self._syncing_step2 = False
+        self._step2_sample_frame = self._build_step2_sample_frame()
+        self._step2_sample_segments = [
+            TranscriptSegment(
+                index=0,
+                start=0.0,
+                end=4.2,
+                text="Cara gila cuan cepat!",
+                words=[
+                    TranscriptWord(word="Cara", start=0.1, end=0.7),
+                    TranscriptWord(word="gila", start=0.7, end=1.3),
+                    TranscriptWord(word="cuan", start=1.3, end=2.2),
+                    TranscriptWord(word="cepat!", start=2.2, end=4.0),
+                ],
+            )
+        ]
+
+        composer_split = QHBoxLayout()
+        composer_split.setSpacing(14)
+
+        left_ctrl = QWidget()
+        left_l = QVBoxLayout(left_ctrl)
+        left_l.setContentsMargins(0, 0, 0, 0)
+        left_l.setSpacing(10)
+
+        # Row 1: Layout & PiP controls
+        layout_row = QHBoxLayout()
+        layout_row.setSpacing(10)
+        self.init_layout_mode_combo = QComboBox()
+        self.init_layout_mode_combo.addItem("Sesuai Kartu Preset", "")
+        self.init_layout_mode_combo.addItem("1 Orang Penuh (Podcast)", "single_focus")
+        self.init_layout_mode_combo.addItem("Split Atas-Bawah (Gaming)", "split_screen")
+        self.init_layout_mode_combo.addItem("PiP Facecam Mengambang", "pip_facecam")
+        self.init_layout_mode_combo.addItem("Bingkai + Blur (Streamer)", "blurred_frame")
+        self.init_layout_mode_combo.addItem("2 Pembicara (Multi-Speaker)", "multi_speaker_split")
+        self.init_layout_mode_combo.currentIndexChanged.connect(self._on_step2_style_mutated)
+
+        self.init_pip_shape_combo = QComboBox()
+        self.init_pip_shape_combo.addItem("PiP Bulat", "circle")
+        self.init_pip_shape_combo.addItem("PiP Kotak", "rounded_rect")
+        self.init_pip_shape_combo.currentIndexChanged.connect(self._on_step2_style_mutated)
+
+        self.init_pip_pos_combo = QComboBox()
+        self.init_pip_pos_combo.addItem("Kanan Atas", "top_right")
+        self.init_pip_pos_combo.addItem("Kiri Atas", "top_left")
+        self.init_pip_pos_combo.addItem("Kanan Bawah", "bottom_right")
+        self.init_pip_pos_combo.addItem("Kiri Bawah", "bottom_left")
+        self.init_pip_pos_combo.currentIndexChanged.connect(self._on_step2_style_mutated)
+
+        self.init_border_col_btn = ColorSwatchButton("#F97316")
+        self.init_border_col_btn.color_changed.connect(lambda _c: self._refresh_step2_preview())
+
+        self.init_split_spin = QSpinBox()
+        self.init_split_spin.setRange(25, 75)
+        self.init_split_spin.setValue(40)
+        self.init_split_spin.setSuffix("% Atas")
+        self.init_split_spin.valueChanged.connect(lambda _v: self._refresh_step2_preview())
+
+        for lbl_t, w in (
+            ("Layout Video:", self.init_layout_mode_combo),
+            ("PiP:", self.init_pip_shape_combo),
+            ("Posisi PiP:", self.init_pip_pos_combo),
+            ("Garis Neon:", self.init_border_col_btn),
+            ("Split:", self.init_split_spin),
+        ):
+            lbl = QLabel(lbl_t)
+            lbl.setObjectName("FieldLabel")
+            layout_row.addWidget(lbl)
+            layout_row.addWidget(w)
+        layout_row.addStretch()
+        left_l.addLayout(layout_row)
+
+        # Row 2: Caption Recipe (8 Creator Recipes) & Highlight/Pill Styling
+        recipe_row = QHBoxLayout()
+        recipe_row.setSpacing(10)
+        self.init_recipe_combo = QComboBox()
+        for rid, meta in CAPTION_RECIPES.items():
+            self.init_recipe_combo.addItem(meta["label"], rid)
+        self.init_recipe_combo.currentIndexChanged.connect(self._on_step2_recipe_changed)
+
+        self.init_bg_mode_combo = QComboBox()
+        self.init_bg_mode_combo.addItem("Tanpa Latar", "none")
+        self.init_bg_mode_combo.addItem("Kapsul Kata Aktif", "active_word_pill")
+        self.init_bg_mode_combo.addItem("Bar Kaca 1 Baris", "full_line_box")
+        self.init_bg_mode_combo.currentIndexChanged.connect(lambda _i: self._refresh_step2_preview())
+
+        self.init_pill_col_btn = ColorSwatchButton("#F97316")
+        self.init_pill_col_btn.color_changed.connect(lambda _c: self._refresh_step2_preview())
+
+        self.init_highlight_btn = ColorSwatchButton("#FACC15")
+        self.init_highlight_btn.color_changed.connect(lambda _c: self._refresh_step2_preview())
+
+        for lbl_t, w in (
+            ("Resep Caption:", self.init_recipe_combo),
+            ("Kotak Teks:", self.init_bg_mode_combo),
+            ("Kapsul:", self.init_pill_col_btn),
+            ("Kata Aktif:", self.init_highlight_btn),
+        ):
+            lbl = QLabel(lbl_t)
+            lbl.setObjectName("FieldLabel")
+            recipe_row.addWidget(lbl)
+            recipe_row.addWidget(w)
+        recipe_row.addStretch()
+        left_l.addLayout(recipe_row)
+
+        # Row 3: Subtitle Position, Size, Words, Dual Keyword & Auto Emoji
+        quick_style_row = QHBoxLayout()
+        quick_style_row.setSpacing(10)
+        self.init_sub_pos_combo = QComboBox()
+        self.init_sub_pos_combo.addItem("Otomatis Sesuai Style", "")
+        self.init_sub_pos_combo.addItem("Di Garis Tengah Split", "split_line_center")
+        self.init_sub_pos_combo.addItem("Di Bagian Bawah Layar", "bottom_safe")
+        self.init_sub_pos_combo.addItem("Di Bagian Atas Layar", "top_safe")
+        self.init_sub_pos_combo.currentIndexChanged.connect(lambda _i: self._refresh_step2_preview())
+
+        self.init_font_size_spin = QSpinBox()
+        self.init_font_size_spin.setRange(32, 100)
+        self.init_font_size_spin.setValue(66)
+        self.init_font_size_spin.setSuffix(" pt")
+        self.init_font_size_spin.valueChanged.connect(lambda _v: self._refresh_step2_preview())
+
+        self.init_max_words_spin = QSpinBox()
+        self.init_max_words_spin.setRange(1, 6)
+        self.init_max_words_spin.setValue(4)
+        self.init_max_words_spin.valueChanged.connect(lambda _v: self._refresh_step2_preview())
+
+        self.init_dual_kw_chk = QCheckBox("Dual Keyword")
+        self.init_dual_kw_chk.setChecked(True)
+        self.init_dual_kw_chk.toggled.connect(lambda _v: self._refresh_step2_preview())
+
+        self.init_sec_col_btn = ColorSwatchButton("#22C55E")
+        self.init_sec_col_btn.color_changed.connect(lambda _c: self._refresh_step2_preview())
+
+        self.init_auto_emoji_chk = QCheckBox("Auto Emoji 🔥")
+        self.init_auto_emoji_chk.setChecked(True)
+        self.init_auto_emoji_chk.toggled.connect(lambda _v: self._refresh_step2_preview())
+
+        for lbl_t, w in (
+            ("Letak Teks:", self.init_sub_pos_combo),
+            ("Ukuran:", self.init_font_size_spin),
+            ("Kata/Baris:", self.init_max_words_spin),
+        ):
+            lbl = QLabel(lbl_t)
+            lbl.setObjectName("FieldLabel")
+            quick_style_row.addWidget(lbl)
+            quick_style_row.addWidget(w)
+        quick_style_row.addWidget(self.init_dual_kw_chk)
+        quick_style_row.addWidget(self.init_sec_col_btn)
+        quick_style_row.addWidget(self.init_auto_emoji_chk)
+        quick_style_row.addStretch()
+        left_l.addLayout(quick_style_row)
+
+        # Row 4: Top Topic Pill, Vignette, Zoom & Advanced Options Toggle
+        effects_row = QHBoxLayout()
+        effects_row.setSpacing(10)
+        self.init_zoom_punch_chk = QCheckBox("Zoom Klimaks")
+        self.init_zoom_punch_chk.setChecked(False)
+        self.init_zoom_punch_chk.toggled.connect(lambda _v: self._refresh_step2_preview())
+
+        self.init_vignette_chk = QCheckBox("Vignette Sinematik")
+        self.init_vignette_chk.setChecked(True)
+        self.init_vignette_chk.toggled.connect(lambda _v: self._refresh_step2_preview())
+
+        self.init_topic_hdr_chk = QCheckBox("Header Topik Atas:")
+        self.init_topic_hdr_chk.setChecked(False)
+        self.init_topic_hdr_chk.toggled.connect(lambda _v: self._refresh_step2_preview())
+
+        self.init_topic_hdr_edit = QLineEdit()
+        self.init_topic_hdr_edit.setPlaceholderText("Contoh: CARA CEPAT CUAN")
+        self.init_topic_hdr_edit.textChanged.connect(lambda _t: self._refresh_step2_preview())
+
+        self.adv_options_btn = QPushButton("Opsi Lanjutan...")
+        self.adv_options_btn.setObjectName("SmallAction")
+        self.adv_options_btn.setCheckable(True)
+        self.adv_options_btn.setChecked(False)
+
+        effects_row.addWidget(self.init_zoom_punch_chk)
+        effects_row.addWidget(self.init_vignette_chk)
+        effects_row.addWidget(self.init_topic_hdr_chk)
+        effects_row.addWidget(self.init_topic_hdr_edit, 1)
+        effects_row.addWidget(self.adv_options_btn)
+        left_l.addLayout(effects_row)
+
+        # Feature Toggles Row + Collapsible Framing/Padding
+        feat_row = QHBoxLayout()
+        feat_row.setSpacing(12)
+        self.subtitles_chk = QCheckBox("Subtitle Otomatis")
+        self.subtitles_chk.setChecked(True)
+        self.subtitles_chk.toggled.connect(lambda _v: self._refresh_step2_preview())
+        self.hook_title_chk = QCheckBox("Banner Judul Hook")
+        self.hook_title_chk.setChecked(True)
+        self.hook_title_chk.toggled.connect(lambda _v: self._refresh_step2_preview())
+        self.opening_tts_chk = QCheckBox("Suara Narator Opening")
+        self.opening_tts_chk.setChecked(True)
+        self.backsound_chk = QCheckBox("Musik Latar")
+        self.backsound_chk.setChecked(True)
+        self.viral_polish_chk = QCheckBox("Efek Warna & Progress Bar")
+        self.viral_polish_chk.setChecked(True)
+        self.viral_polish_chk.toggled.connect(lambda _v: self._refresh_step2_preview())
+        self.bgm_status_label = QLabel()
+        self.bgm_status_label.setObjectName("MutedText")
+        self._refresh_backsound_status()
+
+        for chk in (
+            self.subtitles_chk,
+            self.hook_title_chk,
+            self.opening_tts_chk,
+            self.backsound_chk,
+            self.viral_polish_chk,
+        ):
+            feat_row.addWidget(chk)
+        feat_row.addStretch()
+        feat_row.addWidget(self.bgm_status_label)
+        left_l.addLayout(feat_row)
+
+        self.adv_options_panel = QWidget()
+        self.adv_options_panel.setVisible(False)
+        self.adv_options_btn.toggled.connect(self.adv_options_panel.setVisible)
+        adv_l = QHBoxLayout(self.adv_options_panel)
+        adv_l.setContentsMargins(0, 4, 0, 0)
+        adv_l.setSpacing(12)
+
+        self.framing_combo = QComboBox()
+        self.framing_combo.addItem("Otomatis Ikut Wajah", "smart_face")
+        self.framing_combo.addItem("Tampilkan Penuh + Blur", "fit_all_blur")
+        self.framing_combo.addItem("Potong Tengah", "center_crop")
+        f_idx = self.framing_combo.findData(self._settings.default_framing_mode)
+        self.framing_combo.setCurrentIndex(max(0, f_idx))
+        self.framing_combo.currentIndexChanged.connect(lambda _i: self._refresh_step2_preview())
 
         self.padding_spin = QDoubleSpinBox()
         self.padding_spin.setRange(0.30, 0.50)
@@ -282,122 +712,150 @@ class MainWindow(QMainWindow):
         self.padding_spin.setSuffix(" s")
         self.padding_spin.setValue(self._settings.default_padding_sec)
 
-        self.framing_combo = QComboBox()
-        self.framing_combo.addItem("Smart Wajah", "smart_face")
-        self.framing_combo.addItem("Fit Semua + Blur", "fit_all_blur")
-        self.framing_combo.addItem("Center Crop", "center_crop")
-        f_idx = self.framing_combo.findData(self._settings.default_framing_mode)
-        self.framing_combo.setCurrentIndex(max(0, f_idx))
-        self.aspect_combo.currentTextChanged.connect(lambda _t: self._sync_framing_availability())
+        self.aspect_combo.currentTextChanged.connect(lambda _t: self._on_step2_style_mutated())
         self.format_combo.currentIndexChanged.connect(lambda _i: self._sync_framing_availability())
-        self._sync_framing_availability()
 
-        for label_text, widget in (
-            ("Jumlah Klip", self.clip_count_spin),
-            ("Durasi Min", self.min_dur_spin),
-            ("Durasi Max", self.max_dur_spin),
-            ("Rasio Aspek", self.aspect_combo),
-            ("Format", self.format_combo),
-            ("Padding", self.padding_spin),
-            ("Framing", self.framing_combo),
-        ):
-            grp = QHBoxLayout()
-            grp.setSpacing(6)
-            lbl = QLabel(label_text)
-            lbl.setObjectName("FieldLabel")
-            grp.addWidget(lbl)
-            grp.addWidget(widget)
-            params_row.addLayout(grp)
+        adv_l.addWidget(QLabel("Fokus Kamera Podcast:"))
+        adv_l.addWidget(self.framing_combo)
+        adv_l.addWidget(QLabel("Jeda Potong (Padding):"))
+        adv_l.addWidget(self.padding_spin)
+        adv_l.addStretch()
+        left_l.addWidget(self.adv_options_panel)
+        left_l.addStretch()
 
-        params_row.addStretch()
-        input_layout.addLayout(params_row)
+        # Right Column: Real-Time 9:16 Live Mini-Preview
+        preview_card = QFrame()
+        preview_card.setObjectName("Card")
+        preview_card.setFixedWidth(268)
+        pv_l = QVBoxLayout(preview_card)
+        pv_l.setContentsMargins(10, 10, 10, 10)
+        pv_l.setSpacing(6)
+        pv_hdr = QHBoxLayout()
+        pv_title = QLabel("Live Mini-Preview")
+        pv_title.setObjectName("SectionTitle")
+        self.step2_preview_badge = QLabel("9:16")
+        self.step2_preview_badge.setObjectName("StatusPill")
+        pv_hdr.addWidget(pv_title, 1)
+        pv_hdr.addWidget(self.step2_preview_badge)
+        pv_l.addLayout(pv_hdr)
 
-        # Compact Viral Edit Options Row
-        viral_row = QHBoxLayout()
-        viral_row.setSpacing(14)
-        viral_lbl = QLabel("Edit Viral")
-        viral_lbl.setObjectName("FieldLabel")
-        viral_row.addWidget(viral_lbl)
+        self.step2_preview_canvas = LivePreviewCanvas9x16()
+        self.step2_preview_canvas.setMinimumHeight(400)
+        self.step2_preview_canvas.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        pv_l.addWidget(self.step2_preview_canvas, 1)
 
-        self.subtitles_chk = QCheckBox("Subtitle Viral")
-        self.subtitles_chk.setChecked(True)
-        self.hook_title_chk = QCheckBox("Hook Judul")
-        self.hook_title_chk.setChecked(True)
-        self.opening_tts_chk = QCheckBox("Suara Opening")
-        self.opening_tts_chk.setChecked(True)
-        self.backsound_chk = QCheckBox("Backsound")
-        self.backsound_chk.setChecked(True)
-        self.viral_polish_chk = QCheckBox("Efek Viral")
-        self.viral_polish_chk.setChecked(True)
+        pv_hint = QLabel("Tampilan diperbarui instan setiap Anda ubah template.")
+        pv_hint.setObjectName("MutedText")
+        pv_hint.setWordWrap(True)
+        pv_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        pv_l.addWidget(pv_hint)
 
-        self.bgm_status_label = QLabel()
-        self.bgm_status_label.setObjectName("MutedText")
-        self._refresh_backsound_status()
+        composer_split.addWidget(left_ctrl, 1)
+        composer_split.addWidget(preview_card)
+        sty_l.addLayout(composer_split)
 
-        viral_row.addWidget(self.subtitles_chk)
-        viral_row.addWidget(self.hook_title_chk)
-        viral_row.addWidget(self.opening_tts_chk)
-        viral_row.addWidget(self.backsound_chk)
-        viral_row.addWidget(self.viral_polish_chk)
-        viral_row.addStretch()
-        viral_row.addWidget(self.bgm_status_label)
-        input_layout.addLayout(viral_row)
+        body_layout.addWidget(sty_card)
+        body_layout.addStretch()
 
-        main_layout.addWidget(input_card)
+        scroll.setWidget(body)
+        outer.addWidget(scroll, 1)
 
-        # 4. Split Workspace (Left: Job Queue & History | Right: Details & Logs)
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.setHandleWidth(8)
+        # Initialize default card selection
+        self._select_initial_style(self._settings.default_edit_format)
 
-        # Left Panel
-        left_card = QFrame()
-        left_card.setObjectName("Card")
-        left_layout = QVBoxLayout(left_card)
-        left_layout.setContentsMargins(14, 14, 14, 14)
-        left_layout.setSpacing(10)
+        # Step 2 Footer Navigation
+        footer = QFrame()
+        footer.setObjectName("Card")
+        fl = QHBoxLayout(footer)
+        fl.setContentsMargins(14, 10, 14, 10)
+        back_btn = QPushButton("<- Kembali ke Daftar Job")
+        back_btn.clicked.connect(lambda: self.go_to_step(0))
+        self.step2_submit_btn = QPushButton("Mulai Transcribe & Buat Klip Sekarang ->")
+        self.step2_submit_btn.setObjectName("HeroButton")
+        self.step2_submit_btn.clicked.connect(self._submit_job)
+        fl.addWidget(back_btn)
+        fl.addStretch()
+        fl.addWidget(self.step2_submit_btn)
+        outer.addWidget(footer)
 
-        left_header = QHBoxLayout()
-        left_title = QLabel("Antrean & Riwayat Job")
-        left_title.setObjectName("SectionTitle")
-        self.job_count_pill = QLabel("0")
-        self.job_count_pill.setObjectName("VersionPill")
-        left_header.addWidget(left_title)
-        left_header.addStretch()
-        left_header.addWidget(self.job_count_pill)
-        left_layout.addLayout(left_header)
+        return page
 
-        self.jobs_scroll = QScrollArea()
-        self.jobs_scroll.setWidgetResizable(True)
-        self.jobs_container = QWidget()
-        self.jobs_vbox = QVBoxLayout(self.jobs_container)
-        self.jobs_vbox.setContentsMargins(0, 0, 4, 0)
-        self.jobs_vbox.setSpacing(8)
-        self.jobs_empty_label = QLabel("Belum ada job.\nMasukkan URL YouTube di atas untuk mulai memproses.")
-        self.jobs_empty_label.setObjectName("MutedText")
-        self.jobs_empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.jobs_empty_label.setWordWrap(True)
-        self.jobs_vbox.addWidget(self.jobs_empty_label)
-        self.jobs_vbox.addStretch()
-        self.jobs_scroll.setWidget(self.jobs_container)
-        left_layout.addWidget(self.jobs_scroll, 1)
+    # --- STEP 3: Proses Pipeline & Hasil Klip ---
+    def _build_step3_results_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
 
-        # Right Panel
-        right_card = QFrame()
-        right_card.setObjectName("Card")
-        right_layout = QVBoxLayout(right_card)
-        right_layout.setContentsMargins(14, 14, 14, 14)
-        right_layout.setSpacing(10)
+        # Top Progress & Stage Tracker Card
+        prog_card = QFrame()
+        prog_card.setObjectName("WinUICard")
+        pl = QVBoxLayout(prog_card)
+        pl.setContentsMargins(16, 12, 16, 12)
+        pl.setSpacing(10)
 
-        detail_header = QHBoxLayout()
-        self.detail_title = QLabel("Detail Job")
+        hdr = QHBoxLayout()
+        b3 = QLabel("Langkah 3")
+        b3.setObjectName("StepBadge")
+        self.detail_title = QLabel("Pilih Job dari Daftar Job")
         self.detail_title.setObjectName("SectionTitle")
-        self.open_clips_dir_btn = QPushButton("Buka Folder Klip")
+
+        self.step3_cancel_btn = QPushButton("Batalkan Proses")
+        self.step3_cancel_btn.setObjectName("DangerButton")
+        self.step3_cancel_btn.setVisible(False)
+        self.step3_cancel_btn.clicked.connect(self._cancel_selected_job)
+
+        self.step3_resume_btn = QPushButton("Lanjutkan (Resume)")
+        self.step3_resume_btn.setObjectName("SmallAction")
+        self.step3_resume_btn.setVisible(False)
+        self.step3_resume_btn.clicked.connect(self._resume_selected_job)
+
+        self.open_clips_dir_btn = QPushButton("Buka Folder Hasil")
         self.open_clips_dir_btn.setObjectName("SmallAction")
         self.open_clips_dir_btn.setVisible(False)
         self.open_clips_dir_btn.clicked.connect(self._open_selected_clips_dir)
-        detail_header.addWidget(self.detail_title, 1)
-        detail_header.addWidget(self.open_clips_dir_btn)
-        right_layout.addLayout(detail_header)
+
+        self.toggle_log_btn = QPushButton("Lihat Log Proses")
+        self.toggle_log_btn.setObjectName("SmallAction")
+        self.toggle_log_btn.setCheckable(True)
+        self.toggle_log_btn.setChecked(False)
+
+        back_jobs_btn = QPushButton("<- Daftar Job")
+        back_jobs_btn.setObjectName("SmallAction")
+        back_jobs_btn.clicked.connect(lambda: self.go_to_step(0))
+
+        hdr.addWidget(back_jobs_btn)
+        hdr.addWidget(b3)
+        hdr.addWidget(self.detail_title, 1)
+        hdr.addWidget(self.step3_cancel_btn)
+        hdr.addWidget(self.step3_resume_btn)
+        hdr.addWidget(self.open_clips_dir_btn)
+        hdr.addWidget(self.toggle_log_btn)
+        pl.addLayout(hdr)
+
+        # 4 Visual Pipeline Stages
+        stage_row = QHBoxLayout()
+        stage_row.setSpacing(8)
+        self.stage_nodes: list[QLabel] = []
+        for st_lbl in (
+            "1. Download / Baca Video",
+            "2. Transcribe Suara",
+            "3. Kurasi Klip AI",
+            "4. Render Style Klip",
+        ):
+            lbl = QLabel(st_lbl)
+            lbl.setObjectName("StageNode")
+            lbl.setProperty("state", "idle")
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.stage_nodes.append(lbl)
+            stage_row.addWidget(lbl, 1)
+        pl.addLayout(stage_row)
+
+        self.step3_progress_bar = QProgressBar()
+        self.step3_progress_bar.setRange(0, 100)
+        self.step3_progress_bar.setTextVisible(False)
+        pl.addWidget(self.step3_progress_bar)
+        layout.addWidget(prog_card)
 
         self.job_error_banner = QFrame()
         self.job_error_banner.setObjectName("AlertBanner")
@@ -409,42 +867,228 @@ class MainWindow(QMainWindow):
         self.job_error_label.setWordWrap(True)
         self.job_error_label.setStyleSheet("color: #FCA5A5;")
         jerr_layout.addWidget(self.job_error_label)
-        right_layout.addWidget(self.job_error_banner)
+        layout.addWidget(self.job_error_banner)
 
-        self.tabs = QTabWidget()
+        # Collapsible Live Log Drawer
+        self.log_viewer = LogViewer()
+        self.log_viewer.setMaximumHeight(180)
+        self.log_viewer.setVisible(False)
+        self.toggle_log_btn.toggled.connect(self.log_viewer.setVisible)
+        layout.addWidget(self.log_viewer)
 
-        # Tab 1: Rendered Clips
-        clips_tab = QWidget()
-        clips_tab_layout = QVBoxLayout(clips_tab)
-        clips_tab_layout.setContentsMargins(0, 0, 0, 0)
+        # Rendered Clips Card
+        clips_card = QFrame()
+        clips_card.setObjectName("WinUICard")
+        cl = QVBoxLayout(clips_card)
+        cl.setContentsMargins(14, 12, 14, 12)
+        cl.setSpacing(8)
+
+        clips_hdr = QHBoxLayout()
+        clips_title = QLabel("Hasil Klip Video (Klik 'Ubah Style & Live Preview ->' untuk mengedit tampilan lagi)")
+        clips_title.setObjectName("SectionTitle")
+        clips_hdr.addWidget(clips_title, 1)
+        cl.addLayout(clips_hdr)
+
         self.clips_scroll = QScrollArea()
         self.clips_scroll.setWidgetResizable(True)
         self.clips_container = QWidget()
         self.clips_vbox = QVBoxLayout(self.clips_container)
         self.clips_vbox.setContentsMargins(0, 0, 4, 0)
         self.clips_vbox.setSpacing(10)
-        self.clips_empty_label = QLabel("Pilih salah satu job untuk melihat hasil klip.")
+        self.clips_empty_label = QLabel("Pilih salah satu job dari Langkah 1 atau buat project klip baru.")
         self.clips_empty_label.setObjectName("MutedText")
         self.clips_empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.clips_empty_label.setWordWrap(True)
         self.clips_vbox.addWidget(self.clips_empty_label)
         self.clips_vbox.addStretch()
         self.clips_scroll.setWidget(self.clips_container)
-        clips_tab_layout.addWidget(self.clips_scroll)
+        cl.addWidget(self.clips_scroll, 1)
 
-        # Tab 2: Live Log
-        self.log_viewer = LogViewer()
+        layout.addWidget(clips_card, 1)
+        return page
 
-        self.tabs.addTab(clips_tab, "Hasil Klip")
-        self.tabs.addTab(self.log_viewer, "Live Log")
-        right_layout.addWidget(self.tabs, 1)
+    # --- STEP 4: Full-Window Live Preview & Edit Akhir ---
+    def _build_step4_studio_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
 
-        splitter.addWidget(left_card)
-        splitter.addWidget(right_card)
-        splitter.setStretchFactor(0, 4)
-        splitter.setStretchFactor(1, 6)
-        main_layout.addWidget(splitter, 1)
+        nav = QFrame()
+        nav.setObjectName("WinUICard")
+        nl = QHBoxLayout(nav)
+        nl.setContentsMargins(12, 8, 12, 8)
+        nl.setSpacing(10)
 
+        back_results_btn = QPushButton("<- Kembali ke Hasil Klip")
+        back_results_btn.setObjectName("SmallAction")
+        back_results_btn.clicked.connect(lambda: self.go_to_step(2))
+
+        back_jobs_btn = QPushButton("Daftar Job")
+        back_jobs_btn.setObjectName("SmallAction")
+        back_jobs_btn.clicked.connect(lambda: self.go_to_step(0))
+
+        b4 = QLabel("Langkah 4")
+        b4.setObjectName("StepBadge")
+        t4 = QLabel("Live Preview 9:16 & Ubah Style Klip (Sesuaikan Tata Letak, Subtitle, Overlay & Audio)")
+        t4.setObjectName("SectionTitle")
+
+        nl.addWidget(back_results_btn)
+        nl.addWidget(back_jobs_btn)
+        nl.addWidget(b4)
+        nl.addWidget(t4, 1)
+        layout.addWidget(nav)
+
+        self.studio_widget = ClipStudioWidget(settings_provider=self._get_settings)
+        self.studio_widget.render_requested.connect(self._on_studio_render_requested)
+        self.studio_widget.standalone_render_requested.connect(
+            self._on_studio_standalone_render_requested
+        )
+        layout.addWidget(self.studio_widget, 1)
+        return page
+
+    # --- Wizard Step & Style Logic ---
+    def go_to_step(self, step_idx: int) -> None:
+        """Switch wizard page cleanly and update top WinUI stepper indicators."""
+        clamped = max(0, min(3, int(step_idx)))
+        self._current_step = clamped
+        self.wizard_stack.setCurrentIndex(clamped)
+        for idx, btn in enumerate(self.step_buttons):
+            btn.setProperty("active", idx == clamped)
+            btn.setProperty("done", idx < clamped)
+            _repolish(btn)
+        if clamped == 3 and hasattr(self, "studio_widget"):
+            self.studio_widget._maybe_schedule_auto_detect()
+
+    def _select_initial_style(self, format_id: str) -> None:
+        tid = normalize_ready_template_id(format_id)
+        self._selected_template_id = tid
+        meta = READY_TEMPLATES[tid]
+        job_fmt = str(meta["job_edit_format"])
+
+        for cid, card in self._style_cards.items():
+            card.set_selected(cid == tid)
+
+        self._syncing_step2 = True
+        idx = self.format_combo.findData(job_fmt)
+        if idx >= 0:
+            self.format_combo.setCurrentIndex(idx)
+
+        cfg = build_ready_template_config(template_id=tid, clip_title="Rahasia Cuan Viral")
+        self.init_layout_mode_combo.setCurrentIndex(0)
+        self.init_pip_shape_combo.setCurrentIndex(max(0, self.init_pip_shape_combo.findData(cfg.layout.pip_shape)))
+        self.init_pip_pos_combo.setCurrentIndex(max(0, self.init_pip_pos_combo.findData(cfg.layout.pip_position)))
+        self.init_border_col_btn.set_color_hex(cfg.layout.frame_border_color_hex)
+
+        rec_idx = self.init_recipe_combo.findData(cfg.subtitles.caption_recipe)
+        self.init_recipe_combo.setCurrentIndex(max(0, rec_idx))
+        bgm_idx = self.init_bg_mode_combo.findData(cfg.subtitles.caption_bg_mode)
+        self.init_bg_mode_combo.setCurrentIndex(max(0, bgm_idx))
+        self.init_pill_col_btn.set_color_hex(cfg.subtitles.active_word_bg_hex)
+        self.init_highlight_btn.set_color_hex(cfg.subtitles.highlight_color_hex)
+        self.init_font_size_spin.setValue(cfg.subtitles.font_size)
+        self.init_max_words_spin.setValue(cfg.subtitles.max_words_per_line)
+        self.init_dual_kw_chk.setChecked(cfg.subtitles.dual_keyword_enabled)
+        self.init_sec_col_btn.set_color_hex(cfg.subtitles.secondary_keyword_color_hex)
+        self.init_auto_emoji_chk.setChecked(cfg.subtitles.auto_emoji_enabled)
+
+        self.init_vignette_chk.setChecked(cfg.overlays.climax_effects.vignette_enabled)
+        self.init_topic_hdr_chk.setChecked(cfg.overlays.climax_effects.topic_header_enabled)
+        self.init_topic_hdr_edit.setText(cfg.overlays.climax_effects.topic_header_text)
+
+        self.init_sub_pos_combo.setCurrentIndex(
+            max(0, self.init_sub_pos_combo.findData(cfg.subtitles.placement_preset))
+        )
+        self.init_split_spin.setValue(int(round(cfg.layout.split_ratio_top * 100)))
+        self.init_zoom_punch_chk.setChecked(cfg.overlays.climax_effects.zoom_punch_enabled)
+
+        self._syncing_step2 = False
+        self._sync_framing_availability()
+        self._refresh_step2_preview()
+
+    @staticmethod
+    def _build_step2_sample_frame() -> np.ndarray:
+        """Create a vivid 1280x720 dual-zone preview backdrop so layout differences are crystal clear."""
+        w, h = 1280, 720
+        frame = np.zeros((h, w, 3), dtype=np.uint8)
+        x_grad = np.linspace(22, 64, w, dtype=np.uint8)[None, :]
+        y_grad = np.linspace(18, 52, h, dtype=np.uint8)[:, None]
+        frame[:, :, 0] = np.clip(x_grad + 20, 0, 255)
+        frame[:, :, 1] = np.clip(y_grad + 14, 0, 255)
+        frame[:, :, 2] = 42
+        # Left zone: illuminated speaker / facecam silhouette
+        cv2.rectangle(frame, (40, 45), (520, 420), (36, 46, 78), -1)
+        cv2.circle(frame, (265, 195), 76, (90, 148, 224), -1)
+        cv2.ellipse(frame, (265, 345), (125, 78), 0, 180, 360, (66, 114, 210), -1)
+        cv2.putText(frame, "FACECAM", (170, 405), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (240, 248, 255), 2)
+        # Right/Main zone: bright stylized gameplay / screen scene
+        cv2.rectangle(frame, (540, 45), (1235, 675), (28, 86, 62), -1)
+        cv2.rectangle(frame, (600, 120), (1170, 580), (44, 122, 92), 3)
+        cv2.circle(frame, (885, 355), 110, (56, 189, 248), 4)
+        cv2.putText(frame, "GAMEPLAY / MAIN SCREEN", (655, 368), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (250, 204, 21), 3)
+        return frame
+
+    def _on_step2_style_mutated(self) -> None:
+        if self._syncing_step2:
+            return
+        self._sync_framing_availability()
+        self._refresh_step2_preview()
+
+    def _on_step2_recipe_changed(self) -> None:
+        if self._syncing_step2:
+            return
+        rid = str(self.init_recipe_combo.currentData() or "hormozi_viral")
+        recipe = CAPTION_RECIPES.get(rid, CAPTION_RECIPES["hormozi_viral"])
+        self._syncing_step2 = True
+        self.init_bg_mode_combo.setCurrentIndex(
+            max(0, self.init_bg_mode_combo.findData(recipe["caption_bg_mode"]))
+        )
+        self.init_pill_col_btn.set_color_hex(recipe["active_word_bg_hex"])
+        self.init_highlight_btn.set_color_hex(recipe["highlight_color_hex"])
+        self.init_dual_kw_chk.setChecked(bool(recipe["dual_keyword_enabled"]))
+        self.init_sec_col_btn.set_color_hex(recipe["secondary_keyword_color_hex"])
+        self.init_auto_emoji_chk.setChecked(bool(recipe["auto_emoji_enabled"]))
+        self.init_font_size_spin.setValue(int(recipe["font_size"]))
+        self.init_max_words_spin.setValue(int(recipe["max_words_per_line"]))
+        self._syncing_step2 = False
+        self._refresh_step2_preview()
+
+    def _refresh_step2_preview(self) -> None:
+        if getattr(self, "_syncing_step2", False) or not hasattr(self, "step2_preview_canvas"):
+            return
+        edit_fmt = str(self.format_combo.currentData() or "podcast")
+        tid = getattr(self, "_selected_template_id", edit_fmt)
+        cfg = build_ready_template_config(
+            template_id=tid,
+            clip_title="Rahasia Cuan Cepat!",
+            start_time=0.0,
+            end_time=12.0,
+            padding_sec=0.0,
+        )
+        overrides = self._collect_initial_style_overrides(edit_fmt)
+        apply_initial_style_overrides(cfg, overrides)
+
+        aspect = self.aspect_combo.currentText()
+        cfg.aspect_ratio = aspect  # type: ignore[assignment]
+        if aspect == "16:9":
+            cfg.canvas_width, cfg.canvas_height = 1920, 1080
+        cfg.subtitles.enabled = self.subtitles_chk.isChecked()
+        cfg.overlays.hook_banner.enabled = self.hook_title_chk.isChecked()
+        cfg.overlays.climax_effects.progress_bar_enabled = self.viral_polish_chk.isChecked()
+        cfg.overlays.climax_effects.contrast_boost_enabled = self.viral_polish_chk.isChecked()
+        cfg.sync_subtitle_anchor()
+
+        self.step2_preview_badge.setText(f"{aspect} • {cfg.layout.mode}")
+        self.step2_preview_canvas.render_state(
+            source_frame_bgr=self._step2_sample_frame,
+            config=cfg,
+            rel_time_sec=1.6,
+            segments=self._step2_sample_segments,
+            clip_start_sec=0.0,
+            clip_end_sec=12.0,
+        )
+
+    # --- Existing Pipeline & State Handlers ---
     def _load_existing_jobs(self) -> None:
         existing = list_all_jobs(self._settings.workspace_dir, recover_stale=True)
         for state in existing:
@@ -455,15 +1099,15 @@ class MainWindow(QMainWindow):
     def _on_preflight_ready(self, report: PreflightReport) -> None:
         self._preflight = report
 
-        self.ytdlp_pill.setText("yt-dlp: OK" if report.yt_dlp.available else "yt-dlp: Missing")
+        self.ytdlp_pill.setText("YouTube: Siap" if report.yt_dlp.available else "YouTube: Belum Ada")
         self.ytdlp_pill.setProperty("tone", "ok" if report.yt_dlp.available else "error")
         _repolish(self.ytdlp_pill)
 
-        self.ffmpeg_pill.setText("ffmpeg: OK" if report.ffmpeg.available else "ffmpeg: Missing")
+        self.ffmpeg_pill.setText("Mesin Video: Siap" if report.ffmpeg.available else "Mesin Video: Belum Ada")
         self.ffmpeg_pill.setProperty("tone", "ok" if report.ffmpeg.available else "error")
         _repolish(self.ffmpeg_pill)
 
-        self.subtitle_label.setText(f"AutoClip Pipeline • {self._settings.active_provider_summary()}")
+        self.subtitle_label.setText(self._settings.active_provider_summary())
 
         ai_ready, _ = self._settings.is_active_provider_ready()
         self.apikey_pill.setText("AI: Siap" if ai_ready else "AI: Belum Diisi")
@@ -490,7 +1134,7 @@ class MainWindow(QMainWindow):
     def _sync_stack_height(self) -> None:
         current = self.source_stack.currentWidget()
         if current is not None:
-            self.source_stack.setFixedHeight(max(38, current.sizeHint().height()))
+            self.source_stack.setFixedHeight(max(42, current.sizeHint().height()))
 
     def _set_source_mode(self, mode: str) -> None:
         is_local = mode == "local_file"
@@ -503,8 +1147,12 @@ class MainWindow(QMainWindow):
     def _update_start_button_state(self) -> None:
         if self._preflight is None:
             return
+        is_local = self.source_stack.currentIndex() == 1
         self.yt_start_btn.setEnabled(self._preflight.ok)
         self.local_start_btn.setEnabled(self._preflight.ffmpeg.available)
+        self.step2_submit_btn.setEnabled(
+            self._preflight.ffmpeg.available if is_local else self._preflight.ok
+        )
 
     def _browse_local_video(self) -> None:
         chosen, _ = QFileDialog.getOpenFileName(
@@ -528,15 +1176,24 @@ class MainWindow(QMainWindow):
 
     def _sync_framing_availability(self) -> None:
         aspect = self.aspect_combo.currentText()
-        edit_fmt = self.format_combo.currentData() or "podcast"
+        tid = getattr(self, "_selected_template_id", "podcast")
+        tpl_layout = str(READY_TEMPLATES.get(tid, READY_TEMPLATES["podcast"])["layout_mode"])
+        custom_lm = str(self.init_layout_mode_combo.currentData() or "") if hasattr(self, "init_layout_mode_combo") else ""
+        effective_lm = custom_lm or tpl_layout
+        effective_split = effective_lm in ("split_screen", "multi_speaker_split")
+        effective_pip = effective_lm == "pip_facecam"
+        if hasattr(self, "init_split_spin"):
+            self.init_split_spin.setEnabled(effective_split)
+        if hasattr(self, "init_pip_shape_combo"):
+            self.init_pip_shape_combo.setEnabled(effective_pip)
+            self.init_pip_pos_combo.setEnabled(effective_pip)
+
         if aspect == "16:9":
             self.framing_combo.setEnabled(False)
-            self.framing_combo.setToolTip("Rasio 16:9 memakai layout asli penuh")
-        elif edit_fmt == "game":
+            self.framing_combo.setToolTip("Bentuk 16:9 memakai layar penuh asli")
+        elif effective_lm != "single_focus":
             self.framing_combo.setEnabled(False)
-            self.framing_combo.setToolTip(
-                "Format Game otomatis memakai layout 40% Facecam + 60% Gameplay"
-            )
+            self.framing_combo.setToolTip("Style ini memakai tata letak khusus")
         else:
             self.framing_combo.setEnabled(True)
             self.framing_combo.setToolTip("")
@@ -553,9 +1210,43 @@ class MainWindow(QMainWindow):
         if dlg.exec():
             self._settings = dlg.updated_settings()
             save_settings(self._settings)
-            self.subtitle_label.setText(f"AutoClip Pipeline • {self._settings.active_provider_summary()}")
+            self.subtitle_label.setText(self._settings.active_provider_summary())
             self._refresh_backsound_status()
             self._bridge.refresh_preflight()
+
+    def _collect_initial_style_overrides(self, edit_format: str) -> dict:
+        tid = getattr(self, "_selected_template_id", normalize_ready_template_id(edit_format))
+        tpl_layout = str(READY_TEMPLATES.get(tid, READY_TEMPLATES["podcast"])["layout_mode"])
+        overrides: dict = {
+            "ready_template_id": tid,
+            "caption_recipe": str(self.init_recipe_combo.currentData() or "hormozi_viral"),
+            "caption_bg_mode": str(self.init_bg_mode_combo.currentData() or "none"),
+            "active_word_bg_hex": self.init_pill_col_btn.color_hex(),
+            "dual_keyword_enabled": self.init_dual_kw_chk.isChecked(),
+            "secondary_keyword_color_hex": self.init_sec_col_btn.color_hex(),
+            "auto_emoji_enabled": self.init_auto_emoji_chk.isChecked(),
+            "subtitle_highlight_hex": self.init_highlight_btn.color_hex(),
+            "subtitle_font_size": int(self.init_font_size_spin.value()),
+            "subtitle_max_words": int(self.init_max_words_spin.value()),
+            "pip_shape": str(self.init_pip_shape_combo.currentData() or "circle"),
+            "pip_position": str(self.init_pip_pos_combo.currentData() or "top_right"),
+            "frame_border_color_hex": self.init_border_col_btn.color_hex(),
+            "zoom_punch_enabled": self.init_zoom_punch_chk.isChecked(),
+            "vignette_enabled": self.init_vignette_chk.isChecked(),
+            "topic_header_enabled": self.init_topic_hdr_chk.isChecked(),
+            "topic_header_text": self.init_topic_hdr_edit.text().strip(),
+            "framing_mode": str(self.framing_combo.currentData() or "smart_face"),
+        }
+        custom_lm = str(self.init_layout_mode_combo.currentData() or "")
+        if custom_lm:
+            overrides["layout_mode"] = custom_lm
+        place = self.init_sub_pos_combo.currentData()
+        if place:
+            overrides["subtitle_placement"] = place
+        effective_lm = custom_lm or tpl_layout
+        if effective_lm in ("split_screen", "multi_speaker_split"):
+            overrides["split_ratio_top"] = round(self.init_split_spin.value() / 100.0, 2)
+        return overrides
 
     def _submit_job(self) -> None:
         is_local = self.source_stack.currentIndex() == 1
@@ -614,6 +1305,7 @@ class MainWindow(QMainWindow):
             )
             return
 
+        edit_fmt = self.format_combo.currentData() or "podcast"
         try:
             req = JobRequest(
                 source_type="local_file" if is_local else "youtube_url",
@@ -625,13 +1317,14 @@ class MainWindow(QMainWindow):
                 max_duration_sec=max_dur,
                 aspect_ratio=self.aspect_combo.currentText(),  # type: ignore[arg-type]
                 padding_sec=round(self.padding_spin.value(), 2),
-                edit_format=self.format_combo.currentData() or "podcast",  # type: ignore[arg-type]
+                edit_format=edit_fmt,  # type: ignore[arg-type]
                 framing_mode=self.framing_combo.currentData() or "smart_face",  # type: ignore[arg-type]
                 enable_subtitles=self.subtitles_chk.isChecked(),
                 enable_hook_title=self.hook_title_chk.isChecked(),
                 enable_opening_tts=self.opening_tts_chk.isChecked(),
                 enable_backsound=self.backsound_chk.isChecked(),
                 enable_viral_polish=self.viral_polish_chk.isChecked(),
+                initial_style_overrides=self._collect_initial_style_overrides(edit_fmt),
             )
         except Exception as exc:
             QMessageBox.warning(self, "Input Tidak Valid", str(exc))
@@ -643,6 +1336,7 @@ class MainWindow(QMainWindow):
         else:
             self.url_input.clear()
         self._bridge.submit_request(req)
+        self.go_to_step(2)
 
     def _on_job_updated(self, state: JobState) -> None:
         is_new = state.job_id not in self._jobs
@@ -654,8 +1348,69 @@ class MainWindow(QMainWindow):
         if self._selected_job_id == job_id:
             self.log_viewer.append_line(line)
 
+    def _open_clip_in_studio(self, clip_index: int) -> None:
+        if not self._selected_job_id:
+            return
+        state = self._jobs.get(self._selected_job_id)
+        if state is not None:
+            self.studio_widget.load_job_context(state, select_clip_index=clip_index)
+            self.go_to_step(3)
+
+    def _on_studio_render_requested(self, job_id: str, config: object) -> None:
+        from atro.core.composer_schema import ClipComposerConfig
+
+        if isinstance(config, ClipComposerConfig):
+            self.studio_widget.export_btn.setEnabled(False)
+            self.studio_widget.export_btn.setText("Sedang Render FFmpeg...")
+            self._bridge.render_custom_clip(job_id, config)
+
+    def _on_studio_standalone_render_requested(self, source_video_path: str, config: object) -> None:
+        from atro.core.composer_schema import ClipComposerConfig
+
+        if isinstance(config, ClipComposerConfig):
+            self.studio_widget.export_btn.setEnabled(False)
+            self.studio_widget.export_btn.setText("Sedang Render FFmpeg...")
+            self._bridge.render_standalone_clip(source_video_path, config)
+
+    def _on_custom_clip_rendered(self, job_id: str, rendered: object) -> None:
+        self.studio_widget.export_btn.setEnabled(True)
+        self.studio_widget.export_btn.setText("Simpan & Render Video (FFmpeg)")
+        state = self._jobs.get(job_id)
+        if state is not None and self._selected_job_id == job_id:
+            self._refresh_detail_panel(state)
+        out_path = getattr(rendered, "output_path", "")
+        QMessageBox.information(
+            self,
+            "Export Selesai",
+            f"Klip berhasil dirender ulang via FFmpeg:\n{out_path}",
+        )
+
+    def _on_standalone_clip_rendered(self, rendered: object) -> None:
+        self.studio_widget.export_btn.setEnabled(True)
+        self.studio_widget.export_btn.setText("Simpan & Render Video (FFmpeg)")
+        out_path = getattr(rendered, "output_path", "")
+        QMessageBox.information(
+            self,
+            "Export Video Studio Selesai",
+            f"Video hasil Studio berhasil diekspor:\n{out_path}",
+        )
+
     def _on_bridge_error(self, msg: str) -> None:
+        self.studio_widget.export_btn.setEnabled(True)
+        self.studio_widget.export_btn.setText("Simpan & Render Video (FFmpeg)")
         QMessageBox.critical(self, "Kesalahan Pipeline", msg)
+
+    def _on_job_card_clicked(self, job_id: str) -> None:
+        self._select_job(job_id)
+        self.go_to_step(2)
+
+    def _cancel_selected_job(self) -> None:
+        if self._selected_job_id:
+            self._bridge.cancel_job(self._selected_job_id)
+
+    def _resume_selected_job(self) -> None:
+        if self._selected_job_id:
+            self._bridge.resume_job(self._selected_job_id)
 
     def _upsert_job(self, state: JobState, select: bool = False) -> None:
         self._jobs[state.job_id] = state
@@ -665,18 +1420,19 @@ class MainWindow(QMainWindow):
         card = self._job_cards.get(state.job_id)
         if card is None:
             card = JobCard(state)
-            card.clicked.connect(self._select_job)
+            card.clicked.connect(self._on_job_card_clicked)
             card.open_folder_requested.connect(self._open_job_folder)
             card.resume_requested.connect(self._bridge.resume_job)
             card.cancel_requested.connect(self._bridge.cancel_job)
             self._job_cards[state.job_id] = card
-            # Insert at top (index 0) so newest jobs appear first
             self.jobs_vbox.insertWidget(0, card)
         else:
             card.update_state(state)
 
         if select or self._selected_job_id is None:
             self._select_job(state.job_id)
+        elif self._selected_job_id == state.job_id and state.status == JobStatus.COMPLETED:
+            self.studio_widget.load_job_context(state)
 
     def _select_job(self, job_id: str) -> None:
         self._selected_job_id = job_id
@@ -687,9 +1443,56 @@ class MainWindow(QMainWindow):
         if state is not None:
             self._refresh_detail_panel(state)
             self.log_viewer.load_file(Path(state.log_path))
+            self.studio_widget.load_job_context(state)
+
+    def _update_stage_nodes(self, state: JobState) -> None:
+        order = {
+            JobStatus.QUEUED: -1,
+            JobStatus.DOWNLOADING: 0,
+            JobStatus.TRANSCRIBING: 1,
+            JobStatus.ANALYZING: 2,
+            JobStatus.CUTTING: 3,
+            JobStatus.COMPLETED: 4,
+        }
+        cur_idx = order.get(state.status, -1)
+        for idx, node in enumerate(self.stage_nodes):
+            if state.status == JobStatus.COMPLETED or idx < cur_idx:
+                st = "done"
+            elif idx == cur_idx:
+                st = "active"
+            else:
+                st = "idle"
+            node.setProperty("state", st)
+            _repolish(node)
+
+        self.step3_progress_bar.setValue(int(round(state.progress_pct)))
+        if state.status == JobStatus.COMPLETED:
+            tone = "ok"
+        elif state.status == JobStatus.FAILED:
+            tone = "error"
+        elif state.status == JobStatus.CANCELLED:
+            tone = "warn"
+        else:
+            tone = "info"
+        self.step3_progress_bar.setProperty("tone", tone)
+        _repolish(self.step3_progress_bar)
+
+        is_active = state.status in (
+            JobStatus.QUEUED,
+            JobStatus.DOWNLOADING,
+            JobStatus.TRANSCRIBING,
+            JobStatus.ANALYZING,
+            JobStatus.CUTTING,
+        )
+        can_resume = state.status in (JobStatus.FAILED, JobStatus.CANCELLED)
+        self.step3_cancel_btn.setVisible(is_active)
+        self.step3_resume_btn.setVisible(can_resume)
 
     def _refresh_detail_panel(self, state: JobState) -> None:
-        self.detail_title.setText(f"Job {state.job_id}  •  {state.status.value}")
+        self.detail_title.setText(
+            f"Job {state.job_id}  •  {state.request.display_source}  •  {state.status.value} ({state.progress_pct:.0f}%)"
+        )
+        self._update_stage_nodes(state)
 
         if state.error:
             self.job_error_label.setText(state.error)
@@ -700,7 +1503,6 @@ class MainWindow(QMainWindow):
         clips_dir = Path(state.workspace_dir) / "clips"
         self.open_clips_dir_btn.setVisible(clips_dir.is_dir())
 
-        # Clear existing clip cards and stretch items while preserving self.clips_empty_label
         for i in reversed(range(self.clips_vbox.count())):
             item = self.clips_vbox.itemAt(i)
             if item is None:
@@ -726,18 +1528,20 @@ class MainWindow(QMainWindow):
         if render_result and render_result.rendered_clips:
             self.clips_empty_label.setVisible(False)
             for clip in render_result.rendered_clips:
-                self.clips_vbox.addWidget(ClipCard(clip))
+                card = ClipCard(clip)
+                card.customize_requested.connect(self._open_clip_in_studio)
+                self.clips_vbox.addWidget(card)
         else:
             if state.status == JobStatus.COMPLETED:
                 self.clips_empty_label.setText("Job selesai namun tidak ada data klip yang termuat.")
             elif state.status == JobStatus.FAILED:
-                self.clips_empty_label.setText("Job berhenti karena error. Cek tab Live Log atau klik Resume.")
+                self.clips_empty_label.setText("Job berhenti karena error. Klik 'Lihat Log Proses' atau 'Lanjutkan (Resume)'.")
             elif state.status == JobStatus.CANCELLED:
-                self.clips_empty_label.setText("Job dibatalkan. Klik Resume jika ingin melanjutkan.")
+                self.clips_empty_label.setText("Job dibatalkan. Klik 'Lanjutkan (Resume)' jika ingin melanjutkan.")
             else:
                 self.clips_empty_label.setText(
                     f"Sedang memproses tahap '{state.current_stage}' ({state.progress_pct:.0f}%)...\n"
-                    "Hasil klip akan muncul di sini setelah tahap pemotongan selesai."
+                    "Hasil klip akan muncul di sini setelah tahap render selesai."
                 )
             self.clips_empty_label.setVisible(True)
 
@@ -767,7 +1571,7 @@ class MainWindow(QMainWindow):
 
 
 def launch_gui() -> int:
-    """Create QApplication, apply Flat Modern stylesheet, and start MainWindow."""
+    """Create QApplication, apply WinUI 3 Orange stylesheet, and start MainWindow."""
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(__version__)
