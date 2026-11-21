@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -25,7 +25,7 @@ class JobStatus(str, Enum):
 
 SourceType = Literal["youtube_url", "local_file"]
 AspectRatio = Literal["16:9", "9:16"]
-EditFormat = Literal["podcast", "game"]
+EditFormat = Literal["podcast", "game", "twitch_comment", "subathon"]
 FramingMode = Literal["smart_face", "fit_all_blur", "center_crop", "face_tracking"]
 TranscriptSource = Literal["yt_dlp_manual_sub", "yt_dlp_auto_sub", "faster_whisper"]
 
@@ -49,6 +49,7 @@ class JobRequest(BaseModel):
     enable_opening_tts: bool = True
     enable_backsound: bool = True
     enable_viral_polish: bool = True
+    initial_style_overrides: Optional[dict[str, Any]] = None
 
     @model_validator(mode="after")
     def _validate_request_fields(self) -> "JobRequest":
@@ -139,6 +140,14 @@ class DownloadResult(BaseModel):
     subtitle_candidates: list[SubtitleCandidate] = Field(default_factory=list)
 
 
+class TranscriptWord(BaseModel):
+    """Single word with acoustic start/end timestamps in seconds."""
+
+    word: str
+    start: float = Field(ge=0.0)
+    end: float = Field(gt=0.0)
+
+
 class TranscriptSegment(BaseModel):
     """Single timestamped transcript unit."""
 
@@ -146,6 +155,7 @@ class TranscriptSegment(BaseModel):
     start: float = Field(ge=0.0)
     end: float = Field(gt=0.0)
     text: str
+    words: list[TranscriptWord] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _validate_span(self) -> "TranscriptSegment":
@@ -236,6 +246,7 @@ class RenderedClip(BaseModel):
     edit_format: str = "podcast"
     opening_tts_used: bool = False
     intro_duration_sec: float = 0.0
+    composer_config_path: Optional[str] = None
 
 
 class RenderResult(BaseModel):
