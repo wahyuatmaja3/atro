@@ -363,9 +363,119 @@ def _assemble_framing_plan_from_shots(
     )
 
 
-def _analyze_shots_sync(ctx: FramingContext) -> list[ShotSegmentPlan]:
-    """Sample frames in [ctx.start_sec, ctx.end_sec], detect scene cuts and faces."""
+def _primary_face_cx(boxes: list[FaceBox]) -> Optional[float]:
+    if not boxes:
+        return None
+    main = max(boxes, key=lambda b: (b.conf, b.w * b.h))
+    return main.cx
+
+
+def _is_camera_angle_cut(
+    samples: list[tuple[float, Any, Any, list[FaceBox]]],
+    idx: int,
+    active_group: list[tuple[float, list[FaceBox]]],
+) -> bool:
+    """Detect color cuts, same-studio spatial layout shifts, and speaker face jumps."""
     import cv2
+    import numpy as np
+
+    _, prev_hist, prev_grid, _ = samples[idx - 1]
+    _, cur_hist, cur_grid, cur_boxes = samples[idx]
+
+    corr = float(cv2.compareHist(prev_hist, cur_hist, cv2.HISTCMP_CORREL))
+    luma_diff = float(np.mean(np.abs(cur_grid - prev_grid))) / 255.0
+
+    # a) Global color cut & b) Same-studio spatial angle cut
+    if corr < 0.72:
+        return True
+    if luma_diff > 0.13 or (corr < 0.86 and luma_diff > 0.085):
+        return True
+
+    # c) Face position / speaker-angle jump
+    grp_nonempty = [item[1] for item in active_group if item[1]]
+    if cur_boxes and grp_nonempty:
+        prev_boxes = grp_nonempty[-1]
+        prev_cxs = [c for c in (_primary_face_cx(b) for b in grp_nonempty[-3:]) if c is not None]
+        grp_mean_cx = sum(prev_cxs) / len(prev_cxs) if prev_cxs else None
+        cur_cx = _primary_face_cx(cur_boxes)
+
+        count_changed = len(prev_boxes) != len(cur_boxes)
+        face_jumped = (
+            grp_mean_cx is not None
+            and cur_cx is not None
+            and abs(cur_cx - grp_mean_cx) > 0.14
+        )
+        if face_jumped or count_changed:
+            if luma_diff > 0.045:
+                return True
+            if idx + 1 < len(samples):
+                next_boxes = samples[idx + 1][3]
+                next_cx = _primary_face_cx(next_boxes)
+                if (
+                    face_jumped
+                    and next_cx is not None
+                    and grp_mean_cx is not None
+                    and abs(next_cx - grp_mean_cx) > 0.14
+                ):
+                    return True
+                if count_changed and next_boxes and len(next_boxes) == len(cur_boxes):
+                    return True
+    return False
+
+
+def _detect_faces_in_frame(
+    small_bgr: Any,
+    gray: Any,
+    yunet: Any,
+    frontal_clf: Any,
+    profile_clf: Any,
+    run_haar_fallback: bool = True,
+) -> list[FaceBox]:
+    """Detect faces on one downscaled frame via YuNet with Haar frontal+profile fallback."""
+    import cv2
+
+    sh, sw = small_bgr.shape[:2]
+    boxes: list[FaceBox] = []
+    if yunet is not None:
+        yunet.setInputSize((sw, sh))
+        _, faces_arr = yunet.detect(small_bgr)
+        if faces_arr is not None:
+            for row in faces_arr:
+                bx, by, bw, bh = float(row[0]), float(row[1]), float(row[2]), float(row[3])
+                conf = float(row[-1]) if len(row) > 4 else 0.9
+                if bw / sw >= 0.035 and bh / sh >= 0.035:
+                    boxes.append(
+                        FaceBox(
+                            x=max(0.0, bx / sw),
+                            y=max(0.0, by / sh),
+                            w=min(1.0, bw / sw),
+                            h=min(1.0, bh / sh),
+                            conf=conf,
+                        )
+                    )
+
+    if not boxes and (run_haar_fallback or yunet is None):
+        gray_eq = cv2.equalizeHist(gray)
+        min_side = max(24, int(round(sw * 0.04)))
+        raw_boxes: list[FaceBox] = []
+        if frontal_clf is not None and not frontal_clf.empty():
+            for x, y, w, h in frontal_clf.detectMultiScale(gray_eq, 1.15, 4, minSize=(min_side, min_side)):
+                raw_boxes.append(FaceBox(x / sw, y / sh, w / sw, h / sh, conf=0.9))
+        if profile_clf is not None and not profile_clf.empty():
+            for x, y, w, h in profile_clf.detectMultiScale(gray_eq, 1.15, 4, minSize=(min_side, min_side)):
+                raw_boxes.append(FaceBox(x / sw, y / sh, w / sw, h / sh, conf=0.75))
+            flipped = cv2.flip(gray_eq, 1)
+            for x, y, w, h in profile_clf.detectMultiScale(flipped, 1.15, 4, minSize=(min_side, min_side)):
+                orig_x = (sw - x - w) / sw
+                raw_boxes.append(FaceBox(orig_x, y / sh, w / sw, h / sh, conf=0.75))
+        boxes = _nms_boxes(raw_boxes, iou_thresh=0.35)
+    return boxes
+
+
+def _analyze_shots_sync(ctx: FramingContext) -> list[ShotSegmentPlan]:
+    """Sample frames in [ctx.start_sec, ctx.end_sec], detect angle cuts and faces."""
+    import cv2
+    import numpy as np
 
     duration = max(0.5, ctx.end_sec - ctx.start_sec)
     cap = cv2.VideoCapture(str(ctx.source_path))
@@ -381,7 +491,7 @@ def _analyze_shots_sync(ctx: FramingContext) -> list[ShotSegmentPlan]:
                     str(yunet_path),
                     "",
                     (320, 240),
-                    score_threshold=0.62,
+                    score_threshold=0.50,
                     nms_threshold=0.30,
                 )
             except Exception:
@@ -395,86 +505,79 @@ def _analyze_shots_sync(ctx: FramingContext) -> list[ShotSegmentPlan]:
         frontal_clf = cv2.CascadeClassifier(str(frontal_path)) if frontal_path.is_file() else None
         profile_clf = cv2.CascadeClassifier(str(profile_path)) if profile_path.is_file() else None
 
-        # Sample ~2 FPS, capped between 4 and 90 samples per clip for fast runtime
-        sample_step = 0.5
-        if duration / sample_step > 90:
-            sample_step = duration / 90.0
+        # Sample every ~0.40s (capped at 48 samples) using sequential cap.grab() for 10x speed
+        sample_step = max(0.40, duration / 48.0)
         timestamps: list[float] = []
         t = 0.0
-        while t < duration - 0.15:
+        while t < duration - 0.08:
             timestamps.append(round(t, 3))
             t += sample_step
         if not timestamps:
             timestamps.append(0.0)
 
-        samples: list[tuple[float, Any, list[FaceBox]]] = []
-        for rel_t in timestamps:
-            abs_ms = (ctx.start_sec + rel_t) * 1000.0
-            cap.set(cv2.CAP_PROP_POS_MSEC, abs_ms)
-            ok, frame = cap.read()
+        src_fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+        if src_fps <= 1.0 or src_fps > 120.0:
+            src_fps = max(10.0, min(60.0, float(ctx.fps or 30.0)))
+
+        if ctx.start_sec > 0.05:
+            cap.set(cv2.CAP_PROP_POS_MSEC, ctx.start_sec * 1000.0)
+
+        samples: list[tuple[float, Any, Any, list[FaceBox]]] = []
+        prev_rel_t: Optional[float] = None
+        for s_idx, rel_t in enumerate(timestamps):
+            frame = None
+            ok = False
+            if prev_rel_t is None:
+                ok, frame = cap.read()
+            else:
+                n_frames = max(1, int(round((rel_t - prev_rel_t) * src_fps)))
+                grab_ok = True
+                for _ in range(n_frames - 1):
+                    if not cap.grab():
+                        grab_ok = False
+                        break
+                if grab_ok:
+                    ok, frame = cap.read()
+                if not ok or frame is None:
+                    cap.set(cv2.CAP_PROP_POS_MSEC, (ctx.start_sec + rel_t) * 1000.0)
+                    ok, frame = cap.read()
+
+            prev_rel_t = rel_t
             if not ok or frame is None:
                 continue
 
             fh, fw = frame.shape[:2]
-            if fw > 640:
-                scale = 640.0 / fw
-                small = cv2.resize(frame, (640, max(2, int(round(fh * scale)))), interpolation=cv2.INTER_AREA)
+            if fw > 480:
+                scale = 480.0 / fw
+                small = cv2.resize(frame, (480, max(2, int(round(fh * scale)))), interpolation=cv2.INTER_AREA)
             else:
                 small = frame
-            sh, sw = small.shape[:2]
 
-            # HSV histogram for scene-cut detection
+            # HSV histogram + spatial grayscale grid for camera-angle cut detection
             hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
             hist = cv2.calcHist([hsv], [0, 1], None, [24, 16], [0, 180, 0, 256])
             cv2.normalize(hist, hist, 0, 1, cv2.NORM_MINMAX)
+            gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+            grid = cv2.resize(gray, (32, 18), interpolation=cv2.INTER_AREA).astype(np.float32)
 
-            boxes: list[FaceBox] = []
-            if yunet is not None:
-                yunet.setInputSize((sw, sh))
-                _, faces_arr = yunet.detect(small)
-                if faces_arr is not None:
-                    for row in faces_arr:
-                        bx, by, bw, bh = float(row[0]), float(row[1]), float(row[2]), float(row[3])
-                        conf = float(row[-1]) if len(row) > 4 else 0.9
-                        if bw / sw >= 0.035 and bh / sh >= 0.035:
-                            boxes.append(
-                                FaceBox(
-                                    x=max(0.0, bx / sw),
-                                    y=max(0.0, by / sh),
-                                    w=min(1.0, bw / sw),
-                                    h=min(1.0, bh / sh),
-                                    conf=conf,
-                                )
-                            )
-            else:
-                gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-                gray = cv2.equalizeHist(gray)
-                min_side = max(24, int(round(sw * 0.04)))
-                raw_boxes: list[FaceBox] = []
-                if frontal_clf is not None and not frontal_clf.empty():
-                    for x, y, w, h in frontal_clf.detectMultiScale(gray, 1.15, 4, minSize=(min_side, min_side)):
-                        raw_boxes.append(FaceBox(x / sw, y / sh, w / sw, h / sh, conf=0.9))
-                if profile_clf is not None and not profile_clf.empty():
-                    for x, y, w, h in profile_clf.detectMultiScale(gray, 1.15, 4, minSize=(min_side, min_side)):
-                        raw_boxes.append(FaceBox(x / sw, y / sh, w / sw, h / sh, conf=0.75))
-                    flipped = cv2.flip(gray, 1)
-                    for x, y, w, h in profile_clf.detectMultiScale(flipped, 1.15, 4, minSize=(min_side, min_side)):
-                        orig_x = (sw - x - w) / sw
-                        raw_boxes.append(FaceBox(orig_x, y / sh, w / sw, h / sh, conf=0.75))
-                boxes = _nms_boxes(raw_boxes, iou_thresh=0.35)
-
-            samples.append((rel_t, hist, boxes))
+            boxes = _detect_faces_in_frame(
+                small,
+                gray,
+                yunet,
+                frontal_clf,
+                profile_clf,
+                run_haar_fallback=(yunet is None or s_idx % 2 == 0),
+            )
+            samples.append((rel_t, hist, grid, boxes))
 
         if not samples:
             return []
 
-        # Partition into raw shots via HSV correlation scene-cut detection
-        raw_groups: list[list[tuple[float, list[FaceBox]]]] = [[(samples[0][0], samples[0][2])]]
+        # Partition into raw shots across color, spatial layout, and face-jump angle cuts
+        raw_groups: list[list[tuple[float, list[FaceBox]]]] = [[(samples[0][0], samples[0][3])]]
         for idx in range(1, len(samples)):
-            prev_hist = samples[idx - 1][1]
-            cur_t, cur_hist, cur_boxes = samples[idx]
-            corr = cv2.compareHist(prev_hist, cur_hist, cv2.HISTCMP_CORREL)
-            if corr < 0.65:
+            cur_t, _, _, cur_boxes = samples[idx]
+            if _is_camera_angle_cut(samples, idx, raw_groups[-1]):
                 raw_groups.append([(cur_t, cur_boxes)])
             else:
                 raw_groups[-1].append((cur_t, cur_boxes))
@@ -496,26 +599,28 @@ def _analyze_shots_sync(ctx: FramingContext) -> list[ShotSegmentPlan]:
                 )
             )
 
-        # Merge ultra-short (< 1.0s) shots into neighbor
+        # Merge ultra-short (< 0.45s) faceless (center_crop) shots into neighbor
         merged: list[ShotSegmentPlan] = []
         for shot in raw_shots:
-            if merged and (shot.t_end - shot.t_start) < 1.0:
+            if merged and (shot.t_end - shot.t_start) < 0.45 and shot.mode == "center_crop":
                 merged[-1].t_end = shot.t_end
             else:
                 merged.append(shot)
 
-        if len(merged) >= 2 and (merged[0].t_end - merged[0].t_start) < 1.0:
+        if len(merged) >= 2 and (merged[0].t_end - merged[0].t_start) < 0.45 and merged[0].mode == "center_crop":
             merged[1].t_start = merged[0].t_start
             merged.pop(0)
 
-        # Merge adjacent shots with identical mode and similar face centers
+        # Merge adjacent shots with identical mode and nearly identical face centers
         compacted: list[ShotSegmentPlan] = []
         for shot in merged:
             if compacted and compacted[-1].mode == shot.mode and len(compacted[-1].centers) == len(shot.centers):
-                max_shift = max(
-                    abs(c1[0] - c2[0]) for c1, c2 in zip(compacted[-1].centers, shot.centers)
-                ) if shot.centers else 0.0
-                if max_shift < 0.08:
+                max_shift = (
+                    max(abs(c1[0] - c2[0]) for c1, c2 in zip(compacted[-1].centers, shot.centers))
+                    if shot.centers
+                    else 0.0
+                )
+                if max_shift < 0.07:
                     prev = compacted[-1]
                     total_dur = max(0.1, (prev.t_end - prev.t_start) + (shot.t_end - shot.t_start))
                     w_prev = (prev.t_end - prev.t_start) / total_dur
@@ -534,8 +639,8 @@ def _analyze_shots_sync(ctx: FramingContext) -> list[ShotSegmentPlan]:
                     continue
             compacted.append(shot)
 
-        # Cap to max 10 shots to keep filtergraph fast and compact
-        while len(compacted) > 10:
+        # Cap to max 16 shots to support fast-cut multi-angle podcasts cleanly
+        while len(compacted) > 16:
             shortest_idx = min(range(len(compacted)), key=lambda i: compacted[i].t_end - compacted[i].t_start)
             if shortest_idx > 0:
                 compacted[shortest_idx - 1].t_end = compacted[shortest_idx].t_end

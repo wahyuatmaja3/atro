@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 from pathlib import Path
 from typing import Optional
 
@@ -29,6 +30,25 @@ def pick_backsound_for_clip(tracks: list[Path], clip_index: int) -> Optional[Pat
     return tracks[idx]
 
 
+def select_backsound_track(
+    tracks: list[Path],
+    mode: str,
+    clip_index: int,
+    selected_filename: Optional[str] = None,
+) -> Optional[Path]:
+    """Select a local backsound track using manual filename, random, or clip rotation."""
+    if not tracks:
+        return None
+    if mode == "manual" and selected_filename:
+        target_name = selected_filename.strip().lower()
+        for t in tracks:
+            if t.name.lower() == target_name:
+                return t
+    if mode == "random":
+        return random.choice(tracks)
+    return pick_backsound_for_clip(tracks, clip_index)
+
+
 def build_audio_filter_chain(
     has_source_audio: bool,
     has_backsound: bool,
@@ -39,6 +59,7 @@ def build_audio_filter_chain(
     intro_tts_input_idx: Optional[int] = None,
     intro_duration_sec: float = 0.0,
     bgm_input_idx: int = 1,
+    enable_loudnorm: bool = False,
 ) -> tuple[list[str], Optional[str]]:
     """Build FFmpeg filter_complex audio lines and return `(lines, output_label)`."""
     dur_main = max(0.5, round(float(duration_sec), 3))
@@ -64,6 +85,8 @@ def build_audio_filter_chain(
             voice_parts = ["aresample=async=1:first_pts=0"]
             if enable_voice_polish:
                 voice_parts.append("highpass=f=80,dynaudnorm=f=150:g=15:p=0.90:m=5")
+            if enable_loudnorm:
+                voice_parts.append("loudnorm=I=-16:TP=-1.5:LRA=11")
             voice_parts.append("aformat=sample_rates=48000:channel_layouts=stereo")
             voice_parts.append(f"atrim=0:{dur_main:.3f},asetpts=PTS-STARTPTS")
             lines.append(f"[0:a]{','.join(voice_parts)}[a_main]")
@@ -78,6 +101,8 @@ def build_audio_filter_chain(
         voice_parts = ["aresample=async=1:first_pts=0"]
         if enable_voice_polish:
             voice_parts.append("highpass=f=80,dynaudnorm=f=150:g=15:p=0.90:m=5")
+        if enable_loudnorm:
+            voice_parts.append("loudnorm=I=-16:TP=-1.5:LRA=11")
         voice_parts.append("aformat=sample_rates=48000:channel_layouts=stereo")
         voice_chain = ",".join(voice_parts)
 
