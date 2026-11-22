@@ -43,6 +43,14 @@ assets_dir = project_root / "atro" / "assets"
 if assets_dir.is_dir():
     for asset_file in assets_dir.glob("*.onnx"):
         datas.append((str(asset_file), "atro/assets"))
+    for subdir in ("templates", "sfx", "diarization"):
+        sub_path = assets_dir / subdir
+        if sub_path.is_dir():
+            for child in sub_path.rglob("*"):
+                if child.is_file():
+                    rel_parent = child.relative_to(assets_dir).parent
+                    dest_dir = f"atro/assets/{rel_parent.as_posix()}"
+                    datas.append((str(child), dest_dir))
 
 for pkg in ("ctranslate2", "onnxruntime", "cv2"):
     try:
