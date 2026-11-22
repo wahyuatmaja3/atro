@@ -30,7 +30,7 @@ CaptionRecipeId = Literal[
 ]
 BlurredFrameAspect = Literal["1:1", "4:3", "16:9"]
 SubtitleStyleMode = Literal["karaoke_highlight", "kinetic_1_2", "podcast_3_4", "plain"]
-SubtitlePlacementPreset = Literal["bottom_safe", "split_line_center", "top_safe", "custom"]
+SubtitlePlacementPreset = Literal["bottom_safe", "split_line_center", "top_safe", "above_speaker", "custom"]
 SubtitleAnimationMode = Literal["pop", "scale", "karaoke", "none"]
 HookTransitionMode = Literal["fade", "slide", "zoom", "whip", "none"]
 WatermarkPosition = Literal[
@@ -68,6 +68,10 @@ class ClipTimingConfig(BaseModel):
     end_time: float = Field(default=30.0, gt=0.0)
     padding_sec: float = Field(default=0.4, ge=0.0, le=2.0)
     opening_tts_enabled: bool = False
+    # Jump-cut: drop long pauses and filler words (applied at render time, see modules/cutter/jump_cut.py)
+    silence_trim_enabled: bool = False
+    silence_max_gap_sec: float = Field(default=0.35, ge=0.10, le=2.0)
+    silence_remove_fillers: bool = True
 
     @model_validator(mode="after")
     def _validate_window(self) -> "ClipTimingConfig":
@@ -113,7 +117,8 @@ TransitionType = Literal[
 ]
 TransitionEasing = Literal["linear", "ease_in_out", "ease_out"]
 TransitionMode = Literal["fixed", "auto"]
-TransitionSfx = Literal["none", "whoosh", "swipe", "pop"]
+# "none", built-in ("whoosh", "swipe", "pop") or the file stem of a custom SFX in the sfx folder
+TransitionSfx = str
 FocusStrategy = Literal["auto_topic", "active_speaker", "manual"]
 GroupMode = Literal["focus_only", "fit_all_blur", "grid"]
 ShotReason = Literal[
@@ -137,6 +142,31 @@ class TransitionConfig(BaseModel):
     sfx_volume: float = Field(default=0.5, ge=0.0, le=1.0)
 
 
+class FaceAnchorBox(BaseModel):
+    """Normalized [0..1] source face bounding box used to anchor speaker-following captions."""
+
+    x: float = Field(ge=0.0, le=1.0)
+    y: float = Field(ge=0.0, le=1.0)
+    w: float = Field(gt=0.0, le=1.0)
+    h: float = Field(gt=0.0, le=1.0)
+    confidence: float = Field(default=0.85, ge=0.0, le=1.0)
+
+
+class SpeakerTurnSpan(BaseModel):
+    """Clip-local diarized speaker activity window [t_start, t_end] in seconds."""
+
+    t_start: float = Field(ge=0.0)
+    t_end: float = Field(gt=0.0)
+    speaker_id: str
+    confidence: float = Field(default=0.85, ge=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def _validate_span(self) -> "SpeakerTurnSpan":
+        if self.t_end <= self.t_start:
+            self.t_end = round(self.t_start + 0.1, 3)
+        return self
+
+
 class ShotCropSegment(BaseModel):
     """Per-camera-angle / per-shot crop window within clip-local time [t_start, t_end]."""
 
@@ -150,6 +180,7 @@ class ShotCropSegment(BaseModel):
     reason: ShotReason = "legacy"
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     transition_in: Optional[TransitionConfig] = None
+    speaker_faces: dict[str, FaceAnchorBox] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _validate_span(self) -> "ShotCropSegment":
@@ -211,6 +242,7 @@ class LayoutLayerConfig(BaseModel):
         )
     )
     shot_crops: list[ShotCropSegment] = Field(default_factory=list)
+    speaker_turns: list[SpeakerTurnSpan] = Field(default_factory=list)
     transition: TransitionConfig = Field(default_factory=TransitionConfig)
     focus_strategy: FocusStrategy = "auto_topic"
     group_mode: GroupMode = "fit_all_blur"
@@ -306,6 +338,7 @@ class SubtitleLayerConfig(BaseModel):
     pos_x: int = Field(default=540, ge=60, le=1020)
     pos_y: int = Field(default=1520, ge=120, le=1840)
     placement_preset: SubtitlePlacementPreset = "bottom_safe"
+    above_speaker_gap_px: int = Field(default=40, ge=0, le=200)
     primary_color_hex: str = "#FFFFFF"
     highlight_color_hex: str = "#FACC15"
     outline_color_hex: str = "#000000"
@@ -413,6 +446,8 @@ class ClimaxEffectsConfig(BaseModel):
     zoom_punch_start_sec: float = Field(default=2.0, ge=0.0)
     zoom_punch_duration_sec: float = Field(default=1.5, ge=0.2, le=10.0)
     zoom_punch_factor: float = Field(default=1.12, ge=1.02, le=1.40)
+    # >0 repeats the punch every N seconds after `zoom_punch_start_sec` (0 = single punch)
+    zoom_punch_repeat_sec: float = Field(default=0.0, ge=0.0, le=30.0)
     progress_bar_enabled: bool = True
     progress_bar_color_hex: str = "#FACC15"
     vignette_enabled: bool = False
@@ -434,8 +469,17 @@ class OverlayLayerConfig(BaseModel):
     climax_effects: ClimaxEffectsConfig = Field(default_factory=ClimaxEffectsConfig)
 
 
+class ComposerSfxCue(BaseModel):
+    """Contextual meme/punchline SFX trigger at a clip-relative timestamp [0..duration]."""
+
+    time_sec: float = Field(default=0.0, ge=0.0)
+    sfx_name: str
+    volume: float = Field(default=0.75, ge=0.0, le=1.0)
+    reason: str = ""
+
+
 class AudioLayerConfig(BaseModel):
-    """Local backsound folder, track selection, ducking, and vocal loudnorm settings."""
+    """Local backsound folder, track selection, ducking, loudnorm, and contextual SFX settings."""
 
     backsound_enabled: bool = True
     backsound_dir: Optional[str] = None
@@ -444,6 +488,8 @@ class AudioLayerConfig(BaseModel):
     backsound_volume: float = Field(default=0.14, ge=0.0, le=1.0)
     audio_ducking: bool = True
     vocal_loudnorm: bool = True
+    contextual_sfx_enabled: bool = False
+    sfx_cues: list[ComposerSfxCue] = Field(default_factory=list)
 
 
 class TranscriptSegmentOverride(BaseModel):
@@ -488,7 +534,7 @@ class ClipComposerConfig(BaseModel):
         if preset == "split_line_center":
             self.subtitles.pos_x = self.canvas_width // 2
             self.subtitles.pos_y = max(140, min(h - 140, int(round(h * self.layout.split_ratio_top))))
-        elif preset == "bottom_safe":
+        elif preset in ("bottom_safe", "above_speaker"):
             self.subtitles.pos_x = self.canvas_width // 2
             self.subtitles.pos_y = int(round(h * 0.79))
         elif preset == "top_safe":

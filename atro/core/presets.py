@@ -232,11 +232,13 @@ def generate_social_copywriting(
     clip_title: str,
     reason: str = "",
     preset_id: str = "podcast",
+    platform_target: str = "youtube_shorts",
 ) -> dict[str, Any]:
-    """Generate instant ready-to-post viral hook caption and hashtags for TikTok/Reels/Shorts."""
+    """Generate instant ready-to-post viral hook caption and hashtags strictly for YouTube Shorts & TikTok."""
     clean_title = (clip_title or "Momen Viral Hari Ini").strip()
     clean_reason = (reason or "").strip()
     pid = normalize_preset_id(preset_id)
+    plat = "tiktok" if str(platform_target).strip().lower() == "tiktok" else "youtube_shorts"
 
     hook_prefix = {
         "podcast": "Plot twist di menit ini 🔥",
@@ -245,12 +247,17 @@ def generate_social_copywriting(
         "subathon": "Momen Subathon paling chaos hari ini ⚡",
     }.get(pid, "Wajib tonton sampai habis 🔥")
 
+    plat_tags = (
+        ["#TikTok", "#TikTokIndonesia", "#FYP", "#ForYou"]
+        if plat == "tiktok"
+        else ["#Shorts", "#YouTubeShorts", "#PodcastShorts"]
+    )
     base_tags = {
-        "podcast": ["#PodcastClips", "#InsightHarian", "#Motivasi", "#FYP", "#Reels", "#Shorts"],
-        "gaming_split": ["#GamingClips", "#GameplayID", "#ProPlayer", "#FYP", "#Shorts", "#GamingReels"],
-        "twitch_comment": ["#StreamerID", "#TwitchClips", "#LiveStream", "#FYP", "#NGAKAK", "#Shorts"],
-        "subathon": ["#Subathon", "#StreamerIndo", "#ViralClips", "#FYP", "#Shorts", "#Entertainment"],
-    }.get(pid, ["#ViralClips", "#FYP", "#Reels", "#Shorts"])
+        "podcast": ["#PodcastClips", "#InsightHarian", "#Motivasi"] + plat_tags,
+        "gaming_split": ["#GamingClips", "#GameplayID", "#ProPlayer"] + plat_tags,
+        "twitch_comment": ["#StreamerID", "#TwitchClips", "#Ngakak"] + plat_tags,
+        "subathon": ["#Subathon", "#StreamerIndo", "#ViralClips"] + plat_tags,
+    }.get(pid, ["#ViralClips", "#PodcastIndo"] + plat_tags)
 
     title_words = re.findall(r"[A-Za-z0-9]{4,}", clean_title)
     custom_tags: list[str] = []
@@ -269,6 +276,7 @@ def generate_social_copywriting(
     )
     hashtags_str = " ".join(all_tags)
     return {
+        "platform_target": plat,
         "hook_headline": f"{hook_prefix} — {clean_title}",
         "caption": caption_body,
         "hashtags": all_tags,
@@ -379,6 +387,14 @@ def build_ready_template_config(
         lay.transition.sfx = meta["transition_sfx"]
 
     apply_caption_recipe(cfg, str(meta["caption_recipe"]))
+    if meta.get("caption_bg_mode") in ("none", "active_word_pill", "full_line_box"):
+        cfg.subtitles.caption_bg_mode = meta["caption_bg_mode"]
+    if meta.get("max_words_per_line") is not None:
+        cfg.subtitles.max_words_per_line = max(1, min(8, int(meta["max_words_per_line"])))
+    if meta.get("auto_emoji_enabled") is not None:
+        cfg.subtitles.auto_emoji_enabled = bool(meta["auto_emoji_enabled"])
+    if meta.get("dual_keyword_enabled") is not None:
+        cfg.subtitles.dual_keyword_enabled = bool(meta["dual_keyword_enabled"])
     if "font_family" in meta and meta["font_family"]:
         cfg.subtitles.font_family = str(meta["font_family"])
     if "highlight_color_hex" in meta:
@@ -400,6 +416,14 @@ def build_ready_template_config(
     cl = ov.climax_effects
     cl.vignette_enabled = bool(meta.get("vignette_enabled", False))
     cl.zoom_punch_enabled = bool(meta.get("zoom_punch_enabled", False))
+    if meta.get("zoom_punch_repeat_sec") is not None:
+        cl.zoom_punch_repeat_sec = max(0.0, min(30.0, float(meta["zoom_punch_repeat_sec"])))
+    if meta.get("silence_trim_enabled") is not None:
+        cfg.timing.silence_trim_enabled = bool(meta["silence_trim_enabled"])
+    if meta.get("silence_max_gap_sec") is not None:
+        cfg.timing.silence_max_gap_sec = max(0.10, min(2.0, float(meta["silence_max_gap_sec"])))
+    if meta.get("contextual_sfx_enabled") is not None:
+        cfg.audio.contextual_sfx_enabled = bool(meta["contextual_sfx_enabled"])
     if "progress_bar_color_hex" in meta:
         cl.progress_bar_color_hex = str(meta["progress_bar_color_hex"])
     topic_on = bool(meta.get("topic_header_enabled", False))

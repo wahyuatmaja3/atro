@@ -418,6 +418,98 @@ _SEED_TEMPLATE_SPECS: list[dict[str, Any]] = [
         "transition_type": "glitch",
         "transition_sfx": "whoosh",
     },
+    # --- 5b. GAYA GINUX (3): jump-cut rapat + zoom punch berulang + SFX + caption di atas pembicara ---
+    {
+        "id": "ginux_clip_meme",
+        "category": "Komedi",
+        "title": "Short Meme Cut (Gaya GiNUX)",
+        "badge": "Jump-Cut • Di Atas Pembicara",
+        "description": "Jeda & filler dibuang, teks Impact kuning selalu di atas pembicara aktif, zoom punch berulang & SFX meme.",
+        "base_preset": "podcast",
+        "job_edit_format": "podcast",
+        "layout_mode": "single_focus",
+        "caption_recipe": "hormozi_viral",
+        "caption_bg_mode": "none",
+        "max_words_per_line": 2,
+        "auto_emoji_enabled": False,
+        "dual_keyword_enabled": False,
+        "placement_preset": "above_speaker",
+        "hook_enabled": False,
+        "vignette_enabled": False,
+        "topic_header_enabled": False,
+        "zoom_punch_enabled": True,
+        "zoom_punch_repeat_sec": 3.5,
+        "silence_trim_enabled": True,
+        "silence_max_gap_sec": 0.30,
+        "contextual_sfx_enabled": True,
+        "font_family": "Impact",
+        "highlight_color_hex": "#FACC15",
+        "focus_strategy": "active_speaker",
+        "transition_mode": "auto",
+        "transition_type": "whip",
+        "transition_sfx": "pop",
+    },
+    {
+        "id": "ginux_reaction_zoom",
+        "category": "Komedi",
+        "title": "Short Reaksi Cepat (Gaya GiNUX)",
+        "badge": "Zoom Berulang • Di Atas Pembicara",
+        "description": "Kamera mengikuti pembicara aktif, teks kuning di atas kepala, zoom punch cepat, jeda dipotong & SFX meme.",
+        "base_preset": "podcast",
+        "job_edit_format": "podcast",
+        "layout_mode": "single_focus",
+        "caption_recipe": "hormozi_viral",
+        "caption_bg_mode": "none",
+        "max_words_per_line": 2,
+        "auto_emoji_enabled": False,
+        "dual_keyword_enabled": False,
+        "placement_preset": "above_speaker",
+        "hook_enabled": False,
+        "vignette_enabled": True,
+        "topic_header_enabled": False,
+        "zoom_punch_enabled": True,
+        "zoom_punch_repeat_sec": 2.5,
+        "silence_trim_enabled": True,
+        "silence_max_gap_sec": 0.40,
+        "contextual_sfx_enabled": True,
+        "font_family": "Impact",
+        "highlight_color_hex": "#FACC15",
+        "focus_strategy": "active_speaker",
+        "transition_mode": "auto",
+        "transition_type": "slide_left",
+        "transition_sfx": "swipe",
+    },
+    {
+        "id": "ginux_drama_banner",
+        "category": "Komedi",
+        "title": "Short Drama Podcast (Gaya GiNUX)",
+        "badge": "Hook Singkat • Di Atas Pembicara",
+        "description": "Hook banner pendek di awal, jeda dipotong halus, teks Impact kuning di atas pembicara + SFX kontekstual.",
+        "base_preset": "podcast",
+        "job_edit_format": "podcast",
+        "layout_mode": "single_focus",
+        "caption_recipe": "hormozi_viral",
+        "caption_bg_mode": "none",
+        "max_words_per_line": 3,
+        "auto_emoji_enabled": False,
+        "dual_keyword_enabled": False,
+        "placement_preset": "above_speaker",
+        "hook_enabled": True,
+        "hook_transition_in": "zoom",
+        "vignette_enabled": True,
+        "topic_header_enabled": False,
+        "zoom_punch_enabled": True,
+        "zoom_punch_repeat_sec": 6.0,
+        "silence_trim_enabled": True,
+        "silence_max_gap_sec": 0.50,
+        "contextual_sfx_enabled": True,
+        "font_family": "Impact",
+        "highlight_color_hex": "#FACC15",
+        "focus_strategy": "active_speaker",
+        "transition_mode": "auto",
+        "transition_type": "zoom_in",
+        "transition_sfx": "whoosh",
+    },
     # --- 6. GAMING (3) ---
     {
         "id": "gaming_split",
@@ -660,6 +752,10 @@ class TemplatePackEntry(BaseModel):
     divider_angle_deg: Optional[float] = None
     divider_color_hex: Optional[str] = None
     caption_recipe: str = "hormozi_viral"
+    caption_bg_mode: Optional[str] = None
+    max_words_per_line: Optional[int] = None
+    auto_emoji_enabled: Optional[bool] = None
+    dual_keyword_enabled: Optional[bool] = None
     placement_preset: str = "bottom_safe"
     hook_enabled: bool = True
     hook_transition_in: Optional[str] = None
@@ -667,6 +763,10 @@ class TemplatePackEntry(BaseModel):
     vignette_enabled: bool = True
     topic_header_enabled: bool = False
     zoom_punch_enabled: bool = False
+    zoom_punch_repeat_sec: Optional[float] = None
+    silence_trim_enabled: Optional[bool] = None
+    silence_max_gap_sec: Optional[float] = None
+    contextual_sfx_enabled: Optional[bool] = None
     font_family: Optional[str] = None
     highlight_color_hex: Optional[str] = None
     secondary_keyword_color_hex: Optional[str] = None
@@ -754,7 +854,7 @@ def recommend_templates_for_context(
         (("game", "gameplay", "clutch", "ranked", "valorant", "mobile legends", "ff", "pubg", "subathon"), ["gaming_split", "pip_facecam_bulat", "subathon"]),
         (("saham", "crypto", "kripto", "bitcoin", "bisnis", "omzet", "cuan", "investasi", "uang", "marketing"), ["biz_crypto_chart", "biz_executive_noir", "biz_case_study_glass"]),
         (("ustadz", "kajian", "tausiyah", "doa", "alquran", "shalat", "hijrah", "pahala", "surga"), ["religi_tausiyah_kalem", "edu_motivasi_sinematik"]),
-        (("ngakak", "kocak", "prank", "wkwk", "haha", "lucu", "standup", "komedi"), ["comedy_punch_whip", "comedy_duet_miring"]),
+        (("ngakak", "kocak", "prank", "wkwk", "haha", "lucu", "standup", "komedi"), ["ginux_clip_meme", "comedy_punch_whip", "ginux_reaction_zoom", "comedy_duet_miring"]),
         (("curhat", "cerita", "horor", "misteri", "plot twist", "selingkuh", "drama"), ["story_drama_zoom", "story_confession_blur"]),
         (("belajar", "tips", "cara", "tutorial", "produktivitas", "coding", "edukasi"), ["edu_abdaal_clean", "edu_whiteboard_pip"]),
         (("berita", "breaking", "viral", "heboh", "trending", "kasus"), ["news_breaking_bar", "podcast_mageran_glass"]),
@@ -893,9 +993,23 @@ def render_template_thumbnail_qimage(
     cfg.subtitles.font_size = max(18, int(round(cfg.subtitles.font_size * 0.5)))
     cfg.subtitles.pos_x = int(round(cfg.subtitles.pos_x * 0.5))
     cfg.subtitles.pos_y = int(round(cfg.subtitles.pos_y * 0.5))
+    cfg.subtitles.above_speaker_gap_px = int(round(cfg.subtitles.above_speaker_gap_px * 0.5))
     cfg.overlays.hook_banner.font_size = max(12, int(round(cfg.overlays.hook_banner.font_size * 0.5)))
     cfg.overlays.hook_banner.pos_y = int(round(cfg.overlays.hook_banner.pos_y * 0.5))
     cfg.overlays.climax_effects.progress_bar_enabled = True
+    if cfg.subtitles.placement_preset == "above_speaker" and not cfg.layout.shot_crops:
+        from atro.core.composer_schema import CropBoxConfig, FaceAnchorBox, ShotCropSegment
+
+        cfg.layout.shot_crops = [
+            ShotCropSegment(
+                t_start=0.0,
+                t_end=10.0,
+                top_crop=CropBoxConfig(auto_detect=True, x=0.08, y=0.0, w=0.34, h=1.0),
+                speaker_id="SPK_1",
+                speaker_faces={"SPK_1": FaceAnchorBox(x=0.18, y=0.28, w=0.14, h=0.24, confidence=0.95)},
+                confidence=0.95,
+            )
+        ]
 
     segs = [
         TranscriptSegment(

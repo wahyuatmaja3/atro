@@ -28,6 +28,7 @@ AspectRatio = Literal["16:9", "9:16"]
 EditFormat = Literal["podcast", "game", "twitch_comment", "subathon"]
 FramingMode = Literal["smart_face", "fit_all_blur", "center_crop", "face_tracking"]
 TranscriptSource = Literal["yt_dlp_manual_sub", "yt_dlp_auto_sub", "faster_whisper"]
+PlatformPreset = Literal["youtube_shorts", "tiktok"]
 
 
 class JobRequest(BaseModel):
@@ -44,6 +45,8 @@ class JobRequest(BaseModel):
     padding_sec: float = Field(default=0.4, ge=0.3, le=0.5)
     edit_format: EditFormat = "podcast"
     framing_mode: FramingMode = "smart_face"
+    platform_target: PlatformPreset = "youtube_shorts"
+    excluded_time_spans: list[list[float]] = Field(default_factory=list)
     enable_subtitles: bool = True
     enable_hook_title: bool = True
     enable_opening_tts: bool = True
@@ -185,6 +188,14 @@ class GeminiFocusHintItem(BaseModel):
     reason: str = Field(default="", description="Alasan singkat titik fokus obrolan di segmen tersebut.")
 
 
+class GeminiSfxCueItem(BaseModel):
+    """Gemini Structured Output contextual meme SFX cue item (flat without exclusiveMinimum)."""
+
+    t_sec: float = Field(description="Waktu muncul SFX dalam detik absolut transkrip (>= 0).")
+    sfx_name: str = Field(description="Nama SFX yang dipilih persis dari daftar SFX tersedia.")
+    reason: str = Field(default="", description="Alasan singkat momen komedi/reaksi yang cocok.")
+
+
 class GeminiClipItem(BaseModel):
     """Gemini Structured Output schema item (kept simple without exclusiveMinimum)."""
 
@@ -197,6 +208,19 @@ class GeminiClipItem(BaseModel):
         default_factory=list,
         description="Opsional: titik penting perbincangan (POI) untuk memandu kamera ke pembicara inti, reaksi, atau group.",
     )
+    sfx_cues: list[GeminiSfxCueItem] = Field(
+        default_factory=list,
+        description="Opsional: momen punchline/reaksi untuk memicu efek suara meme yang sesuai bahasan klip.",
+    )
+
+
+class GeminiTopicOutlineItem(BaseModel):
+    """Gemini Structured Output topic/chapter outline item."""
+
+    topic: str = Field(description="Judul topik/segmen pembahasan singkat.")
+    start_time: float = Field(description="Waktu mulai topik dalam detik (>= 0).")
+    end_time: float = Field(description="Waktu selesai topik dalam detik (> start_time).")
+    summary: str = Field(default="", description="Ringkasan 1 kalimat poin bahasan.")
 
 
 class GeminiClipSelectionSchema(BaseModel):
@@ -204,6 +228,10 @@ class GeminiClipSelectionSchema(BaseModel):
 
     clips: list[GeminiClipItem] = Field(
         description="Daftar klip terbaik yang berdiri sendiri, tidak tumpang tindih, dan tidak terpotong di tengah kalimat."
+    )
+    topic_outline: list[GeminiTopicOutlineItem] = Field(
+        default_factory=list,
+        description="Opsional: daftar topik utama/chapter pembahasan dalam video.",
     )
 
 
@@ -223,6 +251,15 @@ class FocusHintItem(BaseModel):
         return self
 
 
+class SfxCueItem(BaseModel):
+    """Validated contextual SFX trigger inside a clip window."""
+
+    t_sec: float = Field(ge=0.0)
+    sfx_name: str
+    volume: float = Field(default=0.75, ge=0.0, le=1.0)
+    reason: str = ""
+
+
 class ClipCandidate(BaseModel):
     """Validated clip candidate produced by Module 3 (analyzer)."""
 
@@ -232,6 +269,7 @@ class ClipCandidate(BaseModel):
     virality_score: int = Field(ge=1, le=10)
     reason: str
     focus_hints: list[FocusHintItem] = Field(default_factory=list)
+    sfx_cues: list[SfxCueItem] = Field(default_factory=list)
 
     @field_validator("title", "reason")
     @classmethod
@@ -248,12 +286,29 @@ class ClipCandidate(BaseModel):
         return self
 
 
+class TopicOutlineItem(BaseModel):
+    """Validated topic/chapter outline segment for video navigation."""
+
+    topic: str
+    start_time: float = Field(ge=0.0)
+    end_time: float = Field(gt=0.0)
+    summary: str = ""
+
+    @model_validator(mode="after")
+    def _validate_span(self) -> "TopicOutlineItem":
+        if self.end_time <= self.start_time:
+            self.end_time = round(self.start_time + 1.0, 3)
+        return self
+
+
 class AnalysisResult(BaseModel):
     """Output contract of Module 3 (analyzer) -> analysis.json."""
 
     job_id: str
     model: str = "gemini-4-neon"
+    platform_target: PlatformPreset = "youtube_shorts"
     clips: list[ClipCandidate]
+    topic_outline: list[TopicOutlineItem] = Field(default_factory=list)
     validation_warnings: list[str] = Field(default_factory=list)
 
 
