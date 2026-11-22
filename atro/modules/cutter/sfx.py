@@ -101,11 +101,71 @@ def ensure_builtin_sfx_assets(target_dir: Optional[Path] = None) -> dict[str, Pa
     return out
 
 
+CUSTOM_SFX_EXTENSIONS: tuple[str, ...] = (".wav", ".mp3", ".ogg", ".m4a", ".aac", ".flac")
+
+
+def get_custom_sfx_dirs() -> list[Path]:
+    """Folders scanned for user SFX: `<app base>/sfx` first, then bundled `assets/sfx`."""
+    dirs: list[Path] = []
+    try:
+        from atro.config import get_app_base_dir
+
+        dirs.append(Path(get_app_base_dir()) / "sfx")
+    except Exception:
+        pass
+    dirs.append(get_builtin_sfx_dir())
+    return dirs
+
+
+def list_custom_sfx_names() -> list[str]:
+    """Return sorted file stems of user SFX (excluding built-in names)."""
+    names: set[str] = set()
+    for d in get_custom_sfx_dirs():
+        if not d.is_dir():
+            continue
+        for f in d.iterdir():
+            if f.is_file() and f.suffix.lower() in CUSTOM_SFX_EXTENSIONS and f.stem.lower() not in BUILTIN_SFX_NAMES:
+                names.add(f.stem)
+    return sorted(names, key=str.lower)
+
+
+import re
+
+_SFX_NORM_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _norm_sfx_key(name: str) -> str:
+    return _SFX_NORM_RE.sub("", (name or "").lower())
+
+
+def list_all_sfx_names() -> list[str]:
+    """Return built-in SFX names followed by sorted user custom SFX stems."""
+    return [*BUILTIN_SFX_NAMES, *list_custom_sfx_names()]
+
+
+def _find_custom_sfx(name: str) -> Optional[Path]:
+    stem = Path(name).stem.lower()
+    norm_stem = _norm_sfx_key(Path(name).stem)
+    candidates: list[Path] = []
+    for d in get_custom_sfx_dirs():
+        if not d.is_dir():
+            continue
+        for f in d.iterdir():
+            if f.is_file() and f.suffix.lower() in CUSTOM_SFX_EXTENSIONS:
+                if f.stem.lower() == stem:
+                    return f
+                if norm_stem and _norm_sfx_key(f.stem) == norm_stem:
+                    candidates.append(f)
+    return candidates[0] if candidates else None
+
+
 def resolve_transition_sfx_path(sfx_name: str) -> Optional[Path]:
     """Return local WAV path for a built-in transition SFX name or `None` if `none`."""
     clean = (sfx_name or "none").strip().lower()
-    if clean not in BUILTIN_SFX_NAMES:
+    if clean in ("", "none"):
         return None
+    if clean not in BUILTIN_SFX_NAMES:
+        return _find_custom_sfx(sfx_name.strip())
     sfx_dir = get_builtin_sfx_dir()
     candidate = sfx_dir / f"{clean}.wav"
     if candidate.is_file() and candidate.stat().st_size >= 1024:

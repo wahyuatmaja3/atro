@@ -180,17 +180,81 @@ def _compute_word_timings_for_segment(
     return word_timings
 
 
+_STANDALONE_PUNCT_TOKENS = frozenset({".", ",", "!", "?", ";", ":", "...", "…", "-", "—"})
+_ID_TRAILING_BREAK_AVOID = frozenset(
+    {
+        "yang",
+        "dan",
+        "di",
+        "ke",
+        "dari",
+        "untuk",
+        "dengan",
+        "pada",
+        "atau",
+        "karena",
+        "kalau",
+        "seperti",
+        "dalam",
+        "oleh",
+        "tentang",
+        "saat",
+        "ketika",
+        "jika",
+        "bila",
+        "agar",
+        "supaya",
+        "bukan",
+        "tidak",
+        "nggak",
+        "gak",
+        "yg",
+        "dg",
+        "dgn",
+    }
+)
+
+
+def _normalize_caption_words(word_timings: list[CaptionWord]) -> list[CaptionWord]:
+    """Attach standalone punctuation tokens to the previous word so no orphan punctuation line occurs."""
+    merged: list[CaptionWord] = []
+    for w in word_timings:
+        txt = (w.text or "").strip()
+        if not txt:
+            continue
+        if txt in _STANDALONE_PUNCT_TOKENS and merged:
+            prev = merged[-1]
+            merged[-1] = CaptionWord(
+                text=f"{prev.text}{txt}",
+                start=prev.start,
+                end=max(prev.end, w.end),
+            )
+            continue
+        merged.append(CaptionWord(text=txt, start=w.start, end=w.end))
+    return merged
+
+
+def _is_id_glue_word(text: str) -> bool:
+    """Return True if word is an Indonesian preposition/conjunction that should lead the next line."""
+    raw = (text or "").strip()
+    if raw.endswith((".", "!", "?", ",", ";", ":")):
+        return False
+    cleaned = re.sub(r"[^a-z0-9]", "", raw.lower())
+    return cleaned in _ID_TRAILING_BREAK_AVOID
+
+
 def _group_words_pause_aware(
     word_timings: list[CaptionWord],
     max_words: int,
     pause_break_sec: float = 0.22,
 ) -> list[list[CaptionWord]]:
-    """Split word list into chunks respecting silence gaps and sentence/clause punctuation."""
-    if not word_timings:
+    """Split word list into Indonesian-smart chunks avoiding orphan punctuation and dangling conjunctions."""
+    normalized = _normalize_caption_words(word_timings)
+    if not normalized:
         return []
 
-    runs: list[list[CaptionWord]] = [[word_timings[0]]]
-    for w in word_timings[1:]:
+    runs: list[list[CaptionWord]] = [[normalized[0]]]
+    for w in normalized[1:]:
         prev = runs[-1][-1]
         gap = w.start - prev.end
         if gap >= pause_break_sec or prev.text.endswith((".", "!", "?", ",", ";", ":")):
@@ -208,6 +272,12 @@ def _group_words_pause_aware(
                 take = max_words - 1
             else:
                 take = min(max_words, remaining)
+
+            # Avoid breaking a line right after an Indonesian preposition/conjunction
+            while take > 1 and (i + take) < n and _is_id_glue_word(run[i + take - 1].text):
+                take -= 1
+
+            take = max(1, take)
             groups.append(run[i : i + take])
             i += take
     return groups
@@ -591,6 +661,8 @@ def compute_caption_line_layout(
     active_idx: int,
     canvas_w: int,
     canvas_h: int,
+    anchor_x_override: Optional[float] = None,
+    anchor_y_override: Optional[float] = None,
 ) -> CaptionLineLayout:
     """Compute identical word positions, full-line box, active pill box, and emoji anchor."""
     subs = config.subtitles
@@ -613,8 +685,8 @@ def compute_caption_line_layout(
         else -1
     )
 
-    anchor_x = float(subs.pos_x)
-    anchor_y = float(subs.pos_y)
+    anchor_x = float(anchor_x_override if anchor_x_override is not None else subs.pos_x)
+    anchor_y = float(anchor_y_override if anchor_y_override is not None else subs.pos_y)
     baseline_y = (fm.ascent() - fm.descent()) * 0.5
 
     word_boxes: list[WordBoxMetrics] = []
@@ -845,6 +917,8 @@ def generate_composer_ass_file(
     opening_duration_sec: float = 0.0,
     clip_start_sec: Optional[float] = None,
     clip_end_sec: Optional[float] = None,
+    src_w: int = 1920,
+    src_h: int = 1080,
 ) -> Optional[Path]:
     """Generate a 1:1 WYSIWYG .ass subtitle file driven by ClipComposerConfig."""
     subs = config.subtitles
@@ -866,6 +940,8 @@ def generate_composer_ass_file(
     sec_col_tag = hex_to_ass_color(subs.secondary_keyword_color_hex, trailing_amp=True)
     pill_rgb_tag, pill_alpha_tag = _hex_to_ass_rgb_and_alpha(subs.active_word_bg_hex, default_alpha=0)
 
+    from atro.modules.cutter.subtitle_anchors import resolve_chunks_anchor_positions
+
     chunks = build_composer_caption_chunks(
         config,
         segments,
@@ -878,7 +954,29 @@ def generate_composer_ass_file(
     pos_y = int(subs.pos_y)
     blur_tag = f"\\blur{subs.glow_strength:.1f}" if subs.glow_strength > 0 else ""
 
-    for chunk in chunks:
+    base_layouts = [
+        compute_caption_line_layout(
+            config=config,
+            raw_words=[w.text for w in c.words],
+            active_idx=-1,
+            canvas_w=play_res_x,
+            canvas_h=play_res_y,
+        )
+        for c in chunks
+    ]
+    chunk_anchors = resolve_chunks_anchor_positions(
+        chunks=chunks,
+        config=config,
+        src_w=src_w,
+        src_h=src_h,
+        canvas_w=play_res_x,
+        canvas_h=play_res_y,
+        chunk_box_sizes=[(bl.box_w, bl.box_h) for bl in base_layouts],
+    )
+
+    for chunk, (c_anchor_x, c_anchor_y) in zip(chunks, chunk_anchors):
+        cpx = int(round(c_anchor_x))
+        cpy = int(round(c_anchor_y))
         p_hex, h_hex, o_hex = resolve_speaker_colors(config, chunk.speaker)
         p_tag = hex_to_ass_color(p_hex, trailing_amp=True)
         h_tag = hex_to_ass_color(h_hex, trailing_amp=True)
@@ -895,6 +993,8 @@ def generate_composer_ass_file(
             active_idx=-1,
             canvas_w=play_res_x,
             canvas_h=play_res_y,
+            anchor_x_override=c_anchor_x,
+            anchor_y_override=c_anchor_y,
         )
         fit_pct = max(50, int(round(chunk_layout.scale_fit * 100.0)))
 
@@ -906,7 +1006,7 @@ def generate_composer_ass_file(
             )
             dialogue_lines.append(
                 f"Dialogue: 1,{_format_ass_time(c_start)},{_format_ass_time(c_end)},"
-                f"ComposerSub,,0,0,0,,{{\\an5\\pos({pos_x},{pos_y})\\bord0\\shad0"
+                f"ComposerSub,,0,0,0,,{{\\an5\\pos({cpx},{cpy})\\bord0\\shad0"
                 f"\\1c{pill_rgb_tag}\\1a{pill_alpha_tag}\\p1}}{box_path}{{\\p0}}"
             )
 
@@ -915,7 +1015,7 @@ def generate_composer_ass_file(
             em_fs = max(24, int(round(subs.font_size * 0.95)))
             dialogue_lines.append(
                 f"Dialogue: 2,{_format_ass_time(c_start)},{_format_ass_time(c_end)},"
-                f"ComposerSub,,0,0,0,,{{\\an5\\pos({pos_x},{em_y})\\fnSegoe UI Emoji"
+                f"ComposerSub,,0,0,0,,{{\\an5\\pos({cpx},{em_y})\\fnSegoe UI Emoji"
                 f"\\fs{em_fs}\\bord2\\shad2}}{chunk_layout.emoji}"
             )
 
@@ -931,7 +1031,7 @@ def generate_composer_ass_file(
                 else:
                     words_rendered.append(esc)
             fit_tag = f"\\fscx{fit_pct}\\fscy{fit_pct}" if fit_pct < 100 else ""
-            prefix = f"{{\\an5\\pos({pos_x},{pos_y})\\c{p_tag}\\3c{o_tag}{blur_tag}{fit_tag}}}"
+            prefix = f"{{\\an5\\pos({cpx},{cpy})\\c{p_tag}\\3c{o_tag}{blur_tag}{fit_tag}}}"
             dialogue_lines.append(
                 f"Dialogue: 2,{_format_ass_time(c_start)},{_format_ass_time(c_end)},"
                 f"ComposerSub,,0,0,0,,{prefix}{' '.join(words_rendered)}"
@@ -957,6 +1057,8 @@ def generate_composer_ass_file(
                 active_idx=active_idx,
                 canvas_w=play_res_x,
                 canvas_h=play_res_y,
+                anchor_x_override=c_anchor_x,
+                anchor_y_override=c_anchor_y,
             )
 
             if subs.caption_bg_mode == "active_word_pill":
@@ -967,7 +1069,7 @@ def generate_composer_ass_file(
                 )
                 dialogue_lines.append(
                     f"Dialogue: 1,{_format_ass_time(ev_start)},{_format_ass_time(ev_end)},"
-                    f"ComposerSub,,0,0,0,,{{\\an5\\pos({word_layout.pill_center_x:.1f},{pos_y})"
+                    f"ComposerSub,,0,0,0,,{{\\an5\\pos({word_layout.pill_center_x:.1f},{cpy})"
                     f"\\bord0\\shad0\\1c{pill_rgb_tag}\\1a{pill_alpha_tag}\\p1}}{pill_path}{{\\p0}}"
                 )
 
@@ -1015,7 +1117,7 @@ def generate_composer_ass_file(
             elif fit_pct < 100:
                 anim_prefix = f"\\fscx{fit_pct}\\fscy{fit_pct}"
 
-            base_tag = f"{{\\an5\\pos({pos_x},{pos_y})\\c{p_tag}\\3c{o_tag}{blur_tag}{anim_prefix}}}"
+            base_tag = f"{{\\an5\\pos({cpx},{cpy})\\c{p_tag}\\3c{o_tag}{blur_tag}{anim_prefix}}}"
             line_text = base_tag + " ".join(rendered_words)
             dialogue_lines.append(
                 f"Dialogue: 2,{_format_ass_time(ev_start)},{_format_ass_time(ev_end)},"

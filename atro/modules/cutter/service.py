@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from atro.config import AppSettings
-from atro.core.composer_schema import ClipComposerConfig
+from atro.core.composer_schema import ClipComposerConfig, ComposerSfxCue, TranscriptSegmentOverride
 from atro.core.logging_utils import JobLogger
 from atro.core.presets import (
     apply_caption_recipe,
@@ -43,6 +43,16 @@ from atro.modules.cutter.composer_renderer import (
     compile_composer_ffmpeg_plan,
 )
 from atro.modules.cutter.framing import FramingContext, get_framing_strategy
+from atro.modules.cutter.jump_cut import (
+    build_trim_ffmpeg_command,
+    collect_words,
+    is_filler,
+    plan_keep_ranges,
+    remap_segments,
+    remap_time,
+    remap_words,
+    trimmed_duration,
+)
 from atro.modules.cutter.opening_narrator import synthesize_opening_voiceover
 from atro.modules.cutter.subtitle_burner import generate_clip_ass_file
 from atro.modules.cutter.viral_effects import build_viral_video_overlay_filters
@@ -78,9 +88,13 @@ def apply_initial_style_overrides(
         )
         cfg.preset_id = tpl_cfg.preset_id
         cfg.preset_name = tpl_cfg.preset_name
+        cfg.timing.silence_trim_enabled = tpl_cfg.timing.silence_trim_enabled
+        cfg.timing.silence_max_gap_sec = tpl_cfg.timing.silence_max_gap_sec
+        cfg.timing.silence_remove_fillers = tpl_cfg.timing.silence_remove_fillers
         cfg.layout = tpl_cfg.layout
         cfg.subtitles = tpl_cfg.subtitles
         cfg.overlays = tpl_cfg.overlays
+        cfg.audio.contextual_sfx_enabled = tpl_cfg.audio.contextual_sfx_enabled
 
     if overrides.get("layout_mode"):
         lm = str(overrides["layout_mode"])
@@ -149,7 +163,7 @@ def apply_initial_style_overrides(
 
     if "subtitle_placement" in overrides and overrides["subtitle_placement"]:
         place = str(overrides["subtitle_placement"])
-        if place in ("bottom_safe", "split_line_center", "top_safe"):
+        if place in ("bottom_safe", "split_line_center", "top_safe", "above_speaker"):
             cfg.subtitles.placement_preset = place  # type: ignore[assignment]
             cfg.sync_subtitle_anchor()
 
@@ -167,6 +181,20 @@ def apply_initial_style_overrides(
 
     if "zoom_punch_enabled" in overrides and overrides["zoom_punch_enabled"] is not None:
         cfg.overlays.climax_effects.zoom_punch_enabled = bool(overrides["zoom_punch_enabled"])
+
+    if overrides.get("zoom_punch_repeat_sec") is not None:
+        cfg.overlays.climax_effects.zoom_punch_repeat_sec = max(
+            0.0, min(30.0, float(overrides["zoom_punch_repeat_sec"]))
+        )
+
+    if "silence_trim_enabled" in overrides and overrides["silence_trim_enabled"] is not None:
+        cfg.timing.silence_trim_enabled = bool(overrides["silence_trim_enabled"])
+
+    if overrides.get("silence_max_gap_sec") is not None:
+        cfg.timing.silence_max_gap_sec = max(0.10, min(2.0, float(overrides["silence_max_gap_sec"])))
+
+    if "contextual_sfx_enabled" in overrides and overrides["contextual_sfx_enabled"] is not None:
+        cfg.audio.contextual_sfx_enabled = bool(overrides["contextual_sfx_enabled"])
 
     if "vignette_enabled" in overrides and overrides["vignette_enabled"] is not None:
         cfg.overlays.climax_effects.vignette_enabled = bool(overrides["vignette_enabled"])
@@ -213,8 +241,8 @@ def apply_initial_style_overrides(
         tr.duration_sec = max(0.10, min(0.60, float(overrides["transition_duration_sec"])))
     if overrides.get("transition_easing") in ("linear", "ease_out", "ease_in_out"):
         tr.easing = str(overrides["transition_easing"])  # type: ignore[assignment]
-    if overrides.get("transition_sfx") in ("none", "whoosh", "swipe", "pop"):
-        tr.sfx = str(overrides["transition_sfx"])  # type: ignore[assignment]
+    if isinstance(overrides.get("transition_sfx"), str) and overrides["transition_sfx"].strip():
+        tr.sfx = overrides["transition_sfx"].strip()
     if overrides.get("transition_sfx_volume") is not None:
         tr.sfx_volume = max(0.0, min(1.0, float(overrides["transition_sfx_volume"])))
 
@@ -234,6 +262,10 @@ def apply_style_template_from_config(
     target_cfg.canvas_height = style_source.canvas_height
     target_cfg.timing.padding_sec = style_source.timing.padding_sec
     target_cfg.timing.opening_tts_enabled = style_source.timing.opening_tts_enabled
+    target_cfg.timing.silence_trim_enabled = style_source.timing.silence_trim_enabled
+    target_cfg.timing.silence_max_gap_sec = style_source.timing.silence_max_gap_sec
+    target_cfg.timing.silence_remove_fillers = style_source.timing.silence_remove_fillers
+    target_cfg.audio.contextual_sfx_enabled = style_source.audio.contextual_sfx_enabled
 
     target_cfg.layout = style_source.layout.model_copy(deep=True)
     if reset_auto_face and target_cfg.layout.framing_tracking_mode == "auto_face":
@@ -641,6 +673,17 @@ class CutterService:
                     clip.end_time,
                     request.padding_sec,
                 )
+                clip_win_start = max(0.0, clip.start_time - request.padding_sec)
+                comp_cfg.audio.sfx_cues = [
+                    ComposerSfxCue(
+                        time_sec=max(0.0, round(c.t_sec - clip_win_start, 3)),
+                        sfx_name=c.sfx_name,
+                        volume=c.volume,
+                        reason=c.reason,
+                    )
+                    for c in (getattr(clip, "sfx_cues", None) or [])
+                    if c.t_sec >= clip_win_start
+                ]
                 rendered_item = await self.render_clip_with_composer_config(
                     job_id=job_id,
                     download=download,
@@ -902,6 +945,115 @@ class CutterService:
         (job_dir / "render_result.json").write_text(result.model_dump_json(indent=2), encoding="utf-8")
         return result
 
+    async def _build_jump_cut_source(
+        self,
+        download: DownloadResult,
+        config: ClipComposerConfig,
+        transcript_segments: Optional[list[TranscriptSegment]],
+        padded_start: float,
+        padded_end: float,
+        clips_dir: Path,
+        ffmpeg_path: Path,
+        logger: JobLogger,
+        cancel_event: Optional[asyncio.Event],
+    ) -> Optional[tuple[DownloadResult, ClipComposerConfig, list[TranscriptSegment], Path]]:
+        """Create a pause/filler-free intermediate clip. Returns `None` (render as-is) when not applicable."""
+        idx = config.clip_index
+        words = collect_words(transcript_segments or [], padded_start, padded_end)
+        if not words:
+            logger.info("cutter", f"[#{idx:02d}] Jump-cut dilewati: transkrip tidak punya timestamp per kata.")
+            return None
+        remove_fillers = bool(config.timing.silence_remove_fillers)
+        ranges = plan_keep_ranges(
+            words,
+            padded_start,
+            padded_end,
+            max_gap_sec=float(config.timing.silence_max_gap_sec),
+            remove_fillers=remove_fillers,
+        )
+        if not ranges:
+            logger.info("cutter", f"[#{idx:02d}] Jump-cut dilewati: tidak ada jeda/filler yang layak dibuang.")
+            return None
+
+        new_dur = trimmed_duration(ranges)
+        trim_path = clips_dir / f"_cmp_{idx:02d}_jumpcut.mp4"
+        script_path = clips_dir / f"_cmp_{idx:02d}_jumpcut_filter.txt"
+        cmd, script = build_trim_ffmpeg_command(
+            ffmpeg_path=ffmpeg_path,
+            source_path=Path(download.source_video_path),
+            output_path=trim_path,
+            window_start=padded_start,
+            window_end=padded_end,
+            ranges=ranges,
+            filter_script_path=script_path,
+            has_audio=download.has_audio,
+            fps=download.fps,
+        )
+        script_path.write_text(script, encoding="utf-8")
+        try:
+            rc, lines = await run_subprocess_streaming(cmd, cancel_event=cancel_event, cwd=clips_dir)
+        finally:
+            script_path.unlink(missing_ok=True)
+        if rc != 0 or not trim_path.is_file() or trim_path.stat().st_size == 0:
+            trim_path.unlink(missing_ok=True)
+            logger.info("cutter", f"[#{idx:02d}] Jump-cut gagal, render memakai klip asli: {' | '.join(lines[-3:])}")
+            return None
+
+        logger.info(
+            "cutter",
+            f"[#{idx:02d}] Jump-cut: {padded_end - padded_start:.1f}s -> {new_dur:.1f}s ({len(ranges)} potongan).",
+        )
+
+        new_cfg = config.model_copy(deep=True)
+        new_cfg.timing.start_time = 0.0
+        new_cfg.timing.end_time = max(1.0, new_dur)
+        new_cfg.timing.padding_sec = 0.0
+        new_cfg.timing.silence_trim_enabled = False
+        new_cfg.layout.shot_crops = []  # camera timeline no longer matches; auto-face re-detects on trimmed clip
+        new_cfg.layout.speaker_turns = []
+
+        remapped_cues: list[ComposerSfxCue] = []
+        for cue in config.audio.sfx_cues:
+            mapped_t = remap_time(padded_start + float(cue.time_sec), ranges)
+            if mapped_t is None:
+                continue
+            remapped_cues.append(
+                ComposerSfxCue(
+                    time_sec=mapped_t,
+                    sfx_name=cue.sfx_name,
+                    volume=cue.volume,
+                    reason=cue.reason,
+                )
+            )
+        new_cfg.audio.sfx_cues = remapped_cues
+
+        new_segments = remap_segments(transcript_segments or [], ranges, remove_fillers)
+        new_overrides: list[TranscriptSegmentOverride] = []
+        for ov in config.transcript_overrides:
+            span_words = remap_words(
+                [w for w in ov.words if not (remove_fillers and is_filler(w.word))], ranges
+            )
+            if not span_words:
+                continue
+            joined = " ".join(w.word.strip() for w in ov.words).strip()
+            text = " ".join(w.word.strip() for w in span_words).strip() if ov.text.strip() == joined else ov.text
+            new_overrides.append(
+                TranscriptSegmentOverride(
+                    index=len(new_overrides),
+                    start=span_words[0].start,
+                    end=max(span_words[-1].end, span_words[0].start + 0.05),
+                    text=text,
+                    speaker=ov.speaker,
+                    words=span_words,
+                )
+            )
+        new_cfg.transcript_overrides = new_overrides
+
+        new_download = download.model_copy(
+            update={"source_video_path": str(trim_path), "duration_sec": max(0.5, new_dur)}
+        )
+        return new_download, new_cfg, new_segments, trim_path
+
     async def render_clip_with_composer_config(
         self,
         job_id: str,
@@ -945,6 +1097,29 @@ class CutterService:
         )
         main_dur = max(0.5, round(padded_end - padded_start, 3))
 
+        # Jump-cut: render from a trimmed intermediate (pauses/fillers removed), timeline restarts at 0.
+        orig_config = config
+        orig_padded = (padded_start, padded_end)
+        trim_tmp: Optional[Path] = None
+        if config.timing.silence_trim_enabled:
+            trimmed = await self._build_jump_cut_source(
+                download=download,
+                config=config,
+                transcript_segments=transcript_segments,
+                padded_start=padded_start,
+                padded_end=padded_end,
+                clips_dir=clips_dir,
+                ffmpeg_path=ffmpeg_path,
+                logger=logger,
+                cancel_event=cancel_event,
+            )
+            if trimmed is not None:
+                download, config, transcript_segments, trim_tmp = trimmed
+                source_path = trim_tmp
+                focus_hints = None
+                padded_start, padded_end = 0.0, config.timing.end_time
+                main_dur = max(0.5, round(padded_end - padded_start, 3))
+
         # Auto-detect face & camera-angle crops when requested and not yet populated
         if (
             config.layout.framing_tracking_mode == "auto_face"
@@ -959,7 +1134,7 @@ class CutterService:
                 src_w=download.width,
                 src_h=download.height,
                 fps=download.fps,
-                job_dir=job_dir,
+                job_dir=None if trim_tmp is not None else job_dir,
                 focus_hints=focus_hints,
                 transcript_segments=transcript_segments,
             )
@@ -969,7 +1144,7 @@ class CutterService:
                 f"{len(detected_segs)} segmen kamera terdeteksi.",
             )
 
-        saved_cfg_path = save_job_clip_config(job_dir, config)
+        saved_cfg_path = save_job_clip_config(job_dir, orig_config)
         segs = transcript_segments or []
         idx = config.clip_index
         slug = _slugify_title(config.clip_title)
@@ -1101,6 +1276,8 @@ class CutterService:
             backsound_used = bgm_track.name if bgm_track is not None else None
         finally:
             temp_filter_path.unlink(missing_ok=True)
+            if trim_tmp is not None:
+                trim_tmp.unlink(missing_ok=True)
             temp_tts_base.with_suffix(".mp3").unlink(missing_ok=True)
             temp_tts_base.with_suffix(".wav").unlink(missing_ok=True)
             if tts_path is not None:
@@ -1117,10 +1294,10 @@ class CutterService:
             title=config.clip_title,
             virality_score=virality_score,
             reason=reason,
-            requested_start_sec=config.timing.start_time,
-            requested_end_sec=config.timing.end_time,
-            padded_start_sec=padded_start,
-            padded_end_sec=padded_end,
+            requested_start_sec=orig_config.timing.start_time,
+            requested_end_sec=orig_config.timing.end_time,
+            padded_start_sec=orig_padded[0],
+            padded_end_sec=orig_padded[1],
             output_duration_sec=total_dur,
             output_path=str(output_path.resolve()),
             file_size_bytes=file_size,

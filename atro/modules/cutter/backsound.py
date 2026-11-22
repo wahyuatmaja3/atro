@@ -94,7 +94,7 @@ def build_audio_filter_chain(
             if enable_voice_polish:
                 voice_parts.append("highpass=f=80,dynaudnorm=f=150:g=15:p=0.90:m=5")
             if enable_loudnorm:
-                voice_parts.append("loudnorm=I=-16:TP=-1.5:LRA=11")
+                voice_parts.append("loudnorm=I=-14:TP=-1.5:LRA=11")
             voice_parts.append("aformat=sample_rates=48000:channel_layouts=stereo")
             voice_parts.append(f"atrim=0:{dur_main:.3f},asetpts=PTS-STARTPTS")
             lines.append(f"[0:a]{','.join(voice_parts)}[a_main]")
@@ -108,7 +108,7 @@ def build_audio_filter_chain(
         if enable_voice_polish:
             voice_parts.append("highpass=f=80,dynaudnorm=f=150:g=15:p=0.90:m=5")
         if enable_loudnorm:
-            voice_parts.append("loudnorm=I=-16:TP=-1.5:LRA=11")
+            voice_parts.append("loudnorm=I=-14:TP=-1.5:LRA=11")
         voice_parts.append("aformat=sample_rates=48000:channel_layouts=stereo")
         voice_chain = ",".join(voice_parts)
 
@@ -172,7 +172,7 @@ def build_audio_filter_chain(
             delay_ms = max(0, int(round(ev_t * 1000.0)))
             out_sfx = f"sfx_ev_{k}"
             lines.append(
-                f"[{in_lbl}]aformat=sample_rates=48000:channel_layouts=stereo,"
+                f"[{in_lbl}]aresample=48000,aformat=sample_rates=48000:channel_layouts=stereo,"
                 f"volume={sfx_vol:.3f},adelay={delay_ms}|{delay_ms},"
                 f"apad=whole_dur={total_dur:.3f},atrim=0:{total_dur:.3f},asetpts=PTS-STARTPTS[{out_sfx}]"
             )

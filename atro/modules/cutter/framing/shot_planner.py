@@ -13,9 +13,11 @@ import numpy as np
 from atro.core.composer_schema import (
     ComposerLayoutMode,
     CropBoxConfig,
+    FaceAnchorBox,
     LayoutLayerConfig,
     ShotCropSegment,
     ShotReason,
+    SpeakerTurnSpan,
 )
 from atro.core.schemas import FocusHintItem, TranscriptSegment
 from atro.modules.cutter.framing import face_tracking as ft_mod
@@ -338,6 +340,41 @@ def _rolling_mouth_scores(samples: list[_SampleFrame], idx: int, half_win: float
     return {fid: sums[fid] / max(1, cnts[fid]) for fid in sums}
 
 
+def _collect_run_speaker_faces(
+    run_samples: list[_SampleFrame],
+    face_to_spk: dict[str, str],
+    target_fid: Optional[str],
+    spk_id: Optional[str],
+) -> dict[str, FaceAnchorBox]:
+    """Aggregate median normalized face boxes per visible speaker/face across a shot run."""
+    grouped: dict[str, list[ft_mod.FaceBox]] = {}
+    for s in run_samples:
+        for f in s.faces:
+            grouped.setdefault(f.face_id, []).append(f.box)
+
+    out: dict[str, FaceAnchorBox] = {}
+    for fid, boxes in grouped.items():
+        if not boxes:
+            continue
+        x = max(0.0, min(0.98, float(np.median([b.x for b in boxes]))))
+        y = max(0.0, min(0.98, float(np.median([b.y for b in boxes]))))
+        w = max(0.02, min(1.0 - x, float(np.median([b.w for b in boxes]))))
+        h = max(0.02, min(1.0 - y, float(np.median([b.h for b in boxes]))))
+        conf = max(0.1, min(1.0, float(np.mean([b.conf for b in boxes]))))
+        anchor = FaceAnchorBox(
+            x=round(x, 4),
+            y=round(y, 4),
+            w=round(w, 4),
+            h=round(h, 4),
+            confidence=round(conf, 3),
+        )
+        key = face_to_spk.get(fid) or fid
+        out[key] = anchor
+        if spk_id and fid == target_fid:
+            out[spk_id] = anchor
+    return out
+
+
 def plan_podcast_shots_from_observations(
     samples: list[_SampleFrame],
     duration: float,
@@ -583,6 +620,7 @@ def plan_podcast_shots_from_observations(
         run_samples = [samples[k] for k in r.samples_idx]
         lbl_base = layout.speaker_aliases.get(r.spk_id or "", r.spk_id or f"Speaker #{r_idx}")
         conf_avg = round(r.conf_sum / max(1, r.conf_cnt), 3)
+        run_speaker_faces = _collect_run_speaker_faces(run_samples, face_to_spk, r.target_fid, r.spk_id)
 
         if r.shot_mode == "multi_speaker_split":
             pairs = [
@@ -611,11 +649,15 @@ def plan_podcast_shots_from_observations(
                     face_id=r.target_fid,
                     reason=r.reason,
                     confidence=conf_avg,
+                    speaker_faces=run_speaker_faces,
                 )
             )
             continue
 
-        if r.shot_mode == "blurred_frame" and r.target_fid == "__GROUP__":
+        distinct_fids = {f.face_id for s in run_samples for f in s.faces}
+        if r.shot_mode == "blurred_frame" and (
+            r.target_fid == "__GROUP__" or (eff_mode == "blurred_frame" and len(distinct_fids) >= 2 and not layout.pinned_speaker_id)
+        ):
             all_faces = [f for s in run_samples for f in s.faces]
             top_crop = _make_group_crop(all_faces, label="Semua Pembicara")
             bot_crop = CropBoxConfig(auto_detect=True, x=0.22, y=0.0, w=0.56, h=1.0, label="Latar Blur")
@@ -629,8 +671,9 @@ def plan_podcast_shots_from_observations(
                     shot_mode="blurred_frame",
                     speaker_id=r.spk_id,
                     face_id=None,
-                    reason="group",
+                    reason="group" if r.target_fid == "__GROUP__" else r.reason,
                     confidence=conf_avg,
+                    speaker_faces=run_speaker_faces,
                 )
             )
             continue
@@ -673,6 +716,7 @@ def plan_podcast_shots_from_observations(
                 face_id=None if r.target_fid == "__GROUP__" else r.target_fid,
                 reason=reason_final,
                 confidence=conf_avg,
+                speaker_faces=run_speaker_faces,
             )
         )
 
@@ -731,6 +775,21 @@ def plan_podcast_shots_sync(
         focus_hints=hints,
         mode=mode_override,
     )
+
+    clip_turns: list[SpeakerTurnSpan] = []
+    for seg in diar:
+        ts = round(max(0.0, seg.start - float(start_sec)), 3)
+        te = round(min(duration, seg.end - float(start_sec)), 3)
+        if te > ts + 0.05:
+            clip_turns.append(
+                SpeakerTurnSpan(
+                    t_start=ts,
+                    t_end=te,
+                    speaker_id=seg.speaker_id,
+                    confidence=seg.confidence,
+                )
+            )
+    layout.speaker_turns = clip_turns
 
     if job_dir is not None and planned:
         spk_to_face, spk_conf = correlate_speakers_and_faces(samples, diar)

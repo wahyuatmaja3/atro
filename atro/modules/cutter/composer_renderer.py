@@ -8,7 +8,7 @@ import shutil
 import textwrap
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import cv2
 import numpy as np
@@ -33,6 +33,7 @@ from atro.core.composer_schema import (
     ComposerLayoutMode,
     CropBoxConfig,
     DividerConfig,
+    FaceAnchorBox,
     HookBannerConfig,
     LayoutLayerConfig,
     ShotCropSegment,
@@ -48,6 +49,14 @@ from atro.modules.cutter.framing.face_tracking import (
 )
 from atro.modules.cutter.framing.game_layout import _detect_streamer_face_sync
 from atro.modules.cutter.sfx import resolve_transition_sfx_path
+from atro.modules.cutter.subtitle_anchors import (
+    SplitGeometry,
+    compute_pip_rect,
+    compute_pixel_crop_rect,
+    compute_split_geometry,
+    resolve_chunks_anchor_positions,
+    zoom_punch_windows,
+)
 from atro.modules.cutter.subtitle_burner import (
     build_composer_caption_chunks,
     compute_caption_line_layout,
@@ -66,100 +75,6 @@ from atro.modules.cutter.transitions import (
     map_transition_to_ffmpeg_xfade,
     resolve_shot_transitions,
 )
-
-
-def compute_pixel_crop_rect(
-    crop: CropBoxConfig,
-    src_w: int,
-    src_h: int,
-    target_w: int,
-    target_h: int,
-) -> tuple[int, int, int, int]:
-    """Convert normalized CropBoxConfig into aspect-matched even `(crop_w, crop_h, crop_x, crop_y)`."""
-    sw = max(2, int(src_w) - (int(src_w) % 2))
-    sh = max(2, int(src_h) - (int(src_h) % 2))
-    target_ratio = max(0.05, float(target_w) / max(1.0, float(target_h)))
-
-    box_w = max(8.0, float(crop.w) * sw)
-    box_h = max(8.0, float(crop.h) * sh)
-    cx = (float(crop.x) + float(crop.w) * 0.5) * sw
-    cy = (float(crop.y) + float(crop.h) * 0.5) * sh
-
-    if (box_w / box_h) > target_ratio:
-        max_w = sh * target_ratio
-        cw = _make_even(min(box_w, max_w), 2, sw)
-        ch = _make_even(cw / target_ratio, 2, sh)
-        cw = _make_even(min(cw, ch * target_ratio), 2, sw)
-    else:
-        max_h = sw / target_ratio
-        ch = _make_even(min(box_h, max_h), 2, sh)
-        cw = _make_even(ch * target_ratio, 2, sw)
-        ch = _make_even(min(ch, cw / target_ratio), 2, sh)
-
-    crop_x = max(0, min(sw - cw, int(round(cx - cw * 0.5))))
-    crop_y = max(0, min(sh - ch, int(round(cy - ch * 0.5))))
-    return cw, ch, crop_x, crop_y
-
-
-@dataclass(slots=True)
-class SplitGeometry:
-    """Shared split-screen geometry for both straight and diagonal dividers."""
-
-    split_y: int
-    left_y: float
-    right_y: float
-    top_panel_h: int
-    bot_panel_y: int
-    bot_panel_h: int
-    is_angled: bool
-
-
-def compute_split_geometry(
-    width: int,
-    height: int,
-    split_ratio_top: float,
-    angle_deg: float,
-) -> SplitGeometry:
-    """Compute top/bottom panel heights and endpoints of a straight or tilted split divider."""
-    w = max(2, int(width))
-    h = max(2, int(height))
-    split_y = _make_even(h * max(0.20, min(0.80, float(split_ratio_top))), 100, h - 100)
-    clamped_angle = max(-25.0, min(25.0, float(angle_deg)))
-    is_angled = abs(clamped_angle) >= 0.1
-
-    if not is_angled:
-        return SplitGeometry(
-            split_y=split_y,
-            left_y=float(split_y),
-            right_y=float(split_y),
-            top_panel_h=split_y,
-            bot_panel_y=split_y,
-            bot_panel_h=h - split_y,
-            is_angled=False,
-        )
-
-    slope = math.tan(math.radians(clamped_angle))
-    half_w = w * 0.5
-    left_y = max(40.0, min(float(h - 40), split_y - half_w * slope))
-    right_y = max(40.0, min(float(h - 40), split_y + half_w * slope))
-
-    max_y = int(math.ceil(max(left_y, right_y))) + 4
-    min_y = int(math.floor(min(left_y, right_y))) - 4
-
-    top_panel_h = _make_even(min(h, max(120, max_y)), 120, h)
-    bot_panel_y = max(0, min(h - 120, min_y))
-    bot_panel_y -= bot_panel_y % 2
-    bot_panel_h = _make_even(h - bot_panel_y, 120, h)
-
-    return SplitGeometry(
-        split_y=split_y,
-        left_y=left_y,
-        right_y=right_y,
-        top_panel_h=top_panel_h,
-        bot_panel_y=bot_panel_y,
-        bot_panel_h=bot_panel_h,
-        is_angled=True,
-    )
 
 
 def _shot_to_crop_boxes(
@@ -270,6 +185,15 @@ def detect_composer_shot_crops_sync(
                     shot_mode="single_focus",
                     reason="speaker_match",
                     confidence=0.85,
+                    speaker_faces={
+                        "SPK_1": FaceAnchorBox(
+                            x=max(0.0, min(0.98, face.x)),
+                            y=max(0.0, min(0.98, face.y)),
+                            w=max(0.02, min(1.0, face.w)),
+                            h=max(0.02, min(1.0, face.h)),
+                            confidence=max(0.1, min(1.0, face.conf)),
+                        )
+                    },
                 )
             ]
 
@@ -299,7 +223,15 @@ def detect_composer_shot_crops_sync(
     shots = _analyze_shots_sync(ctx)
     if not shots:
         face = _detect_streamer_face_sync(ctx)
+        fallback_faces: dict[str, FaceAnchorBox] = {}
         if face is not None:
+            fallback_faces["SPK_1"] = FaceAnchorBox(
+                x=max(0.0, min(0.98, face.x)),
+                y=max(0.0, min(0.98, face.y)),
+                w=max(0.02, min(1.0, face.w)),
+                h=max(0.02, min(1.0, face.h)),
+                confidence=max(0.1, min(1.0, face.conf)),
+            )
             crop_w = 0.34 if mode == "single_focus" else 0.72
             crop_h = 1.0 if mode == "single_focus" else 0.96
             tx = max(0.0, min(1.0 - crop_w, face.cx - crop_w * 0.5))
@@ -324,6 +256,7 @@ def detect_composer_shot_crops_sync(
                 top_crop=top_box,
                 bottom_crop=bot_box,
                 shot_mode="single_focus",
+                speaker_faces=fallback_faces,
             )
         ]
 
@@ -942,32 +875,6 @@ def _draw_vignette_on_painter(painter: QPainter, canvas_w: int, canvas_h: int) -
     painter.restore()
 
 
-def compute_pip_rect(
-    canvas_w: int,
-    canvas_h: int,
-    layout: LayoutLayerConfig,
-) -> tuple[int, int, int, int]:
-    """Compute even `(x, y, w, h)` for floating PiP facecam overlay in canvas coordinates."""
-    scale = max(0.18, min(0.55, float(layout.pip_scale)))
-    pip_w = max(80, _make_even(canvas_w * scale, 2, canvas_w))
-    if layout.pip_shape == "circle":
-        pip_h = pip_w
-    else:
-        pip_h = max(80, _make_even(pip_w * 4.0 / 3.0, 2, canvas_h - 320))
-
-    margin_x = 36
-    margin_top = 152
-    margin_bottom = 264
-    pos = layout.pip_position
-    px = margin_x if "left" in pos else (canvas_w - pip_w - margin_x)
-    py = margin_top if "top" in pos else (canvas_h - pip_h - margin_bottom)
-    px = max(0, min(canvas_w - pip_w, px))
-    py = max(0, min(canvas_h - pip_h, py))
-    px -= px % 2
-    py -= py % 2
-    return px, py, pip_w, pip_h
-
-
 def _build_frame_clip_path(
     rect: QRectF,
     shape: str,
@@ -1075,6 +982,8 @@ def draw_subtitles_on_painter(
     canvas_h: int,
     clip_start_sec: Optional[float] = None,
     clip_end_sec: Optional[float] = None,
+    src_w: int = 1920,
+    src_h: int = 1080,
 ) -> None:
     """Render word-level dynamic captions + speaker colors + footnote at exact config coordinates."""
     subs = config.subtitles
@@ -1087,14 +996,37 @@ def draw_subtitles_on_painter(
         clip_start_sec=clip_start_sec,
         clip_end_sec=clip_end_sec,
     )
+    active_chunk_idx = -1
     active_chunk = None
-    for ch in chunks:
+    for idx_c, ch in enumerate(chunks):
         if ch.start <= rel_t <= ch.end:
+            active_chunk_idx = idx_c
             active_chunk = ch
             break
 
     family = register_qt_font(subs.custom_font_path, subs.font_family)
     if active_chunk is not None:
+        base_layouts = [
+            compute_caption_line_layout(
+                config=config,
+                raw_words=[w.text for w in c.words],
+                active_idx=-1,
+                canvas_w=canvas_w,
+                canvas_h=canvas_h,
+            )
+            for c in chunks
+        ]
+        chunk_anchors = resolve_chunks_anchor_positions(
+            chunks=chunks,
+            config=config,
+            src_w=src_w,
+            src_h=src_h,
+            canvas_w=canvas_w,
+            canvas_h=canvas_h,
+            chunk_box_sizes=[(bl.box_w, bl.box_h) for bl in base_layouts],
+        )
+        c_anchor_x, c_anchor_y = chunk_anchors[active_chunk_idx]
+
         active_word_idx = -1
         if subs.style_mode != "plain":
             for idx, w in enumerate(active_chunk.words):
@@ -1123,6 +1055,8 @@ def draw_subtitles_on_painter(
             active_idx=active_word_idx,
             canvas_w=canvas_w,
             canvas_h=canvas_h,
+            anchor_x_override=c_anchor_x,
+            anchor_y_override=c_anchor_y,
         )
 
         painter.save()
@@ -1159,7 +1093,7 @@ def draw_subtitles_on_painter(
             painter.save()
             painter.setFont(emoji_font)
             em_rect = QRectF(
-                float(subs.pos_x) - 120.0,
+                c_anchor_x - 120.0,
                 layout.emoji_y - 60.0,
                 240.0,
                 120.0,
@@ -1168,7 +1102,7 @@ def draw_subtitles_on_painter(
             painter.drawText(em_rect, Qt.AlignmentFlag.AlignCenter, layout.emoji)
             painter.restore()
 
-        painter.translate(float(subs.pos_x), float(subs.pos_y))
+        painter.translate(c_anchor_x, c_anchor_y)
         if layout.scale_fit < 0.999:
             painter.scale(layout.scale_fit, layout.scale_fit)
 
@@ -1245,9 +1179,11 @@ def _apply_climax_cv(
             out = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
 
     if climax.zoom_punch_enabled:
-        zs = float(climax.zoom_punch_start_sec)
-        ze = zs + float(climax.zoom_punch_duration_sec)
-        if zs <= rel_t <= ze:
+        in_punch = any(
+            ws <= rel_t <= we
+            for ws, we in zoom_punch_windows(climax, max(float(config.clip_duration_sec()), rel_t + 1.0))
+        )
+        if in_punch:
             zf = max(1.01, float(climax.zoom_punch_factor))
             h, w = out.shape[:2]
             cw = max(2, int(round(w / zf)))
@@ -1272,10 +1208,11 @@ def _render_base_canvas_qimage(
     ch: int,
     active_top_crop: CropBoxConfig,
     active_bot_crop: CropBoxConfig,
+    mode_override: Optional[str] = None,
 ) -> QImage:
     """Render video layout layers (`single_focus`, `blurred_frame`, `pip_facecam`, `split`) into RGBA8888 QImage."""
     layout = config.layout
-    mode = layout.mode
+    mode = mode_override or layout.mode
 
     if config.aspect_ratio == "16:9" or mode == "single_focus":
         base_bgr = _crop_and_resize_bgr(source_frame_bgr, active_top_crop, cw, ch)
@@ -1432,6 +1369,8 @@ def render_preview_frame(
                 if (prev_source_frame_bgr is not None and prev_source_frame_bgr.size > 0)
                 else source_frame_bgr
             )
+            m_a = seg_a.shot_mode if (layout.mode == "single_focus" and seg_a.shot_mode == "blurred_frame") else None
+            m_b = seg_b.shot_mode if (layout.mode == "single_focus" and seg_b.shot_mode == "blurred_frame") else None
             img_a = _render_base_canvas_qimage(
                 frame_a,
                 config,
@@ -1440,6 +1379,7 @@ def render_preview_frame(
                 ch,
                 seg_a.top_crop,
                 seg_a.bottom_crop or layout.bottom_crop,
+                mode_override=m_a,
             )
             img_b = _render_base_canvas_qimage(
                 source_frame_bgr,
@@ -1449,10 +1389,18 @@ def render_preview_frame(
                 ch,
                 seg_b.top_crop,
                 seg_b.bottom_crop or layout.bottom_crop,
+                mode_override=m_b,
             )
             canvas_img = blend_transition_qimages(img_a, img_b, prog, tr_res.tr_type, tr_res.easing)
         else:
             active_top_crop, active_bot_crop = layout.resolve_crops_at_time(rel_time_sec)
+            m_cur = None
+            if layout.mode == "single_focus" and layout.shot_crops:
+                for sc_seg in layout.shot_crops:
+                    if sc_seg.t_start <= rel_time_sec < sc_seg.t_end:
+                        if sc_seg.shot_mode == "blurred_frame":
+                            m_cur = "blurred_frame"
+                        break
             canvas_img = _render_base_canvas_qimage(
                 source_frame_bgr,
                 config,
@@ -1461,6 +1409,7 @@ def render_preview_frame(
                 ch,
                 active_top_crop,
                 active_bot_crop,
+                mode_override=m_cur,
             )
         painter = QPainter(canvas_img)
 
@@ -1474,6 +1423,16 @@ def render_preview_frame(
     for bubble in config.overlays.comment_bubbles:
         draw_comment_bubble_on_painter(painter, bubble, cw, ch, rel_time_sec)
     draw_watermark_on_painter(painter, config.overlays.watermark, cw, ch)
+    src_w_eff = (
+        int(source_frame_bgr.shape[1])
+        if (source_frame_bgr is not None and source_frame_bgr.size > 0)
+        else 1920
+    )
+    src_h_eff = (
+        int(source_frame_bgr.shape[0])
+        if (source_frame_bgr is not None and source_frame_bgr.size > 0)
+        else 1080
+    )
     draw_subtitles_on_painter(
         painter,
         config,
@@ -1483,6 +1442,8 @@ def render_preview_frame(
         ch,
         clip_start_sec=eff_start,
         clip_end_sec=eff_end,
+        src_w=src_w_eff,
+        src_h=src_h_eff,
     )
 
     # Progress bar at bottom
@@ -1672,9 +1633,10 @@ def _emit_layout_for_stream(
     ch: int,
     masks: _StaticMaskIndices,
     lines: list[str],
+    mode_override: Optional[str] = None,
 ) -> str:
     """Emit layout crop/composite filters from `in_lbl` into `out_lbl` (`yuv420p`, `setsar=1`)."""
-    mode = layout.mode
+    mode = mode_override or layout.mode
     if aspect_ratio == "16:9":
         crop_w, crop_h, crop_x, crop_y = compute_pixel_crop_rect(top_crop, src_w, src_h, cw, ch)
         lines.append(
@@ -1890,6 +1852,13 @@ def compile_composer_ffmpeg_plan(
 
     if len(valid_shots) <= 1:
         active_top, active_bot = layout.resolve_crops_at_time(0.0)
+        single_override = None
+        if (
+            layout.mode == "single_focus"
+            and layout.shot_crops
+            and layout.shot_crops[0].shot_mode == "blurred_frame"
+        ):
+            single_override = "blurred_frame"
         summary = _emit_layout_for_stream(
             in_lbl=src_v,
             out_lbl="framed",
@@ -1906,6 +1875,7 @@ def compile_composer_ffmpeg_plan(
             ch=ch,
             masks=masks,
             lines=lines,
+            mode_override=single_override,
         )
     else:
         resolved_trs = resolve_shot_transitions(valid_shots, layout.transition)
@@ -1926,6 +1896,7 @@ def compile_composer_ffmpeg_plan(
             lines.append(f"[{prefix}_s{i}]trim=start={seg.t_start:.3f}:end={seg.t_end:.3f},setpts=PTS-STARTPTS[{trim_lbl}]")
 
             comp_lbl = f"{prefix}_sf{i}"
+            seg_mode_ov = "blurred_frame" if (layout.mode == "single_focus" and seg.shot_mode == "blurred_frame") else None
             base_summary = _emit_layout_for_stream(
                 in_lbl=trim_lbl,
                 out_lbl=comp_lbl,
@@ -1942,6 +1913,7 @@ def compile_composer_ffmpeg_plan(
                 ch=ch,
                 masks=masks,
                 lines=lines,
+                mode_override=seg_mode_ov,
             )
 
             cur_seg_lbl = comp_lbl
@@ -2049,15 +2021,15 @@ def compile_composer_ffmpeg_plan(
         cur_lbl = next_lbl
 
     if climax.zoom_punch_enabled:
-        zs = round(float(climax.zoom_punch_start_sec) + intro_shift, 3)
-        ze = min(total_dur, round(zs + float(climax.zoom_punch_duration_sec), 3))
-        if ze > zs:
+        wins = zoom_punch_windows(climax, total_dur, intro_shift)
+        if wins:
             zw = _make_even(cw * float(climax.zoom_punch_factor), 2)
             zh = _make_even(ch * float(climax.zoom_punch_factor), 2)
             next_lbl = f"{prefix}_zoom"
+            cond = "+".join(f"between(t,{a:.3f},{b:.3f})" for a, b in wins)
             lines.append(
-                f"[{cur_lbl}]scale=w='if(between(t,{zs:.3f},{ze:.3f}),{zw},{cw})':"
-                f"h='if(between(t,{zs:.3f},{ze:.3f}),{zh},{ch})':eval=frame,"
+                f"[{cur_lbl}]scale=w='if(gt({cond},0),{zw},{cw})':"
+                f"h='if(gt({cond},0),{zh},{ch})':eval=frame,"
                 f"crop={cw}:{ch}:(iw-{cw})/2:(ih-{ch})/2[{next_lbl}]"
             )
             cur_lbl = next_lbl
@@ -2169,6 +2141,15 @@ def compile_composer_ffmpeg_plan(
         )
         cur_lbl = next_lbl
 
+    # Contextual meme/punchline SFX cues (G4b)
+    if config.audio.contextual_sfx_enabled and config.audio.sfx_cues:
+        for cue in config.audio.sfx_cues:
+            cue_t = round(intro_shift + float(cue.time_sec), 3)
+            if 0.0 <= cue_t < total_dur:
+                cue_path = resolve_transition_sfx_path(cue.sfx_name)
+                if cue_path is not None:
+                    sfx_events.append((cue_t, cue_path, max(0.05, min(1.0, float(cue.volume)))))
+
     # Custom font staging + ASS burn-in
     temp_fonts_dir: Optional[Path] = None
     ass_path = generate_composer_ass_file(
@@ -2179,6 +2160,8 @@ def compile_composer_ffmpeg_plan(
         opening_duration_sec=intro_shift,
         clip_start_sec=clip_start_sec,
         clip_end_sec=clip_end_sec,
+        src_w=src_w,
+        src_h=src_h,
     )
     if ass_path is not None:
         temp_assets.append(ass_path)
