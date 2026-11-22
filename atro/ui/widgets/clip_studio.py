@@ -224,7 +224,7 @@ class ReadyTemplateCard(QFrame):
         layout.addLayout(top)
 
         title_lbl = QLabel(title)
-        title_lbl.setStyleSheet("font-size: 13px; font-weight: 700; color: #FFFBEB;")
+        title_lbl.setStyleSheet("font-size: 13px; font-weight: 700;")
         title_lbl.setWordWrap(True)
         layout.addWidget(title_lbl)
 
@@ -407,6 +407,7 @@ class ClipStudioWidget(QWidget):
     render_requested = pyqtSignal(str, object)  # (job_id, ClipComposerConfig)
     batch_render_requested = pyqtSignal(str, object, object, bool)  # (job_id, indices, style_cfg, redetect)
     standalone_render_requested = pyqtSignal(str, object)  # (local_video_path, ClipComposerConfig)
+    style_applied_to_all = pyqtSignal(int)
     _auto_detect_done = pyqtSignal(int, str, object)  # (request_id, source_path_str, list[ShotCropSegment])
 
     def __init__(
@@ -440,6 +441,7 @@ class ClipStudioWidget(QWidget):
 
         self._build_ui()
         self._load_config_into_ui(self._config)
+        self.set_advanced_mode(bool(self._settings_provider().ui_advanced_mode))
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -881,8 +883,8 @@ class ClipStudioWidget(QWidget):
         sf.addRow("Pin & Nama Pembicara", pin_row)
         vbox.addWidget(spk_grp)
 
-        div_grp = QGroupBox("Garis Pembatas Tengah (Lurus / Miring)")
-        df = QFormLayout(div_grp)
+        self._div_grp = QGroupBox("Garis Pembatas Tengah (Lurus / Miring)")
+        df = QFormLayout(self._div_grp)
         df.setSpacing(8)
         self.divider_enabled_chk = QCheckBox("Tampilkan Garis Pembatas Tengah")
         self.divider_enabled_chk.toggled.connect(self._on_ui_mutated)
@@ -911,10 +913,10 @@ class ClipStudioWidget(QWidget):
         ang_row.addWidget(self.divider_angle_slider, 1)
         ang_row.addWidget(self.divider_angle_lbl)
         df.addRow("Kemiringan (Ala Subathon)", ang_row)
-        vbox.addWidget(div_grp)
+        vbox.addWidget(self._div_grp)
 
-        blur_grp = QGroupBox("Pengaturan Bingkai Blur (Mode Streamer)")
-        bf = QFormLayout(blur_grp)
+        self._blur_grp = QGroupBox("Pengaturan Bingkai Blur (Mode Streamer)")
+        bf = QFormLayout(self._blur_grp)
         bf.setSpacing(8)
         self.blur_aspect_combo = QComboBox()
         self.blur_aspect_combo.addItems(["4:3", "1:1", "16:9"])
@@ -929,10 +931,10 @@ class ClipStudioWidget(QWidget):
         blur_row.addWidget(self.blur_strength_slider, 1)
         blur_row.addWidget(self.blur_strength_lbl)
         bf.addRow("Tingkat Blur Belakang", blur_row)
-        vbox.addWidget(blur_grp)
+        vbox.addWidget(self._blur_grp)
 
-        pip_grp = QGroupBox("Bingkai Sudut, Neon & PiP Facecam")
-        pf = QFormLayout(pip_grp)
+        self._pip_grp = QGroupBox("Bingkai Sudut, Neon & PiP Facecam")
+        pf = QFormLayout(self._pip_grp)
         pf.setSpacing(8)
         pip_shape_row = QHBoxLayout()
         self.pip_shape_combo = QComboBox()
@@ -975,7 +977,7 @@ class ClipStudioWidget(QWidget):
         frame_row.addWidget(self.frame_border_w_spin)
         frame_row.addWidget(self.frame_border_col_btn)
         pf.addRow("Sudut & Garis Bingkai", frame_row)
-        vbox.addWidget(pip_grp)
+        vbox.addWidget(self._pip_grp)
 
         # Collapsible numeric coordinates for power users (hidden by default for beginners)
         self.manual_crop_coords_chk = QCheckBox("Tampilkan Angka Koordinat Crop Manual (X, Y, Lebar, Tinggi)")
@@ -2811,12 +2813,36 @@ class ClipStudioWidget(QWidget):
             return
         all_indices = list(range(1, len(self._analysis.clips) + 1))
         count = self.apply_current_style_to_clips(all_indices, reset_auto_face=True)
-        QMessageBox.information(
-            self,
-            "Gaya Diterapkan ke Semua Klip",
-            f"Gaya Studio saat ini telah disimpan ke {count} klip.\n\n"
-            "Klik 'Edit & Render Beberapa/Semua...' untuk langsung merender ulang videonya.",
-        )
+        self.style_applied_to_all.emit(count)
+
+    def set_advanced_mode(self, enabled: bool) -> None:
+        """Toggle Studio progressive disclosure between Easy (4 clean tabs) and Pro (6 tabs)."""
+        is_pro = bool(enabled)
+        self._advanced_mode = is_pro
+        self.ctrl_tabs.setTabVisible(3, is_pro)
+        self.ctrl_tabs.setTabVisible(5, is_pro)
+        if is_pro:
+            self.ctrl_tabs.setTabText(1, "2. Tata Letak")
+            self.ctrl_tabs.setTabText(2, "3. Teks Subtitle")
+            self.ctrl_tabs.setTabText(4, "5. Musik & Suara")
+        else:
+            self.ctrl_tabs.setTabText(1, "2. Tampilan")
+            self.ctrl_tabs.setTabText(2, "3. Teks")
+            self.ctrl_tabs.setTabText(4, "4. Audio")
+            if self.ctrl_tabs.currentIndex() in (3, 5):
+                self.ctrl_tabs.setCurrentIndex(0)
+
+        self.save_preset_btn.setVisible(is_pro)
+        self.load_preset_btn.setVisible(is_pro)
+        self._div_grp.setVisible(is_pro)
+        self._blur_grp.setVisible(is_pro)
+        self._pip_grp.setVisible(is_pro)
+        self.manual_crop_coords_chk.setVisible(is_pro)
+        if not is_pro:
+            self.manual_crop_coords_chk.setChecked(False)
+            self._set_preview_view_mode("preview")
+        else:
+            self._set_preview_view_mode("both")
 
     def open_batch_render_dialog(self, preselected_indices: Optional[list[int]] = None) -> None:
         if self._job_state is None or self._analysis is None or not self._analysis.clips:

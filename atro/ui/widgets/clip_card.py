@@ -57,7 +57,7 @@ class ClipCard(QFrame):
         )
 
         title_lbl = QLabel(f"#{clip.clip_index:02d}  {clip.title}")
-        title_lbl.setStyleSheet("font-size: 14px; font-weight: 600; color: #F8FAFC;")
+        title_lbl.setStyleSheet("font-size: 14px; font-weight: 600;")
         title_lbl.setWordWrap(True)
 
         score_pill = QLabel(f"Skor {clip.virality_score}/10")
@@ -111,7 +111,7 @@ class ClipCard(QFrame):
         # Reason text
         reason_lbl = QLabel(clip.reason)
         reason_lbl.setWordWrap(True)
-        reason_lbl.setStyleSheet("color: #D6D3D1; font-size: 12px;")
+        reason_lbl.setObjectName("MutedText")
         root.addWidget(reason_lbl)
 
         # Actions row

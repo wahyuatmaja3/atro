@@ -774,6 +774,14 @@ def test_studio_template_tab_one_click_ready_templates(tmp_path: Path) -> None:
     )
     studio = ClipStudioWidget(settings_provider=lambda: settings)
     try:
+        # Default Easy mode shows 4 simplified visible tabs; Pro mode restores all 6
+        visible_easy = [
+            studio.ctrl_tabs.tabText(i)
+            for i in range(studio.ctrl_tabs.count())
+            if studio.ctrl_tabs.isTabVisible(i)
+        ]
+        assert visible_easy == ["1. Template", "2. Tampilan", "3. Teks", "4. Audio"]
+        studio.set_advanced_mode(True)
         assert studio.ctrl_tabs.count() == 6
         expected_tabs = [
             "1. Template",
@@ -1820,6 +1828,76 @@ def test_twenty_four_plus_template_packs_gallery_and_atrotpl_roundtrip(tmp_path:
     finally:
         gallery.close()
         gallery.deleteLater()
+
+
+def test_ui_easy_pro_theme_toast_errors_and_min_size(tmp_path: Path, monkeypatch) -> None:
+    from PyQt6.QtWidgets import QApplication
+    from atro.config import AppSettings
+    from atro.core.error_messages import humanize_error
+    from atro.ui import main_window as mw_mod
+    from atro.ui.theme import build_stylesheet
+
+    ensure_qt_gui_app()
+
+    # Humanized Indonesian errors
+    for raw_err, expect_sub in (
+        ("GEMINI_API_KEY missing 401", "API AI"),
+        ("429 RESOURCE_EXHAUSTED quota exceeded", "kuota"),
+        ("FFmpeg exited with code 1 broken pipe", "FFmpeg"),
+        ("CUDA out of memory cublas64_12.dll not found", "GPU"),
+        ("Sign in to confirm you're not a bot yt-dlp", "YouTube"),
+    ):
+        head, hint = humanize_error(raw_err)
+        assert expect_sub.lower() in head.lower() or expect_sub.lower() in hint.lower()
+
+    # Dark & Light theme QSS compile cleanly
+    dark_qss = build_stylesheet("dark")
+    light_qss = build_stylesheet("light")
+    assert "#0F0E0D" in dark_qss and "#F97316" in dark_qss
+    assert "#FAF8F5" in light_qss and "#EA580C" in light_qss
+
+    ws_dir = tmp_path / "ws"
+    settings = AppSettings(
+        workspace_dir=ws_dir,
+        bin_dir=tmp_path / "bin",
+        backsound_dir=tmp_path / "bgm",
+        ui_advanced_mode=False,
+        ui_theme="dark",
+    )
+    monkeypatch.setattr(mw_mod, "load_settings", lambda: settings)
+    monkeypatch.setattr(mw_mod, "save_settings", lambda _s: None)
+
+    win = mw_mod.MainWindow()
+    try:
+        win.resize(1020, 680)
+        assert win.minimumWidth() <= 1020 and win.minimumHeight() <= 680
+
+        # Easy mode default: 1 health pill, collapsed Step 2 Pro drawer, 4 visible Studio tabs
+        assert win.ui_mode_easy_btn.isChecked() is True
+        assert win.health_pill.isHidden() is False
+        assert win.ffmpeg_pill.isHidden() is True
+        assert win.step2_pro_drawer.isHidden() is True
+        visible_easy_tabs = [i for i in range(win.studio_widget.ctrl_tabs.count()) if win.studio_widget.ctrl_tabs.isTabVisible(i)]
+        assert len(visible_easy_tabs) == 4
+
+        # Switch to Pro mode: reveals full details & 6 Studio tabs
+        win._set_ui_advanced_mode(True)
+        assert win.ui_mode_pro_btn.isChecked() is True
+        assert win.health_pill.isHidden() is True
+        assert win.ffmpeg_pill.isHidden() is False
+        assert win.step2_pro_drawer.isHidden() is False
+        visible_pro_tabs = [i for i in range(win.studio_widget.ctrl_tabs.count()) if win.studio_widget.ctrl_tabs.isTabVisible(i)]
+        assert len(visible_pro_tabs) == 6
+
+        # Switch theme & emit toast
+        win._toggle_ui_theme()
+        assert settings.ui_theme == "light"
+        assert win._toasts._active is not None
+        assert win._toasts._active.isHidden() is False
+    finally:
+        win.close()
+        win.deleteLater()
+
 
 
 

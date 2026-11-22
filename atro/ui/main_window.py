@@ -10,7 +10,7 @@ from typing import Optional
 import cv2
 import numpy as np
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QCloseEvent, QMouseEvent
+from PyQt6.QtGui import QCloseEvent, QMouseEvent, QResizeEvent
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -35,12 +35,19 @@ from PyQt6.QtWidgets import (
 
 from atro import APP_NAME, __version__
 from atro.config import AppSettings, load_settings, save_settings
+from atro.core.error_messages import humanize_error
 from atro.core.presets import (
     CAPTION_RECIPES,
     READY_TEMPLATES,
     build_ready_template_config,
     normalize_ready_template_id,
     recommend_templates_for_context,
+)
+from atro.ui.components import (
+    EmptyStateCard,
+    FloatingActionBar,
+    ToastManager,
+    animate_widget_entrance,
 )
 from atro.ui.widgets.template_gallery import TemplateGalleryWidget
 from atro.core.schemas import (
@@ -100,12 +107,20 @@ class MainWindow(QMainWindow):
         self._bridge.batch_clips_rendered.connect(self._on_batch_clips_rendered)
         self._bridge.standalone_clip_rendered.connect(self._on_standalone_clip_rendered)
 
+        self._toasts = ToastManager(self)
         self._build_ui()
+        self.studio_widget.style_applied_to_all.connect(self._on_studio_style_applied_all)
+        self._set_ui_advanced_mode(bool(self._settings.ui_advanced_mode), persist=False)
         self._load_existing_jobs()
         self.go_to_step(0)
 
         self._bridge.start()
         self._bridge.refresh_preflight()
+
+    def resizeEvent(self, event: Optional[QResizeEvent]) -> None:
+        super().resizeEvent(event)
+        if hasattr(self, "_toasts"):
+            self._toasts.reposition()
 
     def _get_settings(self) -> AppSettings:
         return self._settings
@@ -157,6 +172,10 @@ class MainWindow(QMainWindow):
 
         top_layout.addStretch()
 
+        self.health_pill = QLabel("Sistem: Cek...")
+        self.health_pill.setObjectName("StatusPill")
+        self.health_pill.setProperty("tone", "neutral")
+
         self.ytdlp_pill = QLabel("YouTube: ...")
         self.ytdlp_pill.setObjectName("StatusPill")
         self.ytdlp_pill.setProperty("tone", "neutral")
@@ -169,13 +188,32 @@ class MainWindow(QMainWindow):
         self.apikey_pill.setObjectName("StatusPill")
         self.apikey_pill.setProperty("tone", "neutral")
 
+        self.ui_mode_easy_btn = QPushButton("Mudah")
+        self.ui_mode_easy_btn.setObjectName("ModeSwitch")
+        self.ui_mode_easy_btn.setCheckable(True)
+        self.ui_mode_easy_btn.clicked.connect(lambda: self._set_ui_advanced_mode(False))
+
+        self.ui_mode_pro_btn = QPushButton("Pro")
+        self.ui_mode_pro_btn.setObjectName("ModeSwitch")
+        self.ui_mode_pro_btn.setCheckable(True)
+        self.ui_mode_pro_btn.clicked.connect(lambda: self._set_ui_advanced_mode(True))
+
+        self.theme_toggle_btn = QPushButton("Terang" if self._settings.ui_theme == "dark" else "Gelap")
+        self.theme_toggle_btn.setObjectName("SmallAction")
+        self.theme_toggle_btn.setToolTip("Ganti tema Gelap / Terang")
+        self.theme_toggle_btn.clicked.connect(self._toggle_ui_theme)
+
         self.settings_btn = QPushButton("Pengaturan")
         self.settings_btn.setObjectName("SmallAction")
         self.settings_btn.clicked.connect(self._open_settings)
 
+        top_layout.addWidget(self.health_pill)
         top_layout.addWidget(self.ytdlp_pill)
         top_layout.addWidget(self.ffmpeg_pill)
         top_layout.addWidget(self.apikey_pill)
+        top_layout.addWidget(self.ui_mode_easy_btn)
+        top_layout.addWidget(self.ui_mode_pro_btn)
+        top_layout.addWidget(self.theme_toggle_btn)
         top_layout.addWidget(self.settings_btn)
         main_layout.addWidget(top_bar)
 
@@ -268,12 +306,18 @@ class MainWindow(QMainWindow):
         self.jobs_vbox.setContentsMargins(0, 0, 4, 0)
         self.jobs_vbox.setSpacing(8)
         self.jobs_empty_label = QLabel(
-            "Belum ada daftar job.\nKlik tombol '+ Buat Project Klip Baru ->' di atas untuk memulai."
+            "Belum ada daftar job."
         )
-        self.jobs_empty_label.setObjectName("MutedText")
-        self.jobs_empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.jobs_empty_label.setWordWrap(True)
+        self.jobs_empty_label.setVisible(False)
+        self.jobs_empty_state = EmptyStateCard(
+            badge_text="Mulai Cepat",
+            title="Belum Ada Project Klip",
+            description="Tempel link YouTube atau pilih file video podcast/gaming Anda. AI & Face Tracker ATRO akan memotong dan menyorot pembicara secara otomatis.",
+            cta_text="+ Buat Project Klip Baru ->",
+        )
+        self.jobs_empty_state.action_clicked.connect(lambda: self.go_to_step(1))
         self.jobs_vbox.addWidget(self.jobs_empty_label)
+        self.jobs_vbox.addWidget(self.jobs_empty_state)
         self.jobs_vbox.addStretch()
         self.jobs_scroll.setWidget(self.jobs_container)
         jl.addWidget(self.jobs_scroll, 1)
@@ -335,8 +379,8 @@ class MainWindow(QMainWindow):
         self.url_input = QLineEdit()
         self.url_input.setPlaceholderText("Tempel link video YouTube di sini (contoh: https://www.youtube.com/watch?v=...)")
         self.url_input.returnPressed.connect(self._submit_job)
-        self.yt_start_btn = QPushButton("Mulai Proses Sekarang ->")
-        self.yt_start_btn.setObjectName("PrimaryButton")
+        self.yt_start_btn = QPushButton("Mulai Cepat ->")
+        self.yt_start_btn.setObjectName("SmallAction")
         self.yt_start_btn.clicked.connect(self._submit_job)
         yt_l.addWidget(self.url_input, 1)
         yt_l.addWidget(self.yt_start_btn)
@@ -352,8 +396,8 @@ class MainWindow(QMainWindow):
         self.local_video_input.returnPressed.connect(self._submit_job)
         browse_video_btn = QPushButton("Pilih Video...")
         browse_video_btn.clicked.connect(self._browse_local_video)
-        self.local_start_btn = QPushButton("Mulai Proses Sekarang ->")
-        self.local_start_btn.setObjectName("PrimaryButton")
+        self.local_start_btn = QPushButton("Mulai Cepat ->")
+        self.local_start_btn.setObjectName("SmallAction")
         self.local_start_btn.clicked.connect(self._submit_job)
         lv_row.addWidget(self.local_video_input, 1)
         lv_row.addWidget(browse_video_btn)
@@ -504,6 +548,11 @@ class MainWindow(QMainWindow):
         left_l.setContentsMargins(0, 0, 0, 0)
         left_l.setSpacing(10)
 
+        self.step2_pro_drawer = QWidget()
+        pro_l = QVBoxLayout(self.step2_pro_drawer)
+        pro_l.setContentsMargins(0, 0, 0, 0)
+        pro_l.setSpacing(8)
+
         # Row 1: Layout & PiP controls
         layout_row = QHBoxLayout()
         layout_row.setSpacing(10)
@@ -549,7 +598,7 @@ class MainWindow(QMainWindow):
             layout_row.addWidget(lbl)
             layout_row.addWidget(w)
         layout_row.addStretch()
-        left_l.addLayout(layout_row)
+        pro_l.addLayout(layout_row)
 
         # Row 2: Caption Recipe (8 Creator Recipes) & Highlight/Pill Styling
         recipe_row = QHBoxLayout()
@@ -582,7 +631,7 @@ class MainWindow(QMainWindow):
             recipe_row.addWidget(lbl)
             recipe_row.addWidget(w)
         recipe_row.addStretch()
-        left_l.addLayout(recipe_row)
+        pro_l.addLayout(recipe_row)
 
         # Row 3: Subtitle Position, Size, Words, Dual Keyword & Auto Emoji
         quick_style_row = QHBoxLayout()
@@ -629,7 +678,7 @@ class MainWindow(QMainWindow):
         quick_style_row.addWidget(self.init_sec_col_btn)
         quick_style_row.addWidget(self.init_auto_emoji_chk)
         quick_style_row.addStretch()
-        left_l.addLayout(quick_style_row)
+        pro_l.addLayout(quick_style_row)
 
         # Row 4: Top Topic Pill, Vignette, Zoom & Advanced Options Toggle
         effects_row = QHBoxLayout()
@@ -659,12 +708,11 @@ class MainWindow(QMainWindow):
         effects_row.addWidget(self.init_vignette_chk)
         effects_row.addWidget(self.init_topic_hdr_chk)
         effects_row.addWidget(self.init_topic_hdr_edit, 1)
-        effects_row.addWidget(self.adv_options_btn)
-        left_l.addLayout(effects_row)
+        pro_l.addLayout(effects_row)
 
-        # Feature Toggles Row + Collapsible Framing/Padding
+        # Feature Toggles Row + Progressive Disclosure button
         feat_row = QHBoxLayout()
-        feat_row.setSpacing(12)
+        feat_row.setSpacing(10)
         self.subtitles_chk = QCheckBox("Subtitle Otomatis")
         self.subtitles_chk.setChecked(True)
         self.subtitles_chk.toggled.connect(lambda _v: self._refresh_step2_preview())
@@ -692,11 +740,15 @@ class MainWindow(QMainWindow):
             feat_row.addWidget(chk)
         feat_row.addStretch()
         feat_row.addWidget(self.bgm_status_label)
+        feat_row.addWidget(self.adv_options_btn)
         left_l.addLayout(feat_row)
+        left_l.addWidget(self.step2_pro_drawer)
 
         self.adv_options_panel = QWidget()
         self.adv_options_panel.setVisible(False)
         self.adv_options_btn.toggled.connect(self.adv_options_panel.setVisible)
+        self.adv_options_btn.toggled.connect(self.step2_pro_drawer.setVisible)
+        self.step2_pro_drawer.setVisible(False)
         adv_l = QHBoxLayout(self.adv_options_panel)
         adv_l.setContentsMargins(0, 4, 0, 0)
         adv_l.setSpacing(12)
@@ -885,7 +937,6 @@ class MainWindow(QMainWindow):
         jerr_layout.setContentsMargins(12, 8, 12, 8)
         self.job_error_label = QLabel()
         self.job_error_label.setWordWrap(True)
-        self.job_error_label.setStyleSheet("color: #FCA5A5;")
         jerr_layout.addWidget(self.job_error_label)
         layout.addWidget(self.job_error_banner)
 
@@ -909,35 +960,6 @@ class MainWindow(QMainWindow):
         clips_hdr.addWidget(clips_title, 1)
         cl.addLayout(clips_hdr)
 
-        batch_bar = QHBoxLayout()
-        batch_bar.setSpacing(8)
-        self.select_all_clips_btn = QPushButton("Pilih Semua")
-        self.select_all_clips_btn.setObjectName("SmallAction")
-        self.select_all_clips_btn.clicked.connect(lambda: self._select_all_step3_clips(True))
-
-        self.deselect_all_clips_btn = QPushButton("Batal Pilih")
-        self.deselect_all_clips_btn.setObjectName("SmallAction")
-        self.deselect_all_clips_btn.clicked.connect(lambda: self._select_all_step3_clips(False))
-
-        self.selected_clips_pill = QLabel("0 klip dipilih")
-        self.selected_clips_pill.setObjectName("VersionPill")
-
-        self.batch_studio_btn = QPushButton("Edit Beberapa / Semua di Studio ->")
-        self.batch_studio_btn.setObjectName("SmallAction")
-        self.batch_studio_btn.clicked.connect(self._open_batch_in_studio)
-
-        self.batch_rerender_btn = QPushButton("Render Ulang Klip Terpilih (FFmpeg)")
-        self.batch_rerender_btn.setObjectName("PrimaryButton")
-        self.batch_rerender_btn.clicked.connect(self._rerender_selected_step3_clips)
-
-        batch_bar.addWidget(self.select_all_clips_btn)
-        batch_bar.addWidget(self.deselect_all_clips_btn)
-        batch_bar.addWidget(self.selected_clips_pill)
-        batch_bar.addStretch()
-        batch_bar.addWidget(self.batch_studio_btn)
-        batch_bar.addWidget(self.batch_rerender_btn)
-        cl.addLayout(batch_bar)
-
         self.clips_scroll = QScrollArea()
         self.clips_scroll.setWidgetResizable(True)
         self.clips_container = QWidget()
@@ -952,6 +974,36 @@ class MainWindow(QMainWindow):
         self.clips_vbox.addStretch()
         self.clips_scroll.setWidget(self.clips_container)
         cl.addWidget(self.clips_scroll, 1)
+
+        self.floating_batch_bar = FloatingActionBar()
+        fb_l = self.floating_batch_bar.bar_layout()
+        self.select_all_clips_btn = QPushButton("Pilih Semua")
+        self.select_all_clips_btn.setObjectName("SmallAction")
+        self.select_all_clips_btn.clicked.connect(lambda: self._select_all_step3_clips(True))
+
+        self.deselect_all_clips_btn = QPushButton("Batal Pilih")
+        self.deselect_all_clips_btn.setObjectName("SmallAction")
+        self.deselect_all_clips_btn.clicked.connect(lambda: self._select_all_step3_clips(False))
+
+        self.selected_clips_pill = QLabel("0 klip dipilih")
+        self.selected_clips_pill.setObjectName("VersionPill")
+
+        self.batch_studio_btn = QPushButton("Edit di Studio ->")
+        self.batch_studio_btn.setObjectName("SmallAction")
+        self.batch_studio_btn.clicked.connect(self._open_batch_in_studio)
+
+        self.batch_rerender_btn = QPushButton("Render Ulang Terpilih")
+        self.batch_rerender_btn.setObjectName("PrimaryButton")
+        self.batch_rerender_btn.clicked.connect(self._rerender_selected_step3_clips)
+
+        fb_l.addWidget(self.select_all_clips_btn)
+        fb_l.addWidget(self.deselect_all_clips_btn)
+        fb_l.addWidget(self.selected_clips_pill)
+        fb_l.addStretch()
+        fb_l.addWidget(self.batch_studio_btn)
+        fb_l.addWidget(self.batch_rerender_btn)
+        self.floating_batch_bar.setVisible(False)
+        cl.addWidget(self.floating_batch_bar)
 
         layout.addWidget(clips_card, 1)
         return page
@@ -999,16 +1051,57 @@ class MainWindow(QMainWindow):
 
     # --- Wizard Step & Style Logic ---
     def go_to_step(self, step_idx: int) -> None:
-        """Switch wizard page cleanly and update top WinUI stepper indicators."""
+        """Switch wizard page cleanly with smooth fade transition & update stepper indicators."""
         clamped = max(0, min(3, int(step_idx)))
+        changed = clamped != self._current_step
         self._current_step = clamped
         self.wizard_stack.setCurrentIndex(clamped)
         for idx, btn in enumerate(self.step_buttons):
             btn.setProperty("active", idx == clamped)
             btn.setProperty("done", idx < clamped)
             _repolish(btn)
+        if changed:
+            animate_widget_entrance(
+                self.wizard_stack.currentWidget(),
+                duration_ms=170,
+                enabled=not self._settings.ui_reduce_motion,
+            )
         if clamped == 3 and hasattr(self, "studio_widget"):
             self.studio_widget._maybe_schedule_auto_detect()
+
+    def _set_ui_advanced_mode(self, is_pro: bool, persist: bool = True) -> None:
+        """Toggle ATRO between clean Easy (Mudah) mode and full Pro controls."""
+        self.ui_mode_easy_btn.setChecked(not is_pro)
+        self.ui_mode_pro_btn.setChecked(is_pro)
+        self.health_pill.setVisible(not is_pro)
+        self.ytdlp_pill.setVisible(is_pro)
+        self.ffmpeg_pill.setVisible(is_pro)
+        self.apikey_pill.setVisible(is_pro)
+        if hasattr(self, "step2_pro_drawer"):
+            self.step2_pro_drawer.setVisible(is_pro or self.adv_options_btn.isChecked())
+        if hasattr(self, "adv_options_panel"):
+            self.adv_options_panel.setVisible(is_pro or self.adv_options_btn.isChecked())
+        if hasattr(self, "studio_widget"):
+            self.studio_widget.set_advanced_mode(is_pro)
+        if persist and self._settings.ui_advanced_mode != is_pro:
+            self._settings.ui_advanced_mode = is_pro
+            save_settings(self._settings)
+
+    def _toggle_ui_theme(self) -> None:
+        """Switch seamlessly between Dark and Light Fluent theme."""
+        new_mode = "light" if self._settings.ui_theme == "dark" else "dark"
+        self._settings.ui_theme = new_mode  # type: ignore[assignment]
+        save_settings(self._settings)
+        app = QApplication.instance()
+        if app is not None:
+            app.setStyleSheet(build_stylesheet(new_mode))  # type: ignore[arg-type]
+        self.theme_toggle_btn.setText("Terang" if new_mode == "dark" else "Gelap")
+        self._toasts.show_toast(
+            "Tema Diperbarui",
+            f"Tampilan beralih ke mode {'Gelap' if new_mode == 'dark' else 'Terang'}.",
+            tone="info",
+            reduce_motion=self._settings.ui_reduce_motion,
+        )
 
     def _select_initial_style(self, format_id: str) -> None:
         tid = normalize_ready_template_id(format_id)
@@ -1181,19 +1274,34 @@ class MainWindow(QMainWindow):
         self.apikey_pill.setProperty("tone", "ok" if ai_ready else "warn")
         _repolish(self.apikey_pill)
 
+        all_ok = report.ffmpeg.available and report.ffprobe.available and ai_ready
+        if all_ok:
+            self.health_pill.setText("Sistem: Siap")
+            self.health_pill.setProperty("tone", "ok")
+        elif not report.ffmpeg.available:
+            self.health_pill.setText("Sistem: Cek FFmpeg")
+            self.health_pill.setProperty("tone", "error")
+        else:
+            self.health_pill.setText("Sistem: Cek Pengaturan")
+            self.health_pill.setProperty("tone", "warn")
+        self.health_pill.setToolTip(
+            f"YouTube: {'Siap' if report.yt_dlp.available else 'Belum Ada'} • "
+            f"FFmpeg: {'Siap' if report.ffmpeg.available else 'Belum Ada'} • "
+            f"AI: {'Siap' if ai_ready else 'Belum Diisi'}"
+        )
+        _repolish(self.health_pill)
+
         self._update_start_button_state()
 
         if report.errors:
             self.alert_banner.setProperty("severity", "error")
             _repolish(self.alert_banner)
             self.alert_label.setText("Preflight Error: " + " | ".join(report.errors))
-            self.alert_label.setStyleSheet("color: #FCA5A5;")
             self.alert_banner.setVisible(True)
         elif report.warnings:
             self.alert_banner.setProperty("severity", "warning")
             _repolish(self.alert_banner)
             self.alert_label.setText("Info: " + " | ".join(report.warnings))
-            self.alert_label.setStyleSheet("color: #FCD34D;")
             self.alert_banner.setVisible(True)
         else:
             self.alert_banner.setVisible(False)
@@ -1486,11 +1594,20 @@ class MainWindow(QMainWindow):
         state = self._jobs.get(job_id)
         if state is not None and self._selected_job_id == job_id:
             self._refresh_detail_panel(state)
-        out_path = getattr(rendered, "output_path", "")
-        QMessageBox.information(
-            self,
+        out_path = Path(str(getattr(rendered, "output_path", ""))).name
+        self._toasts.show_toast(
             "Export Selesai",
-            f"Klip berhasil dirender ulang via FFmpeg:\n{out_path}",
+            f"Klip {out_path} berhasil dirender.",
+            tone="ok",
+            reduce_motion=self._settings.ui_reduce_motion,
+        )
+
+    def _on_studio_style_applied_all(self, count: int) -> None:
+        self._toasts.show_toast(
+            f"Gaya Diterapkan ke {count} Klip",
+            "Buka 'Edit & Render Beberapa/Semua...' untuk merender ulang.",
+            tone="info",
+            reduce_motion=self._settings.ui_reduce_motion,
         )
 
     def _on_batch_render_progress(self, job_id: str, current_idx: int, total_cnt: int, clip_title: str) -> None:
@@ -1516,24 +1633,27 @@ class MainWindow(QMainWindow):
                 self.step3_progress_bar.setValue(100)
                 self.step3_progress_bar.setProperty("tone", "ok")
                 _repolish(self.step3_progress_bar)
-        QMessageBox.information(
-            self,
+        self._toasts.show_toast(
             "Render Batch Selesai",
-            f"{len(rendered_list)} klip berhasil diperbarui dan dirender ulang via FFmpeg.",
+            f"{len(rendered_list)} klip berhasil diperbarui dan siap ditonton.",
+            tone="ok",
+            reduce_motion=self._settings.ui_reduce_motion,
         )
 
     def _on_standalone_clip_rendered(self, rendered: object) -> None:
         self._set_studio_render_busy(False)
-        out_path = getattr(rendered, "output_path", "")
-        QMessageBox.information(
-            self,
-            "Export Video Studio Selesai",
-            f"Video hasil Studio berhasil diekspor:\n{out_path}",
+        out_path = Path(str(getattr(rendered, "output_path", ""))).name
+        self._toasts.show_toast(
+            "Export Studio Selesai",
+            f"Video {out_path} berhasil diekspor.",
+            tone="ok",
+            reduce_motion=self._settings.ui_reduce_motion,
         )
 
     def _on_bridge_error(self, msg: str) -> None:
         self._set_studio_render_busy(False)
-        QMessageBox.critical(self, "Kesalahan Pipeline", msg)
+        headline, hint = humanize_error(msg)
+        QMessageBox.critical(self, "Kendala Pemrosesan", f"{headline}\n\nSaran: {hint}")
 
     def selected_step3_clip_indices(self) -> list[int]:
         return [card.clip_index() for card in self._clip_cards if card.is_selected()]
@@ -1556,6 +1676,8 @@ class MainWindow(QMainWindow):
         self.deselect_all_clips_btn.setEnabled(has_clips)
         self.batch_studio_btn.setEnabled(has_clips)
         self.batch_rerender_btn.setEnabled(sel > 0 and self.studio_widget.export_btn.isEnabled())
+        if hasattr(self, "floating_batch_bar"):
+            self.floating_batch_bar.setVisible(has_clips)
 
     def _open_batch_in_studio(self) -> None:
         if not self._selected_job_id:
@@ -1599,6 +1721,8 @@ class MainWindow(QMainWindow):
     def _upsert_job(self, state: JobState, select: bool = False) -> None:
         self._jobs[state.job_id] = state
         self.jobs_empty_label.setVisible(False)
+        if hasattr(self, "jobs_empty_state"):
+            self.jobs_empty_state.setVisible(False)
         self.job_count_pill.setText(str(len(self._jobs)))
 
         card = self._job_cards.get(state.job_id)
@@ -1679,7 +1803,8 @@ class MainWindow(QMainWindow):
         self._update_stage_nodes(state)
 
         if state.error:
-            self.job_error_label.setText(state.error)
+            headline, hint = humanize_error(state.error)
+            self.job_error_label.setText(f"{headline}\nSaran: {hint}")
             self.job_error_banner.setVisible(True)
         else:
             self.job_error_banner.setVisible(False)
@@ -1768,12 +1893,13 @@ class MainWindow(QMainWindow):
 
 
 def launch_gui() -> int:
-    """Create QApplication, apply WinUI 3 Orange stylesheet, and start MainWindow."""
+    """Create QApplication, apply WinUI 3 Fluent stylesheet, and start MainWindow."""
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(__version__)
     app.setStyle("Fusion")
-    app.setStyleSheet(build_stylesheet())
+    settings = load_settings()
+    app.setStyleSheet(build_stylesheet(settings.ui_theme))
 
     window = MainWindow()
     window.show()
