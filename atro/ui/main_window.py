@@ -50,12 +50,16 @@ from atro.ui.components import (
     animate_widget_entrance,
 )
 from atro.ui.widgets.template_gallery import TemplateGalleryWidget
+from atro.core.demo_sample import create_offline_demo_job
+from atro.core.publish_kit import export_publish_kit_zip
 from atro.core.schemas import (
+    AnalysisResult,
     JobRequest,
     JobState,
     JobStatus,
     PreflightReport,
     RenderResult,
+    TranscriptResult,
     TranscriptSegment,
     TranscriptWord,
 )
@@ -106,6 +110,7 @@ class MainWindow(QMainWindow):
         self._bridge.batch_render_progress.connect(self._on_batch_render_progress)
         self._bridge.batch_clips_rendered.connect(self._on_batch_clips_rendered)
         self._bridge.standalone_clip_rendered.connect(self._on_standalone_clip_rendered)
+        self._bridge.alternative_clips_generated.connect(self._on_alternative_clips_generated)
 
         self._toasts = ToastManager(self)
         self._build_ui()
@@ -264,6 +269,10 @@ class MainWindow(QMainWindow):
         hero_text.addWidget(hero_sub)
         hero_layout.addLayout(hero_text, 1)
 
+        self.demo_sample_btn = QPushButton("Coba Video Contoh (Tanpa API Key)")
+        self.demo_sample_btn.setToolTip("Buat project podcast contoh offline 3-kamera/5-pembicara untuk mencoba Studio & Publish Kit langsung")
+        self.demo_sample_btn.clicked.connect(self._load_offline_demo_project)
+
         self.quick_studio_btn = QPushButton("Buka Studio Live Preview")
         self.quick_studio_btn.clicked.connect(lambda: self.go_to_step(3))
 
@@ -271,6 +280,7 @@ class MainWindow(QMainWindow):
         self.new_project_btn.setObjectName("HeroButton")
         self.new_project_btn.clicked.connect(lambda: self.go_to_step(1))
 
+        hero_layout.addWidget(self.demo_sample_btn)
         hero_layout.addWidget(self.quick_studio_btn)
         hero_layout.addWidget(self.new_project_btn)
         layout.addWidget(hero)
@@ -461,11 +471,17 @@ class MainWindow(QMainWindow):
         self.max_dur_spin.setSuffix(" detik")
         self.max_dur_spin.setValue(self._settings.default_max_duration_sec)
 
+        self.platform_combo = QComboBox()
+        self.platform_combo.addItem("YouTube Shorts (<= 60 detik, 9:16)", "youtube_shorts")
+        self.platform_combo.addItem("TikTok (hingga 3 menit, 9:16)", "tiktok")
+        self.platform_combo.currentIndexChanged.connect(self._on_platform_preset_changed)
+
         self.aspect_combo = QComboBox()
         self.aspect_combo.addItems(["9:16", "16:9"])
         self.aspect_combo.setCurrentText(self._settings.default_aspect_ratio)
 
         for lbl_t, w in (
+            ("Platform:", self.platform_combo),
             ("Jumlah Klip:", self.clip_count_spin),
             ("Durasi Minimal:", self.min_dur_spin),
             ("Durasi Maksimal:", self.max_dur_spin),
@@ -638,6 +654,7 @@ class MainWindow(QMainWindow):
         quick_style_row.setSpacing(10)
         self.init_sub_pos_combo = QComboBox()
         self.init_sub_pos_combo.addItem("Otomatis Sesuai Style", "")
+        self.init_sub_pos_combo.addItem("Di Atas Subjek Bicara", "above_speaker")
         self.init_sub_pos_combo.addItem("Di Garis Tengah Split", "split_line_center")
         self.init_sub_pos_combo.addItem("Di Bagian Bawah Layar", "bottom_safe")
         self.init_sub_pos_combo.addItem("Di Bagian Atas Layar", "top_safe")
@@ -779,6 +796,13 @@ class MainWindow(QMainWindow):
         self.init_tr_sfx_combo.addItem("Whoosh", "whoosh")
         self.init_tr_sfx_combo.addItem("Swipe", "swipe")
         self.init_tr_sfx_combo.addItem("Pop", "pop")
+        try:
+            from atro.modules.cutter.sfx import list_custom_sfx_names
+
+            for _cn in list_custom_sfx_names():
+                self.init_tr_sfx_combo.addItem(f"{_cn} (kustom)", _cn)
+        except Exception:
+            pass
         self.init_tr_sfx_combo.currentIndexChanged.connect(lambda _i: self._refresh_step2_preview())
 
         self.aspect_combo.currentTextChanged.connect(lambda _t: self._on_step2_style_mutated())
@@ -957,8 +981,20 @@ class MainWindow(QMainWindow):
         clips_hdr = QHBoxLayout()
         clips_title = QLabel("Hasil Klip Video (Centang beberapa/semua klip untuk edit massal, atau klik 'Ubah Style & Live Preview ->')")
         clips_title.setObjectName("SectionTitle")
+        self.alt_clips_btn = QPushButton("Buat Klip Alternatif")
+        self.alt_clips_btn.setObjectName("SmallAction")
+        self.alt_clips_btn.setToolTip("Minta AI mencari momen baru yang berbeda tanpa transcribe ulang")
+        self.alt_clips_btn.clicked.connect(self._generate_alternative_clips)
+        self.alt_clips_btn.setVisible(False)
         clips_hdr.addWidget(clips_title, 1)
+        clips_hdr.addWidget(self.alt_clips_btn)
         cl.addLayout(clips_hdr)
+
+        self.topic_outline_label = QLabel("")
+        self.topic_outline_label.setObjectName("MutedText")
+        self.topic_outline_label.setWordWrap(True)
+        self.topic_outline_label.setVisible(False)
+        cl.addWidget(self.topic_outline_label)
 
         self.clips_scroll = QScrollArea()
         self.clips_scroll.setWidgetResizable(True)
@@ -1226,6 +1262,19 @@ class MainWindow(QMainWindow):
         cfg.overlays.climax_effects.progress_bar_enabled = self.viral_polish_chk.isChecked()
         cfg.overlays.climax_effects.contrast_boost_enabled = self.viral_polish_chk.isChecked()
         cfg.sync_subtitle_anchor()
+        if cfg.subtitles.placement_preset == "above_speaker" and not cfg.layout.shot_crops:
+            from atro.core.composer_schema import CropBoxConfig, FaceAnchorBox, ShotCropSegment
+
+            cfg.layout.shot_crops = [
+                ShotCropSegment(
+                    t_start=0.0,
+                    t_end=12.0,
+                    top_crop=CropBoxConfig(auto_detect=True, x=0.04, y=0.0, w=0.34, h=1.0),
+                    speaker_id="SPK_1",
+                    speaker_faces={"SPK_1": FaceAnchorBox(x=0.14, y=0.16, w=0.14, h=0.22, confidence=0.95)},
+                    confidence=0.95,
+                )
+            ]
 
         self.step2_preview_badge.setText(f"{aspect} • {cfg.layout.mode}")
         self.step2_preview_canvas.render_state(
@@ -1501,6 +1550,7 @@ class MainWindow(QMainWindow):
                 padding_sec=round(self.padding_spin.value(), 2),
                 edit_format=edit_fmt,  # type: ignore[arg-type]
                 framing_mode=self.framing_combo.currentData() or "smart_face",  # type: ignore[arg-type]
+                platform_target=self.platform_combo.currentData() or "youtube_shorts",  # type: ignore[arg-type]
                 enable_subtitles=self.subtitles_chk.isChecked(),
                 enable_hook_title=self.hook_title_chk.isChecked(),
                 enable_opening_tts=self.opening_tts_chk.isChecked(),
@@ -1636,6 +1686,18 @@ class MainWindow(QMainWindow):
         self._toasts.show_toast(
             "Render Batch Selesai",
             f"{len(rendered_list)} klip berhasil diperbarui dan siap ditonton.",
+            tone="ok",
+            reduce_motion=self._settings.ui_reduce_motion,
+        )
+
+    def _on_alternative_clips_generated(self, job_id: str, new_count: int) -> None:
+        self._set_studio_render_busy(False)
+        state = self._jobs.get(job_id)
+        if state is not None and self._selected_job_id == job_id:
+            self._refresh_detail_panel(state)
+        self._toasts.show_toast(
+            "Klip Alternatif Siap",
+            f"{new_count} klip alternatif baru telah ditambahkan.",
             tone="ok",
             reduce_motion=self._settings.ui_reduce_motion,
         )
@@ -1849,6 +1911,7 @@ class MainWindow(QMainWindow):
                 if clip.clip_index in prev_checked:
                     card.set_selected(prev_checked[clip.clip_index])
                 card.customize_requested.connect(self._open_clip_in_studio)
+                card.publish_kit_requested.connect(self._export_clip_publish_kit)
                 card.selection_changed.connect(lambda _i, _c: self._update_selected_clips_ui())
                 self._clip_cards.append(card)
                 self.clips_vbox.addWidget(card)
@@ -1868,6 +1931,130 @@ class MainWindow(QMainWindow):
 
         self.clips_vbox.addStretch()
         self._update_selected_clips_ui()
+
+        has_transcript = bool(
+            state.artifacts.transcript_json and Path(state.artifacts.transcript_json).is_file()
+        )
+        if hasattr(self, "alt_clips_btn"):
+            self.alt_clips_btn.setVisible(state.status == JobStatus.COMPLETED and has_transcript)
+
+        if hasattr(self, "topic_outline_label"):
+            outline_txt = ""
+            an_path_str = state.artifacts.analysis_json
+            if an_path_str and Path(an_path_str).is_file():
+                try:
+                    an_obj = AnalysisResult.model_validate_json(
+                        Path(an_path_str).read_text(encoding="utf-8")
+                    )
+                    if an_obj.topic_outline:
+                        topics_preview = "  •  ".join(
+                            f"[{t.start_time:.0f}s] {t.topic}" for t in an_obj.topic_outline[:4]
+                        )
+                        outline_txt = f"Topik Pembahasan: {topics_preview}"
+                except Exception:
+                    outline_txt = ""
+            self.topic_outline_label.setText(outline_txt)
+            self.topic_outline_label.setVisible(bool(outline_txt))
+
+    def _on_platform_preset_changed(self) -> None:
+        plat = self.platform_combo.currentData() or "youtube_shorts"
+        if plat == "youtube_shorts":
+            self.aspect_combo.setCurrentText("9:16")
+            if self.max_dur_spin.value() > 60:
+                self.max_dur_spin.setValue(58)
+            if self.min_dur_spin.value() > 45:
+                self.min_dur_spin.setValue(20)
+        else:
+            self.aspect_combo.setCurrentText("9:16")
+            if self.max_dur_spin.value() < 75:
+                self.max_dur_spin.setValue(90)
+
+    def _load_offline_demo_project(self) -> None:
+        try:
+            preflight = self._bridge.get_preflight()
+            state = create_offline_demo_job(
+                workspace_dir=self._settings.workspace_dir,
+                platform_target=self.platform_combo.currentData() if hasattr(self, "platform_combo") else "youtube_shorts",
+                ffmpeg_path=preflight.ffmpeg.path if preflight.ffmpeg.available else None,
+            )
+            self._upsert_job(state, select=True)
+            self.go_to_step(2)
+            self._toasts.show_toast(
+                "Project Contoh Siap",
+                "Video podcast demo 5 orang & 3 kamera siap dicoba di Studio Preview tanpa API Key!",
+                tone="ok",
+                reduce_motion=self._settings.ui_reduce_motion,
+            )
+        except Exception as exc:
+            headline, hint = humanize_error(str(exc))
+            QMessageBox.warning(self, headline, f"{headline}\n\n{hint}")
+
+    def _export_clip_publish_kit(self, clip_index: int) -> None:
+        if not self._selected_job_id:
+            return
+        state = self._jobs.get(self._selected_job_id)
+        if state is None or not state.artifacts.render_result_json:
+            return
+        try:
+            rr = RenderResult.model_validate_json(
+                Path(state.artifacts.render_result_json).read_text(encoding="utf-8")
+            )
+        except Exception:
+            return
+        target_clip = next((c for c in rr.rendered_clips if c.clip_index == clip_index), None)
+        if target_clip is None:
+            return
+
+        segs = []
+        if state.artifacts.transcript_json and Path(state.artifacts.transcript_json).is_file():
+            try:
+                segs = TranscriptResult.model_validate_json(
+                    Path(state.artifacts.transcript_json).read_text(encoding="utf-8")
+                ).segments
+            except Exception:
+                segs = []
+
+        kits_dir = Path(state.workspace_dir) / "publish_kits"
+        out_zip = kits_dir / f"clip_{clip_index:02d}_publish_kit.zip"
+        preset_id = (
+            (state.request.initial_style_overrides or {}).get("ready_template_id")
+            or state.request.edit_format
+            or "podcast"
+        )
+        try:
+            export_publish_kit_zip(
+                clip=target_clip,
+                output_zip_path=out_zip,
+                platform_target=state.request.platform_target,
+                preset_id=str(preset_id),
+                transcript_segments=segs,
+            )
+            self._toasts.show_toast(
+                "Publish Kit Diekspor",
+                f"Paket ZIP (MP4 + Cover PNG + Caption + Hashtag) disimpan di {out_zip.name}",
+                tone="ok",
+                reduce_motion=self._settings.ui_reduce_motion,
+            )
+            if os.name == "nt" and kits_dir.is_dir():
+                os.startfile(str(kits_dir))  # type: ignore[attr-defined]
+        except Exception as exc:
+            headline, hint = humanize_error(str(exc))
+            QMessageBox.warning(self, headline, f"{headline}\n\n{hint}")
+
+    def _generate_alternative_clips(self) -> None:
+        if not self._selected_job_id:
+            return
+        state = self._jobs.get(self._selected_job_id)
+        if state is None:
+            return
+        self._set_studio_render_busy(True, "AI sedang mencari klip alternatif baru...")
+        self._toasts.show_toast(
+            "Mencari Klip Alternatif",
+            "Menghindari momen klip lama tanpa transcribe ulang...",
+            tone="info",
+            reduce_motion=self._settings.ui_reduce_motion,
+        )
+        self._bridge.generate_alternative_clips(state.job_id)
 
     def _open_job_folder(self, job_id: str) -> None:
         state = self._jobs.get(job_id)

@@ -35,6 +35,7 @@ class ClipCard(QFrame):
 
     customize_requested = pyqtSignal(int)
     selection_changed = pyqtSignal(int, bool)
+    publish_kit_requested = pyqtSignal(int)
 
     def __init__(self, clip: RenderedClip, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -119,6 +120,11 @@ class ClipCard(QFrame):
         actions.setSpacing(8)
         actions.addStretch()
 
+        publish_btn = QPushButton("Publish Kit (.zip)")
+        publish_btn.setObjectName("SmallAction")
+        publish_btn.setToolTip("Ekspor MP4 + Cover PNG 1080x1920 + Caption/Hashtag siap upload")
+        publish_btn.clicked.connect(lambda: self.publish_kit_requested.emit(self._clip.clip_index))
+
         locate_btn = QPushButton("Lokasi File")
         locate_btn.setObjectName("SmallAction")
         locate_btn.clicked.connect(self._reveal_in_explorer)
@@ -132,6 +138,7 @@ class ClipCard(QFrame):
         play_btn.clicked.connect(self._open_clip)
 
         actions.addWidget(customize_btn)
+        actions.addWidget(publish_btn)
         actions.addWidget(locate_btn)
         actions.addWidget(play_btn)
         root.addLayout(actions)

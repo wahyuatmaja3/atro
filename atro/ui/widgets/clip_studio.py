@@ -44,6 +44,7 @@ from atro.config import AppSettings, save_settings
 from atro.core.composer_schema import (
     ClipComposerConfig,
     CommentBubbleItem,
+    ComposerSfxCue,
     ShotCropSegment,
     TranscriptSegmentOverride,
 )
@@ -824,6 +825,13 @@ class ClipStudioWidget(QWidget):
         self.tr_sfx_combo.addItem("Whoosh (Wuss)", "whoosh")
         self.tr_sfx_combo.addItem("Swipe (Geser)", "swipe")
         self.tr_sfx_combo.addItem("Pop (Klik)", "pop")
+        try:
+            from atro.modules.cutter.sfx import list_custom_sfx_names
+
+            for _custom_name in list_custom_sfx_names():
+                self.tr_sfx_combo.addItem(f"{_custom_name} (kustom)", _custom_name)
+        except Exception:
+            pass
         self.tr_sfx_combo.currentIndexChanged.connect(self._on_ui_mutated)
         tr_sfx_row.addWidget(self.tr_easing_combo, 1)
         tr_sfx_row.addWidget(self.tr_sfx_combo, 1)
@@ -882,6 +890,27 @@ class ClipStudioWidget(QWidget):
         pin_row.addWidget(alias_apply_btn)
         sf.addRow("Pin & Nama Pembicara", pin_row)
         vbox.addWidget(spk_grp)
+
+        jc_grp = QGroupBox("Jump-Cut & Ritme Cepat (Saat Export)")
+        jcf = QFormLayout(jc_grp)
+        jcf.setSpacing(6)
+        jc_row = QHBoxLayout()
+        self.silence_trim_chk = QCheckBox("Buang Jeda Panjang (Jump-Cut)")
+        self.silence_trim_chk.toggled.connect(self._on_ui_mutated)
+        self.silence_max_gap_spin = QDoubleSpinBox()
+        self.silence_max_gap_spin.setRange(0.10, 2.00)
+        self.silence_max_gap_spin.setSingleStep(0.05)
+        self.silence_max_gap_spin.setDecimals(2)
+        self.silence_max_gap_spin.setSuffix(" s")
+        self.silence_max_gap_spin.valueChanged.connect(self._on_ui_mutated)
+        self.silence_fillers_chk = QCheckBox("Buang Filler (eee/anu/hmm)")
+        self.silence_fillers_chk.toggled.connect(self._on_ui_mutated)
+        jc_row.addWidget(self.silence_trim_chk)
+        jc_row.addWidget(QLabel("Jeda Maks"))
+        jc_row.addWidget(self.silence_max_gap_spin)
+        jc_row.addWidget(self.silence_fillers_chk)
+        jcf.addRow(jc_row)
+        vbox.addWidget(jc_grp)
 
         self._div_grp = QGroupBox("Garis Pembatas Tengah (Lurus / Miring)")
         df = QFormLayout(self._div_grp)
@@ -1079,12 +1108,24 @@ class ClipStudioWidget(QWidget):
         form.addRow("Ukuran Huruf", self.sub_size_spin)
 
         self.sub_place_combo = QComboBox()
+        self.sub_place_combo.addItem("Di Atas Subjek Bicara (Otomatis)", "above_speaker")
         self.sub_place_combo.addItem("Di Garis Tengah Split", "split_line_center")
         self.sub_place_combo.addItem("Di Bagian Bawah Layar", "bottom_safe")
         self.sub_place_combo.addItem("Di Bagian Atas Layar", "top_safe")
         self.sub_place_combo.addItem("Geser Bebas (Custom X/Y)", "custom")
         self.sub_place_combo.currentIndexChanged.connect(self._on_placement_preset_changed)
-        form.addRow("Posisi Subtitle", self.sub_place_combo)
+
+        self.sub_above_gap_spin = QSpinBox()
+        self.sub_above_gap_spin.setRange(0, 200)
+        self.sub_above_gap_spin.setSuffix(" px")
+        self.sub_above_gap_spin.setToolTip("Jarak teks di atas kepala pembicara (mode Di Atas Subjek)")
+        self.sub_above_gap_spin.valueChanged.connect(self._on_ui_mutated)
+
+        place_row = QHBoxLayout()
+        place_row.addWidget(self.sub_place_combo, 1)
+        place_row.addWidget(QLabel("Jarak Kepala"))
+        place_row.addWidget(self.sub_above_gap_spin)
+        form.addRow("Posisi Subtitle", place_row)
 
         pos_row = QHBoxLayout()
         self.sub_pos_x_spin = QSpinBox()
@@ -1411,11 +1452,21 @@ class ClipStudioWidget(QWidget):
         self.zoom_factor_spin.setSingleStep(0.02)
         self.zoom_factor_spin.setSuffix("x")
         self.zoom_factor_spin.valueChanged.connect(self._on_ui_mutated)
+        self.zoom_repeat_spin = QDoubleSpinBox()
+        self.zoom_repeat_spin.setRange(0.0, 30.0)
+        self.zoom_repeat_spin.setSingleStep(0.5)
+        self.zoom_repeat_spin.setDecimals(1)
+        self.zoom_repeat_spin.setSpecialValueText("1x saja")
+        self.zoom_repeat_spin.setSuffix(" s")
+        self.zoom_repeat_spin.setToolTip("0 = 1x saja; >0 = ulangi zoom punch setiap N detik")
+        self.zoom_repeat_spin.valueChanged.connect(self._on_ui_mutated)
         zp_row.addWidget(self.zoom_punch_chk)
         zp_row.addWidget(QLabel("Mulai"))
         zp_row.addWidget(self.zoom_start_spin)
         zp_row.addWidget(QLabel("Zoom"))
         zp_row.addWidget(self.zoom_factor_spin)
+        zp_row.addWidget(QLabel("Ulang"))
+        zp_row.addWidget(self.zoom_repeat_spin)
         clf.addRow("Zoom Klimaks", zp_row)
 
         hdr_row = QHBoxLayout()
@@ -1512,6 +1563,35 @@ class ClipStudioWidget(QWidget):
         self.opening_tts_chk = QCheckBox("Suara Opening TTS di Awal Klip")
         self.opening_tts_chk.toggled.connect(self._on_ui_mutated)
         form.addRow(self.opening_tts_chk)
+
+        self.ctx_sfx_chk = QCheckBox("SFX Meme Kontekstual (Sesuai Bahasan Klip)")
+        self.ctx_sfx_chk.toggled.connect(self._on_ui_mutated)
+        form.addRow(self.ctx_sfx_chk)
+
+        self.sfx_cues_table = QTableWidget(0, 3)
+        self.sfx_cues_table.setHorizontalHeaderLabels(["Detik (s)", "Nama SFX", "Vol (0-1)"])
+        self.sfx_cues_table.setMaximumHeight(130)
+        sfx_hdr = self.sfx_cues_table.horizontalHeader()
+        if sfx_hdr is not None:
+            sfx_hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+            sfx_hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+            sfx_hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.sfx_cues_table.cellChanged.connect(self._on_sfx_cue_cell_changed)
+        sfx_btns = QHBoxLayout()
+        sfx_add_btn = QPushButton("+ Tambah SFX di Playhead")
+        sfx_add_btn.setObjectName("SmallAction")
+        sfx_add_btn.clicked.connect(self._add_sfx_cue_row)
+        sfx_del_btn = QPushButton("Hapus SFX")
+        sfx_del_btn.setObjectName("SmallAction")
+        sfx_del_btn.clicked.connect(self._remove_sfx_cue_row)
+        sfx_btns.addWidget(sfx_add_btn)
+        sfx_btns.addWidget(sfx_del_btn)
+        sfx_btns.addStretch()
+        sfx_box = QVBoxLayout()
+        sfx_box.setContentsMargins(0, 0, 0, 0)
+        sfx_box.addWidget(self.sfx_cues_table)
+        sfx_box.addLayout(sfx_btns)
+        form.addRow("Titik SFX Meme", sfx_box)
         return w
 
     def _build_transcript_tab(self) -> QWidget:
@@ -1645,6 +1725,18 @@ class ClipStudioWidget(QWidget):
         )
         if not clip_cfg_file.is_file():
             apply_initial_style_overrides(cfg, self._job_state.request.initial_style_overrides)
+            clip_win_start = max(0.0, clip.start_time - self._job_state.request.padding_sec)
+            if not cfg.audio.sfx_cues and getattr(clip, "sfx_cues", None):
+                cfg.audio.sfx_cues = [
+                    ComposerSfxCue(
+                        time_sec=max(0.0, round(c.t_sec - clip_win_start, 3)),
+                        sfx_name=c.sfx_name,
+                        volume=c.volume,
+                        reason=c.reason,
+                    )
+                    for c in clip.sfx_cues
+                    if c.t_sec >= clip_win_start
+                ]
         cfg.aspect_ratio = self._job_state.request.aspect_ratio
         if cfg.aspect_ratio == "16:9":
             cfg.canvas_width, cfg.canvas_height = 1920, 1080
@@ -1733,6 +1825,13 @@ class ClipStudioWidget(QWidget):
         new_cfg.canvas_width = self._config.canvas_width
         new_cfg.canvas_height = self._config.canvas_height
         new_cfg.transcript_overrides = list(self._config.transcript_overrides)
+        if self._config.audio.sfx_cues:
+            new_cfg.audio.sfx_cues = [c.model_copy(deep=True) for c in self._config.audio.sfx_cues]
+        if new_cfg.layout.mode == self._config.layout.mode:
+            if self._config.layout.shot_crops:
+                new_cfg.layout.shot_crops = [s.model_copy(deep=True) for s in self._config.layout.shot_crops]
+            if self._config.layout.speaker_turns:
+                new_cfg.layout.speaker_turns = [t.model_copy(deep=True) for t in self._config.layout.speaker_turns]
         self._load_config_into_ui(new_cfg)
 
     def _refresh_saved_templates_list(self) -> None:
@@ -1855,6 +1954,9 @@ class ClipStudioWidget(QWidget):
         self.trim_start_spin.setValue(cfg.timing.start_time)
         self.trim_end_spin.setValue(cfg.timing.end_time)
         self.trim_pad_spin.setValue(cfg.timing.padding_sec)
+        self.silence_trim_chk.setChecked(cfg.timing.silence_trim_enabled)
+        self.silence_max_gap_spin.setValue(cfg.timing.silence_max_gap_sec)
+        self.silence_fillers_chk.setChecked(cfg.timing.silence_remove_fillers)
 
         # Layout
         lm_idx = self.layout_mode_combo.findData(cfg.layout.mode)
@@ -1922,6 +2024,7 @@ class ClipStudioWidget(QWidget):
         self.sub_size_spin.setValue(subs.font_size)
         pl_idx = self.sub_place_combo.findData(subs.placement_preset)
         self.sub_place_combo.setCurrentIndex(max(0, pl_idx))
+        self.sub_above_gap_spin.setValue(subs.above_speaker_gap_px)
         self.sub_pos_x_spin.setValue(subs.pos_x)
         self.sub_pos_y_spin.setValue(subs.pos_y)
         self.sub_primary_btn.set_color_hex(subs.primary_color_hex)
@@ -1976,6 +2079,7 @@ class ClipStudioWidget(QWidget):
         self.zoom_punch_chk.setChecked(cl.zoom_punch_enabled)
         self.zoom_start_spin.setValue(cl.zoom_punch_start_sec)
         self.zoom_factor_spin.setValue(cl.zoom_punch_factor)
+        self.zoom_repeat_spin.setValue(cl.zoom_punch_repeat_sec)
         self.vignette_chk.setChecked(cl.vignette_enabled)
         self.topic_hdr_chk.setChecked(cl.topic_header_enabled)
         self.topic_hdr_edit.setText(cl.topic_header_text)
@@ -1995,6 +2099,8 @@ class ClipStudioWidget(QWidget):
         self.audio_ducking_chk.setChecked(au.audio_ducking)
         self.vocal_loudnorm_chk.setChecked(au.vocal_loudnorm)
         self.opening_tts_chk.setChecked(cfg.timing.opening_tts_enabled)
+        self.ctx_sfx_chk.setChecked(au.contextual_sfx_enabled)
+        self._reload_sfx_cues_table()
 
         # Transcript Table
         self._reload_transcript_table()
@@ -2113,6 +2219,10 @@ class ClipStudioWidget(QWidget):
         pin_val = self.pin_speaker_combo.currentData() or None
         cfg.layout.pinned_speaker_id = str(pin_val) if pin_val else None
 
+        cfg.timing.silence_trim_enabled = self.silence_trim_chk.isChecked()
+        cfg.timing.silence_max_gap_sec = round(self.silence_max_gap_spin.value(), 2)
+        cfg.timing.silence_remove_fillers = self.silence_fillers_chk.isChecked()
+
         # Subtitles
         subs = cfg.subtitles
         subs.enabled = self.sub_enabled_chk.isChecked()
@@ -2120,6 +2230,7 @@ class ClipStudioWidget(QWidget):
         subs.timing_offset_sec = round(self.sub_offset_spin.value(), 2)
         subs.font_family = self.font_combo.currentText().strip() or "Arial Black"
         subs.font_size = self.sub_size_spin.value()
+        subs.above_speaker_gap_px = self.sub_above_gap_spin.value()
         subs.pos_x = self.sub_pos_x_spin.value()
         subs.pos_y = self.sub_pos_y_spin.value()
         if subs.placement_preset == "split_line_center":
@@ -2175,6 +2286,7 @@ class ClipStudioWidget(QWidget):
         cl.zoom_punch_enabled = self.zoom_punch_chk.isChecked()
         cl.zoom_punch_start_sec = self.zoom_start_spin.value()
         cl.zoom_punch_factor = self.zoom_factor_spin.value()
+        cl.zoom_punch_repeat_sec = round(self.zoom_repeat_spin.value(), 2)
         cl.vignette_enabled = self.vignette_chk.isChecked()
         cl.topic_header_enabled = self.topic_hdr_chk.isChecked()
         cl.topic_header_text = self.topic_hdr_edit.text()
@@ -2190,8 +2302,80 @@ class ClipStudioWidget(QWidget):
         au.audio_ducking = self.audio_ducking_chk.isChecked()
         au.vocal_loudnorm = self.vocal_loudnorm_chk.isChecked()
         cfg.timing.opening_tts_enabled = self.opening_tts_chk.isChecked()
+        au.contextual_sfx_enabled = self.ctx_sfx_chk.isChecked()
 
         self._refresh_preview()
+
+    # --- Contextual SFX Cue CRUD ---
+    def _reload_sfx_cues_table(self) -> None:
+        if not hasattr(self, "sfx_cues_table"):
+            return
+        self.sfx_cues_table.blockSignals(True)
+        self.sfx_cues_table.setRowCount(0)
+        for cue in self._config.audio.sfx_cues:
+            self._insert_sfx_cue_row(cue)
+        self.sfx_cues_table.blockSignals(False)
+
+    def _insert_sfx_cue_row(self, cue: ComposerSfxCue) -> None:
+        from atro.modules.cutter.sfx import list_all_sfx_names
+
+        row = self.sfx_cues_table.rowCount()
+        self.sfx_cues_table.insertRow(row)
+        self.sfx_cues_table.setItem(row, 0, QTableWidgetItem(f"{cue.time_sec:.2f}"))
+
+        sfx_combo = QComboBox()
+        sfx_combo.setEditable(True)
+        for nm in list_all_sfx_names():
+            sfx_combo.addItem(nm, nm)
+        if cue.sfx_name and sfx_combo.findText(cue.sfx_name) < 0:
+            sfx_combo.addItem(cue.sfx_name, cue.sfx_name)
+        sfx_combo.setCurrentText(cue.sfx_name)
+        sfx_combo.currentTextChanged.connect(lambda _t: self._sync_sfx_cues_from_table())
+        self.sfx_cues_table.setCellWidget(row, 1, sfx_combo)
+
+        self.sfx_cues_table.setItem(row, 2, QTableWidgetItem(f"{cue.volume:.2f}"))
+
+    def _on_sfx_cue_cell_changed(self, _row: int, _col: int) -> None:
+        if not self._syncing_ui:
+            self._sync_sfx_cues_from_table()
+
+    def _sync_sfx_cues_from_table(self) -> None:
+        cues: list[ComposerSfxCue] = []
+        for r in range(self.sfx_cues_table.rowCount()):
+            try:
+                t_it = self.sfx_cues_table.item(r, 0)
+                v_it = self.sfx_cues_table.item(r, 2)
+                sfx_w = self.sfx_cues_table.cellWidget(r, 1)
+                t_sec = max(0.0, float(t_it.text()) if t_it else 0.0)
+                vol = max(0.05, min(1.0, float(v_it.text()) if v_it else 0.75))
+                name = sfx_w.currentText().strip() if isinstance(sfx_w, QComboBox) else "pop"
+                if name:
+                    cues.append(ComposerSfxCue(time_sec=round(t_sec, 3), sfx_name=name, volume=round(vol, 2)))
+            except Exception:
+                continue
+        cues.sort(key=lambda c: c.time_sec)
+        self._config.audio.sfx_cues = cues
+
+    def _add_sfx_cue_row(self) -> None:
+        from atro.modules.cutter.sfx import list_all_sfx_names
+
+        names = list_all_sfx_names()
+        default_name = names[0] if names else "pop"
+        cue = ComposerSfxCue(time_sec=round(self._rel_time_sec, 2), sfx_name=default_name, volume=0.75)
+        self.sfx_cues_table.blockSignals(True)
+        self._insert_sfx_cue_row(cue)
+        self.sfx_cues_table.blockSignals(False)
+        self._config.audio.contextual_sfx_enabled = True
+        self.ctx_sfx_chk.blockSignals(True)
+        self.ctx_sfx_chk.setChecked(True)
+        self.ctx_sfx_chk.blockSignals(False)
+        self._sync_sfx_cues_from_table()
+
+    def _remove_sfx_cue_row(self) -> None:
+        row = self.sfx_cues_table.currentRow()
+        if row >= 0:
+            self.sfx_cues_table.removeRow(row)
+            self._sync_sfx_cues_from_table()
 
     # --- Comment Bubble CRUD ---
     def _reload_comment_bubble_list(self) -> None:
@@ -2893,10 +3077,16 @@ class ClipStudioWidget(QWidget):
 
     def _refresh_social_copywriting(self) -> None:
         title = self._config.overlays.hook_banner.text.strip() or self._config.clip_title
+        plat = (
+            getattr(self._job_state.request, "platform_target", "youtube_shorts")
+            if self._job_state is not None
+            else "youtube_shorts"
+        )
         copy_pack = generate_social_copywriting(
             clip_title=title,
             reason=self._current_clip_reason,
             preset_id=self._config.preset_id,
+            platform_target=plat,
         )
         self.social_caption_edit.setPlainText(copy_pack["full_post"])
 

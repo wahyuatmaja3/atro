@@ -23,8 +23,9 @@ from atro.core.schemas import (
     TranscriptResult,
 )
 from atro.core.subprocess_utils import run_subprocess_capture
+from atro.modules.analyzer import AnalyzerService
 from atro.modules.cutter.service import CutterService
-from atro.pipeline.state_store import load_state
+from atro.pipeline.state_store import load_state, save_state
 from atro.pipeline.worker import AsyncJobWorker
 
 
@@ -39,6 +40,7 @@ class WorkerBridge(QObject):
     batch_render_progress = pyqtSignal(str, int, int, str)
     batch_clips_rendered = pyqtSignal(str, object)
     standalone_clip_rendered = pyqtSignal(object)
+    alternative_clips_generated = pyqtSignal(str, int)
 
     def __init__(
         self,
@@ -286,6 +288,110 @@ class WorkerBridge(QObject):
                 self.bridge_error.emit(f"Gagal merender batch klip: {exc}")
 
         asyncio.run_coroutine_threadsafe(_render_batch(), self._loop)
+
+    def generate_alternative_clips(self, job_id: str) -> None:
+        """Curate & render additional non-overlapping alternative clips without re-transcribing."""
+        if self._loop is None:
+            return
+
+        async def _alt() -> None:
+            try:
+                settings = self._settings_provider()
+                preflight = self.get_preflight()
+                job_dir = Path(settings.workspace_dir) / job_id
+                state = load_state(job_dir)
+                logger = JobLogger(job_id, Path(state.log_path), on_log=self._handle_log)
+
+                meta_path = (
+                    Path(state.artifacts.metadata_json)
+                    if state.artifacts.metadata_json
+                    else job_dir / "metadata.json"
+                )
+                download = DownloadResult.model_validate_json(meta_path.read_text(encoding="utf-8"))
+
+                tr_path = (
+                    Path(state.artifacts.transcript_json)
+                    if state.artifacts.transcript_json
+                    else job_dir / "transcript.json"
+                )
+                if not tr_path.is_file():
+                    raise FileNotFoundError(f"Transkrip belum tersedia untuk {job_id}.")
+                transcript = TranscriptResult.model_validate_json(tr_path.read_text(encoding="utf-8"))
+
+                an_path = (
+                    Path(state.artifacts.analysis_json)
+                    if state.artifacts.analysis_json
+                    else job_dir / "analysis.json"
+                )
+                old_an = (
+                    AnalysisResult.model_validate_json(an_path.read_text(encoding="utf-8"))
+                    if an_path.is_file()
+                    else None
+                )
+                old_clips = list(old_an.clips) if old_an is not None else []
+                old_topics = list(old_an.topic_outline) if old_an is not None else []
+                excluded = list(state.request.excluded_time_spans) + [
+                    [round(c.start_time, 2), round(c.end_time, 2)] for c in old_clips
+                ]
+
+                logger.info(
+                    "analyzer",
+                    f"Mencari klip alternatif baru (menghindari {len(old_clips)} klip lama)...",
+                )
+                alt_req = state.request.model_copy(update={"excluded_time_spans": excluded})
+                fresh_an = await AnalyzerService().run(
+                    job_id=job_id,
+                    download=download,
+                    transcript=transcript,
+                    request=alt_req,
+                    job_dir=job_dir,
+                    settings=settings,
+                    logger=logger,
+                )
+
+                combined_clips = old_clips + list(fresh_an.clips)
+                combined_topics = old_topics or list(fresh_an.topic_outline)
+                merged_an = AnalysisResult(
+                    job_id=job_id,
+                    model=fresh_an.model,
+                    platform_target=state.request.platform_target,
+                    clips=combined_clips,
+                    topic_outline=combined_topics,
+                    validation_warnings=list(fresh_an.validation_warnings),
+                )
+                an_path.write_text(merged_an.model_dump_json(indent=2), encoding="utf-8")
+
+                new_indices = list(range(len(old_clips) + 1, len(combined_clips) + 1))
+
+                def _on_prog(done_idx: int, total_cnt: int, title: str) -> None:
+                    self.batch_render_progress.emit(job_id, done_idx, total_cnt, title)
+
+                await CutterService().render_batch_clips_with_composer(
+                    job_id=job_id,
+                    download=download,
+                    analysis=merged_an,
+                    job_dir=job_dir,
+                    preflight=preflight,
+                    logger=logger,
+                    clip_indices=new_indices,
+                    transcript_segments=transcript.segments,
+                    settings=settings,
+                    force_redetect_faces=True,
+                    on_clip_progress=_on_prog,
+                    request=state.request,
+                )
+                state.request = alt_req
+                state.artifacts.analysis_json = str(an_path.resolve())
+                rr_path = job_dir / "render_result.json"
+                if rr_path.is_file():
+                    state.artifacts.render_result_json = str(rr_path.resolve())
+                save_state(state)
+                self.job_updated.emit(state.model_copy(deep=True))
+                self.alternative_clips_generated.emit(job_id, len(new_indices))
+            except Exception as exc:
+                self.bridge_error.emit(f"Gagal membuat klip alternatif: {exc}")
+
+        asyncio.run_coroutine_threadsafe(_alt(), self._loop)
 
     def render_standalone_clip(self, source_video_path: str, config: ClipComposerConfig) -> None:
         if self._loop is None:
