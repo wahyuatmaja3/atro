@@ -17,6 +17,7 @@ from atro.core.presets import (
     build_preset_config,
     build_ready_template_config,
     extract_transcript_overrides,
+    load_or_create_job_clip_config,
     save_job_clip_config,
 )
 from atro.core.schemas import (
@@ -188,6 +189,45 @@ def apply_initial_style_overrides(
             cfg.layout.top_crop.h = 1.0
 
     return cfg
+
+
+def apply_style_template_from_config(
+    style_source: ClipComposerConfig,
+    target_cfg: ClipComposerConfig,
+    reset_auto_face: bool = True,
+) -> ClipComposerConfig:
+    """Copy layout, subtitle, overlay, and audio styling from `style_source` into `target_cfg`."""
+    target_cfg.preset_id = style_source.preset_id
+    target_cfg.preset_name = style_source.preset_name
+    target_cfg.aspect_ratio = style_source.aspect_ratio
+    target_cfg.canvas_width = style_source.canvas_width
+    target_cfg.canvas_height = style_source.canvas_height
+    target_cfg.timing.padding_sec = style_source.timing.padding_sec
+    target_cfg.timing.opening_tts_enabled = style_source.timing.opening_tts_enabled
+
+    target_cfg.layout = style_source.layout.model_copy(deep=True)
+    if reset_auto_face and target_cfg.layout.framing_tracking_mode == "auto_face":
+        target_cfg.layout.top_crop.auto_detect = True
+        target_cfg.layout.bottom_crop.auto_detect = True
+        target_cfg.layout.shot_crops = []
+
+    target_cfg.subtitles = style_source.subtitles.model_copy(deep=True)
+    target_cfg.overlays.watermark = style_source.overlays.watermark.model_copy(deep=True)
+    target_cfg.overlays.climax_effects = style_source.overlays.climax_effects.model_copy(deep=True)
+    if target_cfg.overlays.climax_effects.topic_header_enabled:
+        target_cfg.overlays.climax_effects.topic_header_text = target_cfg.clip_title[:42].upper()
+
+    hook_copy = style_source.overlays.hook_banner.model_copy(deep=True)
+    hook_copy.text = target_cfg.clip_title
+    target_cfg.overlays.hook_banner = hook_copy
+
+    if not target_cfg.overlays.comment_bubbles and style_source.overlays.comment_bubbles:
+        target_cfg.overlays.comment_bubbles = [
+            b.model_copy(deep=True) for b in style_source.overlays.comment_bubbles
+        ]
+
+    target_cfg.audio = style_source.audio.model_copy(deep=True)
+    return target_cfg
 
 
 def compute_padded_window(
@@ -1065,3 +1105,94 @@ class CutterService:
             f"[#{idx:02d}] Export Studio selesai: {output_path.name} ({file_size / (1024 * 1024):.2f} MB).",
         )
         return rendered
+
+    async def render_batch_clips_with_composer(
+        self,
+        job_id: str,
+        download: DownloadResult,
+        analysis: AnalysisResult,
+        job_dir: Path,
+        preflight: PreflightReport,
+        logger: JobLogger,
+        clip_indices: list[int],
+        transcript_segments: Optional[list[TranscriptSegment]] = None,
+        settings: Optional[AppSettings] = None,
+        style_template_config: Optional[ClipComposerConfig] = None,
+        force_redetect_faces: bool = True,
+        on_clip_progress: Optional[Callable[[int, int, str], Awaitable[None] | None]] = None,
+        cancel_event: Optional[asyncio.Event] = None,
+        request: Optional[JobRequest] = None,
+    ) -> list[RenderedClip]:
+        """Batch-apply style & re-render multiple/all existing clips without re-transcribing."""
+        valid_indices = [
+            i for i in dict.fromkeys(clip_indices) if 1 <= int(i) <= len(analysis.clips)
+        ]
+        if not valid_indices:
+            return []
+
+        segs = transcript_segments or []
+        edit_fmt = request.edit_format if request is not None else "podcast"
+        pad_sec = request.padding_sec if request is not None else 0.4
+        bgm_dir = str(settings.backsound_dir) if settings is not None else None
+        rendered_list: list[RenderedClip] = []
+        total = len(valid_indices)
+
+        logger.info(
+            "composer",
+            f"[Batch] Memulai render ulang {total} klip terpilih (force_redetect_faces={force_redetect_faces})...",
+        )
+
+        for done_idx, clip_idx in enumerate(valid_indices, start=1):
+            if cancel_event and cancel_event.is_set():
+                raise JobCancelledError("Render batch dibatalkan oleh pengguna.")
+
+            clip = analysis.clips[clip_idx - 1]
+            cfg_path = job_dir / "clip_configs" / f"clip_{clip_idx:02d}.json"
+            existed = cfg_path.is_file()
+            cfg = load_or_create_job_clip_config(
+                job_dir=job_dir,
+                clip_index=clip_idx,
+                clip_title=clip.title,
+                start_time=clip.start_time,
+                end_time=clip.end_time,
+                edit_format=edit_fmt,
+                padding_sec=pad_sec,
+                transcript_segments=segs,
+                backsound_dir=bgm_dir,
+            )
+            if not existed and request is not None and request.initial_style_overrides:
+                apply_initial_style_overrides(cfg, request.initial_style_overrides)
+
+            if style_template_config is not None:
+                apply_style_template_from_config(
+                    style_template_config,
+                    cfg,
+                    reset_auto_face=force_redetect_faces,
+                )
+            elif force_redetect_faces and cfg.layout.framing_tracking_mode == "auto_face":
+                cfg.layout.top_crop.auto_detect = True
+                cfg.layout.bottom_crop.auto_detect = True
+                cfg.layout.shot_crops = []
+
+            rendered = await self.render_clip_with_composer_config(
+                job_id=job_id,
+                download=download,
+                config=cfg,
+                job_dir=job_dir,
+                preflight=preflight,
+                logger=logger,
+                transcript_segments=segs,
+                settings=settings,
+                cancel_event=cancel_event,
+                virality_score=clip.virality_score,
+                reason=clip.reason,
+                update_render_result=True,
+            )
+            rendered_list.append(rendered)
+            if on_clip_progress:
+                res = on_clip_progress(done_idx, total, clip.title)
+                if asyncio.iscoroutine(res):
+                    await res
+
+        logger.info("composer", f"[Batch] Selesai merender ulang {len(rendered_list)} klip.")
+        return rendered_list

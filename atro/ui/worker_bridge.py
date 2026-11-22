@@ -36,6 +36,8 @@ class WorkerBridge(QObject):
     log_received = pyqtSignal(str, str)
     bridge_error = pyqtSignal(str)
     custom_clip_rendered = pyqtSignal(str, object)
+    batch_render_progress = pyqtSignal(str, int, int, str)
+    batch_clips_rendered = pyqtSignal(str, object)
     standalone_clip_rendered = pyqtSignal(object)
 
     def __init__(
@@ -208,6 +210,82 @@ class WorkerBridge(QObject):
                 self.bridge_error.emit(f"Gagal merender klip Studio: {exc}")
 
         asyncio.run_coroutine_threadsafe(_render(), self._loop)
+
+    def render_batch_custom_clips(
+        self,
+        job_id: str,
+        clip_indices: list[int],
+        style_template_config: Optional[ClipComposerConfig] = None,
+        force_redetect_faces: bool = True,
+    ) -> None:
+        if self._loop is None:
+            return
+
+        indices_copy = list(clip_indices)
+        template_copy = (
+            style_template_config.model_copy(deep=True)
+            if style_template_config is not None
+            else None
+        )
+
+        async def _render_batch() -> None:
+            try:
+                settings = self._settings_provider()
+                preflight = self.get_preflight()
+                job_dir = Path(settings.workspace_dir) / job_id
+                state = load_state(job_dir)
+                logger = JobLogger(job_id, Path(state.log_path), on_log=self._handle_log)
+
+                meta_path = (
+                    Path(state.artifacts.metadata_json)
+                    if state.artifacts.metadata_json
+                    else job_dir / "metadata.json"
+                )
+                download = DownloadResult.model_validate_json(meta_path.read_text(encoding="utf-8"))
+
+                tr_path = (
+                    Path(state.artifacts.transcript_json)
+                    if state.artifacts.transcript_json
+                    else job_dir / "transcript.json"
+                )
+                segs = []
+                if tr_path.is_file():
+                    segs = TranscriptResult.model_validate_json(
+                        tr_path.read_text(encoding="utf-8")
+                    ).segments
+
+                an_path = (
+                    Path(state.artifacts.analysis_json)
+                    if state.artifacts.analysis_json
+                    else job_dir / "analysis.json"
+                )
+                if not an_path.is_file():
+                    raise FileNotFoundError(f"Hasil analisis klip tidak ditemukan: {an_path}")
+                analysis = AnalysisResult.model_validate_json(an_path.read_text(encoding="utf-8"))
+
+                def _on_prog(done_idx: int, total_cnt: int, title: str) -> None:
+                    self.batch_render_progress.emit(job_id, done_idx, total_cnt, title)
+
+                rendered_list = await CutterService().render_batch_clips_with_composer(
+                    job_id=job_id,
+                    download=download,
+                    analysis=analysis,
+                    job_dir=job_dir,
+                    preflight=preflight,
+                    logger=logger,
+                    clip_indices=indices_copy,
+                    transcript_segments=segs,
+                    settings=settings,
+                    style_template_config=template_copy,
+                    force_redetect_faces=force_redetect_faces,
+                    on_clip_progress=_on_prog,
+                    request=state.request,
+                )
+                self.batch_clips_rendered.emit(job_id, rendered_list)
+            except Exception as exc:
+                self.bridge_error.emit(f"Gagal merender batch klip: {exc}")
+
+        asyncio.run_coroutine_threadsafe(_render_batch(), self._loop)
 
     def render_standalone_clip(self, source_video_path: str, config: ClipComposerConfig) -> None:
         if self._loop is None:
