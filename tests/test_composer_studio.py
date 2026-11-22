@@ -523,12 +523,24 @@ def test_eight_caption_recipes_and_social_copywriting() -> None:
         assert cfg.subtitles.pos_y == 1480
         assert cfg.subtitles.placement_preset == "custom"
 
-    pack = generate_social_copywriting(
+    pack_shorts = generate_social_copywriting(
         clip_title="Cara Cuan 100 Juta Pertama",
         reason="Pembahasan konkret langkah praktis membangun bisnis.",
         preset_id="podcast",
     )
+    assert pack_shorts["hook_headline"]
+    assert pack_shorts["platform_target"] == "youtube_shorts"
+    assert "#YouTubeShorts" in pack_shorts["hashtags"]
+    assert "#PodcastClips" in pack_shorts["hashtags"]
+
+    pack = generate_social_copywriting(
+        clip_title="Cara Cuan 100 Juta Pertama",
+        reason="Pembahasan konkret langkah praktis membangun bisnis.",
+        preset_id="podcast",
+        platform_target="tiktok",
+    )
     assert pack["hook_headline"]
+    assert pack["platform_target"] == "tiktok"
     assert "#FYP" in pack["hashtags"]
     assert "#PodcastClips" in pack["hashtags"]
     assert "#FYP" in pack["full_post"]
@@ -1897,6 +1909,157 @@ def test_ui_easy_pro_theme_toast_errors_and_min_size(tmp_path: Path, monkeypatch
     finally:
         win.close()
         win.deleteLater()
+
+
+def test_f6_indonesian_smart_captions_and_loudnorm_target() -> None:
+    from atro.modules.cutter.backsound import build_audio_filter_chain
+    from atro.modules.cutter.subtitle_burner import CaptionWord, _group_words_pause_aware
+
+    words = [
+        CaptionWord("aku", 0.0, 0.25),
+        CaptionWord("pergi", 0.26, 0.50),
+        CaptionWord("ke", 0.51, 0.70),
+        CaptionWord("pasar", 0.71, 1.00),
+        CaptionWord("yang", 1.01, 1.20),
+        CaptionWord("ramai", 1.21, 1.50),
+        CaptionWord("!", 1.51, 1.65),
+    ]
+    groups = _group_words_pause_aware(words, max_words=3)
+    texts = [[w.text for w in g] for g in groups]
+    # No orphan punctuation chunk
+    assert all(t != ["!"] for t in texts)
+    assert texts[-1][-1] == "ramai!"
+    # Never break leaving dangling 'ke' or 'yang' at end of a chunk when words follow
+    assert all(g[-1] not in ("ke", "yang") for g in texts[:-1])
+
+    fg_lines, out_lbl = build_audio_filter_chain(
+        has_source_audio=True,
+        has_backsound=False,
+        duration_sec=10.0,
+        bgm_volume=0.2,
+        enable_ducking=False,
+        enable_voice_polish=True,
+        enable_loudnorm=True,
+    )
+    assert out_lbl is not None
+    joined = ";".join(fg_lines)
+    assert "loudnorm=I=-14:TP=-1.5:LRA=11" in joined
+    assert "I=-16" not in joined
+
+
+def test_f6_platform_presets_publish_kit_alt_clips_and_demo(tmp_path: Path, monkeypatch) -> None:
+    import zipfile
+    import cv2
+    import pytest
+    from pydantic import ValidationError
+    from atro.core.demo_sample import create_offline_demo_job
+    from atro.core.presets import generate_social_copywriting
+    from atro.core.publish_kit import export_publish_kit_zip, render_clip_cover_image
+    from atro.core.schemas import (
+        GeminiClipItem,
+        GeminiClipSelectionSchema,
+        JobRequest,
+        RenderResult,
+        TranscriptResult,
+    )
+    from atro.modules.analyzer.validator import sanitize_topic_outline, validate_and_sanitize_clips
+
+    # Only YouTube Shorts & TikTok are allowed
+    req_yt = JobRequest(source_type="local_file", local_video_path="a.mp4", platform_target="youtube_shorts")
+    req_tt = JobRequest(source_type="local_file", local_video_path="a.mp4", platform_target="tiktok")
+    assert req_yt.platform_target == "youtube_shorts"
+    assert req_tt.platform_target == "tiktok"
+    with pytest.raises(ValidationError):
+        JobRequest(source_type="local_file", local_video_path="a.mp4", platform_target="reels")  # type: ignore[arg-type]
+
+    # Social copywriting matches YouTube Shorts / TikTok without #Reels
+    cw_yt = generate_social_copywriting("Tips Podcast Multi Kamera", platform_target="youtube_shorts")
+    cw_tt = generate_social_copywriting("Tips Podcast Multi Kamera", platform_target="tiktok")
+    assert "#YouTubeShorts" in cw_yt["hashtags"]
+    assert "#TikTok" in cw_tt["hashtags"]
+    assert "#Reels" not in cw_yt["hashtags"] and "#Reels" not in cw_tt["hashtags"]
+
+    # Offline keyless demo sample creates valid artifacts, clips & topic_outline
+    ensure_qt_gui_app()
+    demo_state = create_offline_demo_job(tmp_path / "ws", platform_target="youtube_shorts")
+    from atro.core.schemas import DownloadResult
+    dl = DownloadResult.model_validate_json(Path(demo_state.artifacts.metadata_json).read_text(encoding="utf-8"))
+    assert Path(dl.source_video_path).is_file()
+    assert Path(demo_state.artifacts.transcript_json).is_file()
+    tr = TranscriptResult.model_validate_json(Path(demo_state.artifacts.transcript_json).read_text(encoding="utf-8"))
+    rr = RenderResult.model_validate_json(Path(demo_state.artifacts.render_result_json).read_text(encoding="utf-8"))
+    assert len(rr.rendered_clips) == 2
+
+    # Cover PNG 1080x1920 + Publish Kit ZIP packaging
+    first_clip = rr.rendered_clips[0]
+    cover_png = render_clip_cover_image(
+        video_path=Path(first_clip.output_path),
+        output_png_path=tmp_path / "cover.png",
+        hook_title=first_clip.title,
+        subtitle_badge="9/10",
+        platform_target="youtube_shorts",
+    )
+    assert cover_png.is_file() and cover_png.stat().st_size > 2000
+    cover_arr = cv2.imread(str(cover_png))
+    assert cover_arr is not None and cover_arr.shape[:2] == (1920, 1080)
+
+    zip_path = export_publish_kit_zip(
+        clip=first_clip,
+        output_zip_path=tmp_path / "kit.zip",
+        platform_target="tiktok",
+        transcript_segments=tr.segments,
+    )
+    assert zip_path.is_file()
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        names = zf.namelist()
+        assert "cover.png" in names
+        assert "metadata.txt" in names
+        assert "caption.json" in names
+        assert any(n.endswith(".mp4") for n in names)
+        assert "TIKTOK" in zf.read("metadata.txt").decode("utf-8").upper()
+
+    # Alternative clips validator avoids excluded_time_spans
+    raw = GeminiClipSelectionSchema(
+        clips=[
+            GeminiClipItem(title="Klip Lama", start_time=0.0, end_time=10.0, virality_score=9, reason="Sama"),
+            GeminiClipItem(title="Klip Alternatif", start_time=15.0, end_time=28.0, virality_score=8, reason="Baru"),
+        ]
+    )
+    req_alt = JobRequest(
+        source_type="local_file",
+        local_video_path="a.mp4",
+        clip_count=1,
+        excluded_time_spans=[[0.0, 10.0]],
+    )
+    clips_out, _warns = validate_and_sanitize_clips(raw, video_duration_sec=60.0, request=req_alt)
+    assert [c.title for c in clips_out] == ["Klip Alternatif"]
+    outline = sanitize_topic_outline(raw, clips_out, video_duration_sec=60.0)
+    assert len(outline) == 1 and outline[0].topic == "Klip Alternatif"
+
+    # UI wiring check: platform selector strictly YouTube Shorts & TikTok + Demo Sample button
+    from atro.ui import main_window as mw_mod
+    from atro.config import AppSettings
+
+    s = AppSettings(workspace_dir=tmp_path / "ws_ui", bin_dir=tmp_path / "bin", backsound_dir=tmp_path / "bgm")
+    monkeypatch.setattr(mw_mod, "load_settings", lambda: s)
+    monkeypatch.setattr(mw_mod, "save_settings", lambda _s: None)
+    win = mw_mod.MainWindow()
+    try:
+        plats = [win.platform_combo.itemData(i) for i in range(win.platform_combo.count())]
+        assert plats == ["youtube_shorts", "tiktok"]
+        win.platform_combo.setCurrentIndex(1)
+        assert win.max_dur_spin.value() >= 75
+        win.platform_combo.setCurrentIndex(0)
+        assert win.max_dur_spin.value() <= 60
+        win._load_offline_demo_project()
+        assert win.wizard_stack.currentIndex() == 2
+        assert win.alt_clips_btn.isHidden() is False
+        assert "Topik Pembahasan:" in win.topic_outline_label.text()
+        assert len(win._clip_cards) == 2
+    finally:
+        win.close()
+        win.deleteLater()
+
 
 
 
