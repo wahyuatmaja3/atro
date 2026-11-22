@@ -381,6 +381,7 @@ class LivePreviewCanvas9x16(QWidget):
         segments: list[TranscriptSegment],
         clip_start_sec: Optional[float] = None,
         clip_end_sec: Optional[float] = None,
+        prev_source_frame_bgr: Optional[np.ndarray] = None,
     ) -> None:
         self._config = config
         self._rendered_qimg = render_preview_frame(
@@ -390,6 +391,7 @@ class LivePreviewCanvas9x16(QWidget):
             segments=segments,
             clip_start_sec=clip_start_sec,
             clip_end_sec=clip_end_sec,
+            prev_source_frame_bgr=prev_source_frame_bgr,
         )
         self.update()
 

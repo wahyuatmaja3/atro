@@ -52,6 +52,7 @@ from atro.core.schemas import (
 )
 from atro.modules.cutter.backsound import scan_backsound_tracks
 from atro.modules.cutter.service import apply_initial_style_overrides
+from atro.modules.cutter.transitions import TRANSITION_CHOICES
 from atro.pipeline.state_store import list_all_jobs
 from atro.ui.theme import build_stylesheet
 from atro.ui.widgets import ClipCard, ClipStudioWidget, JobCard, LogViewer, SettingsDialog
@@ -715,12 +716,28 @@ class MainWindow(QMainWindow):
         self.padding_spin.setSuffix(" s")
         self.padding_spin.setValue(self._settings.default_padding_sec)
 
+        self.init_transition_combo = QComboBox()
+        self.init_transition_combo.addItem("Otomatis (Sesuai Pembicara)", "auto")
+        for tr_val, tr_lbl in TRANSITION_CHOICES:
+            self.init_transition_combo.addItem(tr_lbl, f"fixed:{tr_val}")
+        self.init_transition_combo.currentIndexChanged.connect(lambda _i: self._refresh_step2_preview())
+
+        self.init_tr_sfx_combo = QComboBox()
+        self.init_tr_sfx_combo.addItem("Tanpa SFX", "none")
+        self.init_tr_sfx_combo.addItem("Whoosh", "whoosh")
+        self.init_tr_sfx_combo.addItem("Swipe", "swipe")
+        self.init_tr_sfx_combo.addItem("Pop", "pop")
+        self.init_tr_sfx_combo.currentIndexChanged.connect(lambda _i: self._refresh_step2_preview())
+
         self.aspect_combo.currentTextChanged.connect(lambda _t: self._on_step2_style_mutated())
         self.format_combo.currentIndexChanged.connect(lambda _i: self._sync_framing_availability())
 
         adv_l.addWidget(QLabel("Fokus Kamera Podcast:"))
         adv_l.addWidget(self.framing_combo)
-        adv_l.addWidget(QLabel("Jeda Potong (Padding):"))
+        adv_l.addWidget(QLabel("Transisi Kamera:"))
+        adv_l.addWidget(self.init_transition_combo)
+        adv_l.addWidget(self.init_tr_sfx_combo)
+        adv_l.addWidget(QLabel("Jeda Potong:"))
         adv_l.addWidget(self.padding_spin)
         adv_l.addStretch()
         left_l.addWidget(self.adv_options_panel)
@@ -1034,6 +1051,10 @@ class MainWindow(QMainWindow):
         )
         self.init_split_spin.setValue(int(round(cfg.layout.split_ratio_top * 100)))
         self.init_zoom_punch_chk.setChecked(cfg.overlays.climax_effects.zoom_punch_enabled)
+        tr = cfg.layout.transition
+        tr_key = "auto" if tr.mode == "auto" else f"fixed:{tr.type}"
+        self.init_transition_combo.setCurrentIndex(max(0, self.init_transition_combo.findData(tr_key)))
+        self.init_tr_sfx_combo.setCurrentIndex(max(0, self.init_tr_sfx_combo.findData(tr.sfx)))
 
         self._syncing_step2 = False
         self._sync_framing_availability()
@@ -1279,6 +1300,13 @@ class MainWindow(QMainWindow):
         effective_lm = custom_lm or tpl_layout
         if effective_lm in ("split_screen", "multi_speaker_split"):
             overrides["split_ratio_top"] = round(self.init_split_spin.value() / 100.0, 2)
+        tr_sel = str(self.init_transition_combo.currentData() or "auto")
+        if tr_sel == "auto":
+            overrides["transition_mode"] = "auto"
+        elif tr_sel.startswith("fixed:"):
+            overrides["transition_mode"] = "fixed"
+            overrides["transition_type"] = tr_sel.split(":", 1)[1]
+        overrides["transition_sfx"] = str(self.init_tr_sfx_combo.currentData() or "none")
         return overrides
 
     def _submit_job(self) -> None:

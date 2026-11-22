@@ -47,6 +47,7 @@ from atro.modules.cutter.framing.face_tracking import (
     _make_even,
 )
 from atro.modules.cutter.framing.game_layout import _detect_streamer_face_sync
+from atro.modules.cutter.sfx import resolve_transition_sfx_path
 from atro.modules.cutter.subtitle_burner import (
     build_composer_caption_chunks,
     compute_caption_line_layout,
@@ -57,6 +58,13 @@ from atro.modules.cutter.subtitle_burner import (
     register_qt_font,
     resolve_font_family,
     resolve_speaker_colors,
+)
+from atro.modules.cutter.transitions import (
+    ResolvedShotTransition,
+    active_transition_window_at,
+    blend_transition_qimages,
+    map_transition_to_ffmpeg_xfade,
+    resolve_shot_transitions,
 )
 
 
@@ -1214,6 +1222,135 @@ def _bgr_to_qimage(frame_bgr: np.ndarray) -> QImage:
     return QImage(rgb.data, w, h, ch * w, QImage.Format.Format_RGB888).copy()
 
 
+def _render_base_canvas_qimage(
+    source_frame_bgr: np.ndarray,
+    config: ClipComposerConfig,
+    rel_time_sec: float,
+    cw: int,
+    ch: int,
+    active_top_crop: CropBoxConfig,
+    active_bot_crop: CropBoxConfig,
+) -> QImage:
+    """Render video layout layers (`single_focus`, `blurred_frame`, `pip_facecam`, `split`) into RGBA8888 QImage."""
+    layout = config.layout
+    mode = layout.mode
+
+    if config.aspect_ratio == "16:9" or mode == "single_focus":
+        base_bgr = _crop_and_resize_bgr(source_frame_bgr, active_top_crop, cw, ch)
+        base_bgr = _apply_climax_cv(base_bgr, config, rel_time_sec)
+        return _bgr_to_qimage(base_bgr).convertToFormat(QImage.Format.Format_RGBA8888)
+
+    if mode == "blurred_frame":
+        bg_bgr = _crop_and_resize_bgr(source_frame_bgr, active_bot_crop, cw, ch)
+        k = max(3, int(layout.background_blur_strength) * 2 + 1)
+        small_bg = cv2.resize(bg_bgr, (cw // 4, ch // 4), interpolation=cv2.INTER_AREA)
+        small_bg = cv2.GaussianBlur(small_bg, (k // 2 | 1, k // 2 | 1), 0)
+        bg_bgr = cv2.resize(small_bg, (cw, ch), interpolation=cv2.INTER_LINEAR)
+        darken_beta = float(layout.background_darken) * 255.0
+        bg_bgr = cv2.convertScaleAbs(bg_bgr, alpha=1.0, beta=darken_beta)
+
+        fg_ratio_map = {"1:1": (cw, cw), "4:3": (cw, int(round(cw * 0.75))), "16:9": (cw, int(round(cw * 9.0 / 16.0)))}
+        fg_w, fg_h = fg_ratio_map.get(layout.blurred_frame_aspect, (cw, int(round(cw * 0.75))))
+        fg_h = min(ch, _make_even(fg_h, 2, ch))
+        fg_bgr = _crop_and_resize_bgr(source_frame_bgr, active_top_crop, fg_w, fg_h)
+        y_off = max(0, (ch - fg_h) // 2)
+
+        bg_bgr = _apply_climax_cv(bg_bgr, config, rel_time_sec)
+        fg_bgr = _apply_climax_cv(fg_bgr, config, rel_time_sec)
+        canvas_img = _bgr_to_qimage(bg_bgr).convertToFormat(QImage.Format.Format_RGBA8888)
+        fg_qimg = _bgr_to_qimage(fg_bgr)
+        p = QPainter(canvas_img)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        fg_rect = QRectF(0.0, float(y_off), float(fg_w), float(fg_h))
+        clip_path = _build_frame_clip_path(fg_rect, "rounded_rect", layout.frame_corner_radius_px)
+        p.save()
+        p.setClipPath(clip_path)
+        p.drawImage(0, y_off, fg_qimg)
+        p.restore()
+        if layout.frame_border_width_px > 0:
+            bw = float(layout.frame_border_width_px)
+            inset = bw * 0.5
+            stroke_rect = QRectF(inset, float(y_off) + inset, max(2.0, float(fg_w) - bw), max(2.0, float(fg_h) - bw))
+            stroke_path = _build_frame_clip_path(stroke_rect, "rounded_rect", max(0.0, layout.frame_corner_radius_px - inset))
+            p.save()
+            p.setPen(QPen(qcolor_from_hex(layout.frame_border_color_hex, "#F97316"), bw))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawPath(stroke_path)
+            p.restore()
+        p.end()
+        return canvas_img
+
+    if mode == "pip_facecam":
+        bg_bgr = _crop_and_resize_bgr(source_frame_bgr, active_bot_crop, cw, ch)
+        bg_bgr = _apply_climax_cv(bg_bgr, config, rel_time_sec)
+        canvas_img = _bgr_to_qimage(bg_bgr).convertToFormat(QImage.Format.Format_RGBA8888)
+
+        px, py, pip_w, pip_h = compute_pip_rect(cw, ch, layout)
+        pip_bgr = _crop_and_resize_bgr(source_frame_bgr, active_top_crop, pip_w, pip_h)
+        pip_bgr = _apply_climax_cv(pip_bgr, config, rel_time_sec)
+        pip_qimg = _bgr_to_qimage(pip_bgr)
+
+        p = QPainter(canvas_img)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        pip_rect = QRectF(float(px), float(py), float(pip_w), float(pip_h))
+        pip_path = _build_frame_clip_path(pip_rect, layout.pip_shape, layout.frame_corner_radius_px)
+        p.save()
+        p.setClipPath(pip_path)
+        p.drawImage(px, py, pip_qimg)
+        p.restore()
+        if layout.frame_border_width_px > 0:
+            bw = float(layout.frame_border_width_px)
+            inset = bw * 0.5
+            stroke_rect = QRectF(float(px) + inset, float(py) + inset, max(2.0, float(pip_w) - bw), max(2.0, float(pip_h) - bw))
+            stroke_path = _build_frame_clip_path(stroke_rect, layout.pip_shape, max(0.0, layout.frame_corner_radius_px - inset))
+            p.save()
+            p.setPen(QPen(qcolor_from_hex(layout.frame_border_color_hex, "#F97316"), bw))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawPath(stroke_path)
+            p.restore()
+        p.end()
+        return canvas_img
+
+    # split_screen or multi_speaker_split
+    geom = compute_split_geometry(cw, ch, layout.split_ratio_top, layout.divider.angle_deg)
+    top_bgr = _crop_and_resize_bgr(source_frame_bgr, active_top_crop, cw, geom.top_panel_h)
+    bot_bgr = _crop_and_resize_bgr(source_frame_bgr, active_bot_crop, cw, geom.bot_panel_h)
+
+    if not geom.is_angled:
+        combined = np.vstack([top_bgr, bot_bgr])
+        combined = _apply_climax_cv(combined, config, rel_time_sec)
+        canvas_img = _bgr_to_qimage(combined).convertToFormat(QImage.Format.Format_RGBA8888)
+        p = QPainter(canvas_img)
+    else:
+        bot_full = np.zeros((ch, cw, 3), dtype=np.uint8)
+        bot_full[geom.bot_panel_y : geom.bot_panel_y + geom.bot_panel_h, 0:cw] = bot_bgr
+        bot_full = _apply_climax_cv(bot_full, config, rel_time_sec)
+        canvas_img = _bgr_to_qimage(bot_full).convertToFormat(QImage.Format.Format_RGBA8888)
+
+        top_bgr = _apply_climax_cv(top_bgr, config, rel_time_sec)
+        top_qimg = _bgr_to_qimage(top_bgr)
+
+        p = QPainter(canvas_img)
+        poly = QPolygonF(
+            [
+                QPointF(0.0, 0.0),
+                QPointF(float(cw), 0.0),
+                QPointF(float(cw), geom.right_y),
+                QPointF(0.0, geom.left_y),
+            ]
+        )
+        clip_path = QPainterPath()
+        clip_path.addPolygon(poly)
+        p.save()
+        p.setClipPath(clip_path)
+        p.drawImage(0, 0, top_qimg)
+        p.restore()
+
+    draw_divider_on_painter(p, cw, ch, layout.split_ratio_top, layout.divider)
+    p.end()
+    return canvas_img
+
+
 def render_preview_frame(
     source_frame_bgr: Optional[np.ndarray],
     config: ClipComposerConfig,
@@ -1221,6 +1358,7 @@ def render_preview_frame(
     segments: list[TranscriptSegment],
     clip_start_sec: Optional[float] = None,
     clip_end_sec: Optional[float] = None,
+    prev_source_frame_bgr: Optional[np.ndarray] = None,
 ) -> QImage:
     """Render a 1:1 WYSIWYG 1080x1920 (or 1920x1080) QImage preview frame from ClipComposerConfig."""
     ensure_qt_gui_app()
@@ -1238,122 +1376,51 @@ def render_preview_frame(
         painter = QPainter(canvas_img)
     else:
         layout = config.layout
-        mode = layout.mode
-        active_top_crop, active_bot_crop = layout.resolve_crops_at_time(rel_time_sec)
-
-        if config.aspect_ratio == "16:9":
-            base_bgr = _crop_and_resize_bgr(source_frame_bgr, active_top_crop, cw, ch)
-            base_bgr = _apply_climax_cv(base_bgr, config, rel_time_sec)
-            canvas_img = _bgr_to_qimage(base_bgr).convertToFormat(QImage.Format.Format_RGBA8888)
-            painter = QPainter(canvas_img)
-        elif mode == "single_focus":
-            base_bgr = _crop_and_resize_bgr(source_frame_bgr, active_top_crop, cw, ch)
-            base_bgr = _apply_climax_cv(base_bgr, config, rel_time_sec)
-            canvas_img = _bgr_to_qimage(base_bgr).convertToFormat(QImage.Format.Format_RGBA8888)
-            painter = QPainter(canvas_img)
-        elif mode == "blurred_frame":
-            bg_bgr = _crop_and_resize_bgr(source_frame_bgr, active_bot_crop, cw, ch)
-            k = max(3, int(layout.background_blur_strength) * 2 + 1)
-            small_bg = cv2.resize(bg_bgr, (cw // 4, ch // 4), interpolation=cv2.INTER_AREA)
-            small_bg = cv2.GaussianBlur(small_bg, (k // 2 | 1, k // 2 | 1), 0)
-            bg_bgr = cv2.resize(small_bg, (cw, ch), interpolation=cv2.INTER_LINEAR)
-            darken_beta = float(layout.background_darken) * 255.0
-            bg_bgr = cv2.convertScaleAbs(bg_bgr, alpha=1.0, beta=darken_beta)
-
-            fg_ratio_map = {"1:1": (cw, cw), "4:3": (cw, int(round(cw * 0.75))), "16:9": (cw, int(round(cw * 9.0 / 16.0)))}
-            fg_w, fg_h = fg_ratio_map.get(layout.blurred_frame_aspect, (cw, int(round(cw * 0.75))))
-            fg_h = min(ch, _make_even(fg_h, 2, ch))
-            fg_bgr = _crop_and_resize_bgr(source_frame_bgr, active_top_crop, fg_w, fg_h)
-            y_off = max(0, (ch - fg_h) // 2)
-
-            bg_bgr = _apply_climax_cv(bg_bgr, config, rel_time_sec)
-            fg_bgr = _apply_climax_cv(fg_bgr, config, rel_time_sec)
-            canvas_img = _bgr_to_qimage(bg_bgr).convertToFormat(QImage.Format.Format_RGBA8888)
-            fg_qimg = _bgr_to_qimage(fg_bgr)
-            painter = QPainter(canvas_img)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-            fg_rect = QRectF(0.0, float(y_off), float(fg_w), float(fg_h))
-            clip_path = _build_frame_clip_path(fg_rect, "rounded_rect", layout.frame_corner_radius_px)
-            painter.save()
-            painter.setClipPath(clip_path)
-            painter.drawImage(0, y_off, fg_qimg)
-            painter.restore()
-            if layout.frame_border_width_px > 0:
-                bw = float(layout.frame_border_width_px)
-                inset = bw * 0.5
-                stroke_rect = QRectF(inset, float(y_off) + inset, max(2.0, float(fg_w) - bw), max(2.0, float(fg_h) - bw))
-                stroke_path = _build_frame_clip_path(stroke_rect, "rounded_rect", max(0.0, layout.frame_corner_radius_px - inset))
-                painter.save()
-                painter.setPen(QPen(qcolor_from_hex(layout.frame_border_color_hex, "#F97316"), bw))
-                painter.setBrush(Qt.BrushStyle.NoBrush)
-                painter.drawPath(stroke_path)
-                painter.restore()
-        elif mode == "pip_facecam":
-            bg_bgr = _crop_and_resize_bgr(source_frame_bgr, active_bot_crop, cw, ch)
-            bg_bgr = _apply_climax_cv(bg_bgr, config, rel_time_sec)
-            canvas_img = _bgr_to_qimage(bg_bgr).convertToFormat(QImage.Format.Format_RGBA8888)
-
-            px, py, pip_w, pip_h = compute_pip_rect(cw, ch, layout)
-            pip_bgr = _crop_and_resize_bgr(source_frame_bgr, active_top_crop, pip_w, pip_h)
-            pip_bgr = _apply_climax_cv(pip_bgr, config, rel_time_sec)
-            pip_qimg = _bgr_to_qimage(pip_bgr)
-
-            painter = QPainter(canvas_img)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-            pip_rect = QRectF(float(px), float(py), float(pip_w), float(pip_h))
-            pip_path = _build_frame_clip_path(pip_rect, layout.pip_shape, layout.frame_corner_radius_px)
-            painter.save()
-            painter.setClipPath(pip_path)
-            painter.drawImage(px, py, pip_qimg)
-            painter.restore()
-            if layout.frame_border_width_px > 0:
-                bw = float(layout.frame_border_width_px)
-                inset = bw * 0.5
-                stroke_rect = QRectF(float(px) + inset, float(py) + inset, max(2.0, float(pip_w) - bw), max(2.0, float(pip_h) - bw))
-                stroke_path = _build_frame_clip_path(stroke_rect, layout.pip_shape, max(0.0, layout.frame_corner_radius_px - inset))
-                painter.save()
-                painter.setPen(QPen(qcolor_from_hex(layout.frame_border_color_hex, "#F97316"), bw))
-                painter.setBrush(Qt.BrushStyle.NoBrush)
-                painter.drawPath(stroke_path)
-                painter.restore()
+        tr_win = (
+            active_transition_window_at(layout.shot_crops, layout.transition, rel_time_sec)
+            if (layout.framing_tracking_mode == "auto_face" and len(layout.shot_crops) > 1 and config.aspect_ratio != "16:9")
+            else None
+        )
+        if tr_win is not None:
+            idx_a, idx_b, tr_res, prog = tr_win
+            seg_a = layout.shot_crops[idx_a]
+            seg_b = layout.shot_crops[idx_b]
+            frame_a = (
+                prev_source_frame_bgr
+                if (prev_source_frame_bgr is not None and prev_source_frame_bgr.size > 0)
+                else source_frame_bgr
+            )
+            img_a = _render_base_canvas_qimage(
+                frame_a,
+                config,
+                rel_time_sec,
+                cw,
+                ch,
+                seg_a.top_crop,
+                seg_a.bottom_crop or layout.bottom_crop,
+            )
+            img_b = _render_base_canvas_qimage(
+                source_frame_bgr,
+                config,
+                rel_time_sec,
+                cw,
+                ch,
+                seg_b.top_crop,
+                seg_b.bottom_crop or layout.bottom_crop,
+            )
+            canvas_img = blend_transition_qimages(img_a, img_b, prog, tr_res.tr_type, tr_res.easing)
         else:
-            # split_screen or multi_speaker_split
-            geom = compute_split_geometry(cw, ch, layout.split_ratio_top, layout.divider.angle_deg)
-            top_bgr = _crop_and_resize_bgr(source_frame_bgr, active_top_crop, cw, geom.top_panel_h)
-            bot_bgr = _crop_and_resize_bgr(source_frame_bgr, active_bot_crop, cw, geom.bot_panel_h)
-
-            if not geom.is_angled:
-                combined = np.vstack([top_bgr, bot_bgr])
-                combined = _apply_climax_cv(combined, config, rel_time_sec)
-                canvas_img = _bgr_to_qimage(combined).convertToFormat(QImage.Format.Format_RGBA8888)
-                painter = QPainter(canvas_img)
-            else:
-                # Composite bottom full canvas + polygon-clipped top panel
-                bot_full = np.zeros((ch, cw, 3), dtype=np.uint8)
-                bot_full[geom.bot_panel_y : geom.bot_panel_y + geom.bot_panel_h, 0:cw] = bot_bgr
-                bot_full = _apply_climax_cv(bot_full, config, rel_time_sec)
-                canvas_img = _bgr_to_qimage(bot_full).convertToFormat(QImage.Format.Format_RGBA8888)
-
-                top_bgr = _apply_climax_cv(top_bgr, config, rel_time_sec)
-                top_qimg = _bgr_to_qimage(top_bgr)
-
-                painter = QPainter(canvas_img)
-                poly = QPolygonF(
-                    [
-                        QPointF(0.0, 0.0),
-                        QPointF(float(cw), 0.0),
-                        QPointF(float(cw), geom.right_y),
-                        QPointF(0.0, geom.left_y),
-                    ]
-                )
-                clip_path = QPainterPath()
-                clip_path.addPolygon(poly)
-                painter.save()
-                painter.setClipPath(clip_path)
-                painter.drawImage(0, 0, top_qimg)
-                painter.restore()
-
-            draw_divider_on_painter(painter, cw, ch, layout.split_ratio_top, layout.divider)
+            active_top_crop, active_bot_crop = layout.resolve_crops_at_time(rel_time_sec)
+            canvas_img = _render_base_canvas_qimage(
+                source_frame_bgr,
+                config,
+                rel_time_sec,
+                cw,
+                ch,
+                active_top_crop,
+                active_bot_crop,
+            )
+        painter = QPainter(canvas_img)
 
     # Shared Overlay Stack (1:1 coordinates)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -1442,6 +1509,7 @@ class ComposerFFmpegPlan:
     ass_path: Optional[Path] = None
     temp_fonts_dir: Optional[Path] = None
     temp_asset_paths: list[Path] = field(default_factory=list)
+    sfx_events: list[tuple[float, Path, float]] = field(default_factory=list)
     video_output_label: str = "vout"
     output_width: int = 1080
     output_height: int = 1920
@@ -1450,6 +1518,281 @@ class ComposerFFmpegPlan:
 
 def _escape_filter_val(val: str) -> str:
     return val.replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
+
+
+@dataclass
+class _StaticMaskIndices:
+    """Shared split labels or single PNG input indices for shape masks/borders across shots."""
+
+    bf_mask_lbls: list[str] = field(default_factory=list)
+    bf_border_lbls: list[str] = field(default_factory=list)
+    pip_mask_lbls: list[str] = field(default_factory=list)
+    pip_border_lbls: list[str] = field(default_factory=list)
+    ang_mask_lbls: list[str] = field(default_factory=list)
+    ang_div_lbls: list[str] = field(default_factory=list)
+
+
+def _prepare_static_masks(
+    layout: LayoutLayerConfig,
+    aspect_ratio: str,
+    cw: int,
+    ch: int,
+    n_shots: int,
+    fps_safe: float,
+    work_dir: Path,
+    prefix: str,
+    lines: list[str],
+    extra_inputs: list[tuple[Path, bool]],
+    temp_assets: list[Path],
+    next_idx: int,
+) -> tuple[_StaticMaskIndices, int]:
+    """Generate shared PNG masks/borders once and split them across N shots when needed."""
+    masks = _StaticMaskIndices()
+    if aspect_ratio == "16:9":
+        return masks, next_idx
+
+    loop_flag = n_shots > 1
+
+    def _register_png(path: Path, fmt: str, tag: str) -> list[str]:
+        nonlocal next_idx
+        in_idx = next_idx
+        next_idx += 1
+        extra_inputs.append((path, loop_flag))
+        temp_assets.append(path)
+        if n_shots == 1:
+            lbl = f"{prefix}_{tag}_s0"
+            lines.append(f"[{in_idx}:v]format={fmt}[{lbl}]")
+            return [lbl]
+        lbls = [f"{prefix}_{tag}_s{i}" for i in range(n_shots)]
+        split_str = "".join(f"[{l}]" for l in lbls)
+        lines.append(f"[{in_idx}:v]fps={fps_safe:.3f},format={fmt},split={n_shots}{split_str}")
+        return lbls
+
+    mode = layout.mode
+    if mode == "blurred_frame" and (layout.frame_corner_radius_px > 0 or layout.frame_border_width_px > 0):
+        fg_ratio_map = {"1:1": (cw, cw), "4:3": (cw, int(round(cw * 0.75))), "16:9": (cw, int(round(cw * 9.0 / 16.0)))}
+        fg_w, fg_h = fg_ratio_map.get(layout.blurred_frame_aspect, (cw, int(round(cw * 0.75))))
+        fg_h = min(ch, _make_even(fg_h, 2, ch))
+        fg_mask, fg_border = render_frame_shape_assets(
+            width=fg_w,
+            height=fg_h,
+            shape="rounded_rect",
+            corner_radius_px=layout.frame_corner_radius_px,
+            border_width_px=layout.frame_border_width_px,
+            border_color_hex=layout.frame_border_color_hex,
+            out_dir=work_dir,
+            prefix=f"{prefix}_bf",
+        )
+        masks.bf_mask_lbls = _register_png(fg_mask, "gray", "bf_m")
+        if fg_border is not None:
+            masks.bf_border_lbls = _register_png(fg_border, "rgba", "bf_b")
+    elif mode == "pip_facecam":
+        _, _, pip_w, pip_h = compute_pip_rect(cw, ch, layout)
+        pip_mask, pip_border = render_frame_shape_assets(
+            width=pip_w,
+            height=pip_h,
+            shape=layout.pip_shape,
+            corner_radius_px=layout.frame_corner_radius_px,
+            border_width_px=layout.frame_border_width_px,
+            border_color_hex=layout.frame_border_color_hex,
+            out_dir=work_dir,
+            prefix=f"{prefix}_pip",
+        )
+        masks.pip_mask_lbls = _register_png(pip_mask, "gray", "pip_m")
+        if pip_border is not None:
+            masks.pip_border_lbls = _register_png(pip_border, "rgba", "pip_b")
+    elif mode not in ("single_focus", "blurred_frame", "pip_facecam"):
+        geom = compute_split_geometry(cw, ch, layout.split_ratio_top, layout.divider.angle_deg)
+        if geom.is_angled:
+            ang_mask, ang_div = render_angled_split_assets(
+                cw, ch, layout.split_ratio_top, layout.divider, work_dir, prefix=prefix
+            )
+            masks.ang_mask_lbls = _register_png(ang_mask, "gray", "ang_m")
+            if ang_div is not None:
+                masks.ang_div_lbls = _register_png(ang_div, "rgba", "ang_d")
+
+    return masks, next_idx
+
+
+def _emit_layout_for_stream(
+    in_lbl: str,
+    out_lbl: str,
+    seg_prefix: str,
+    shot_idx: int,
+    seg_dur_sec: Optional[float],
+    top_crop: CropBoxConfig,
+    bot_crop: CropBoxConfig,
+    layout: LayoutLayerConfig,
+    aspect_ratio: str,
+    src_w: int,
+    src_h: int,
+    cw: int,
+    ch: int,
+    masks: _StaticMaskIndices,
+    lines: list[str],
+) -> str:
+    """Emit layout crop/composite filters from `in_lbl` into `out_lbl` (`yuv420p`, `setsar=1`)."""
+    mode = layout.mode
+    if aspect_ratio == "16:9":
+        crop_w, crop_h, crop_x, crop_y = compute_pixel_crop_rect(top_crop, src_w, src_h, cw, ch)
+        lines.append(
+            f"[{in_lbl}]crop={crop_w}:{crop_h}:{crop_x}:{crop_y},scale={cw}:{ch}:flags=lanczos,format=yuv420p,setsar=1[{out_lbl}]"
+        )
+        return "16:9_custom"
+
+    if mode == "single_focus":
+        crop_w, crop_h, crop_x, crop_y = compute_pixel_crop_rect(top_crop, src_w, src_h, cw, ch)
+        lines.append(
+            f"[{in_lbl}]crop={crop_w}:{crop_h}:{crop_x}:{crop_y},scale={cw}:{ch}:flags=lanczos,format=yuv420p,setsar=1[{out_lbl}]"
+        )
+        return "single_focus"
+
+    def _bound_mask(lbl: str, tag: str) -> str:
+        if seg_dur_sec is None:
+            return lbl
+        trimmed = f"{seg_prefix}_{tag}_tr"
+        lines.append(f"[{lbl}]trim=0:{seg_dur_sec:.3f},setpts=PTS-STARTPTS[{trimmed}]")
+        return trimmed
+
+    if mode == "blurred_frame":
+        bg_w, bg_h, bg_x, bg_y = compute_pixel_crop_rect(bot_crop, src_w, src_h, cw, ch)
+        fg_ratio_map = {"1:1": (cw, cw), "4:3": (cw, int(round(cw * 0.75))), "16:9": (cw, int(round(cw * 9.0 / 16.0)))}
+        fg_w, fg_h = fg_ratio_map.get(layout.blurred_frame_aspect, (cw, int(round(cw * 0.75))))
+        fg_h = min(ch, _make_even(fg_h, 2, ch))
+        fc_w, fc_h, fc_x, fc_y = compute_pixel_crop_rect(top_crop, src_w, src_h, fg_w, fg_h)
+        blur_r = max(2, min(60, int(layout.background_blur_strength)))
+        darken = max(-0.5, min(0.3, float(layout.background_darken)))
+        y_off = max(0, (ch - fg_h) // 2)
+
+        lines.extend(
+            [
+                f"[{in_lbl}]split=2[{seg_prefix}_bg_in][{seg_prefix}_fg_in]",
+                (
+                    f"[{seg_prefix}_bg_in]crop={bg_w}:{bg_h}:{bg_x}:{bg_y},"
+                    f"scale={cw}:{ch}:flags=bilinear,boxblur={blur_r}:3,eq=brightness={darken:.2f},setsar=1[{seg_prefix}_bg]"
+                ),
+            ]
+        )
+        if masks.bf_mask_lbls:
+            m_lbl = _bound_mask(masks.bf_mask_lbls[shot_idx], "bfm")
+            lines.extend(
+                [
+                    f"[{seg_prefix}_fg_in]crop={fc_w}:{fc_h}:{fc_x}:{fc_y},scale={fg_w}:{fg_h}:flags=lanczos,format=rgba,setsar=1[{seg_prefix}_fg]",
+                    f"[{seg_prefix}_fg][{m_lbl}]alphamerge[{seg_prefix}_fg_a]",
+                ]
+            )
+            if masks.bf_border_lbls:
+                b_lbl = _bound_mask(masks.bf_border_lbls[shot_idx], "bfb")
+                lines.append(f"[{seg_prefix}_bg][{seg_prefix}_fg_a]overlay=x=0:y={y_off}:shortest=0[{seg_prefix}_bf_cmp]")
+                lines.append(f"[{seg_prefix}_bf_cmp][{b_lbl}]overlay=x=0:y={y_off}:shortest=0,format=yuv420p,setsar=1[{out_lbl}]")
+            else:
+                lines.append(f"[{seg_prefix}_bg][{seg_prefix}_fg_a]overlay=x=0:y={y_off}:shortest=0,format=yuv420p,setsar=1[{out_lbl}]")
+        else:
+            lines.extend(
+                [
+                    f"[{seg_prefix}_fg_in]crop={fc_w}:{fc_h}:{fc_x}:{fc_y},scale={fg_w}:{fg_h}:flags=lanczos,setsar=1[{seg_prefix}_fg]",
+                    f"[{seg_prefix}_bg][{seg_prefix}_fg]overlay=x=(W-w)/2:y=(H-h)/2,format=yuv420p,setsar=1[{out_lbl}]",
+                ]
+            )
+        return f"blurred_frame ({layout.blurred_frame_aspect})"
+
+    if mode == "pip_facecam":
+        bg_w, bg_h, bg_x, bg_y = compute_pixel_crop_rect(bot_crop, src_w, src_h, cw, ch)
+        px, py, pip_w, pip_h = compute_pip_rect(cw, ch, layout)
+        pc_w, pc_h, pc_x, pc_y = compute_pixel_crop_rect(top_crop, src_w, src_h, pip_w, pip_h)
+        m_lbl = _bound_mask(masks.pip_mask_lbls[shot_idx], "pm")
+
+        lines.extend(
+            [
+                f"[{in_lbl}]split=2[{seg_prefix}_bg_in][{seg_prefix}_pip_in]",
+                f"[{seg_prefix}_bg_in]crop={bg_w}:{bg_h}:{bg_x}:{bg_y},scale={cw}:{ch}:flags=lanczos,setsar=1[{seg_prefix}_bg]",
+                f"[{seg_prefix}_pip_in]crop={pc_w}:{pc_h}:{pc_x}:{pc_y},scale={pip_w}:{pip_h}:flags=lanczos,format=rgba,setsar=1[{seg_prefix}_pip_fg]",
+                f"[{seg_prefix}_pip_fg][{m_lbl}]alphamerge[{seg_prefix}_pip_a]",
+            ]
+        )
+        if masks.pip_border_lbls:
+            b_lbl = _bound_mask(masks.pip_border_lbls[shot_idx], "pb")
+            lines.append(f"[{seg_prefix}_bg][{seg_prefix}_pip_a]overlay=x={px}:y={py}:shortest=0[{seg_prefix}_pip_cmp]")
+            lines.append(f"[{seg_prefix}_pip_cmp][{b_lbl}]overlay=x={px}:y={py}:shortest=0,format=yuv420p,setsar=1[{out_lbl}]")
+        else:
+            lines.append(f"[{seg_prefix}_bg][{seg_prefix}_pip_a]overlay=x={px}:y={py}:shortest=0,format=yuv420p,setsar=1[{out_lbl}]")
+        return f"pip_facecam ({layout.pip_shape} {layout.pip_position})"
+
+    # split_screen or multi_speaker_split
+    geom = compute_split_geometry(cw, ch, layout.split_ratio_top, layout.divider.angle_deg)
+    tc_w, tc_h, tc_x, tc_y = compute_pixel_crop_rect(top_crop, src_w, src_h, cw, geom.top_panel_h)
+    bc_w, bc_h, bc_x, bc_y = compute_pixel_crop_rect(bot_crop, src_w, src_h, cw, geom.bot_panel_h)
+
+    lines.append(f"[{in_lbl}]split=2[{seg_prefix}_t_in][{seg_prefix}_b_in]")
+    lines.append(
+        f"[{seg_prefix}_t_in]crop={tc_w}:{tc_h}:{tc_x}:{tc_y},"
+        f"scale={cw}:{geom.top_panel_h}:flags=lanczos,setsar=1[{seg_prefix}_top]"
+    )
+    lines.append(
+        f"[{seg_prefix}_b_in]crop={bc_w}:{bc_h}:{bc_x}:{bc_y},"
+        f"scale={cw}:{geom.bot_panel_h}:flags=lanczos,setsar=1[{seg_prefix}_bot]"
+    )
+
+    if not geom.is_angled:
+        stack_lbl = f"{seg_prefix}_stacked"
+        lines.append(f"[{seg_prefix}_top][{seg_prefix}_bot]vstack=inputs=2,setsar=1[{stack_lbl}]")
+        if layout.divider.enabled and layout.divider.thickness_px > 0:
+            th = int(layout.divider.thickness_px)
+            y_border = max(0, geom.split_y - (th + 4) // 2)
+            y_main = max(0, geom.split_y - th // 2)
+            b_col = layout.divider.border_color_hex[:7]
+            m_col = layout.divider.color_hex[:7]
+            lines.append(
+                f"[{stack_lbl}]drawbox=x=0:y={y_border}:w={cw}:h={th + 4}:color={b_col}:t=fill,"
+                f"drawbox=x=0:y={y_main}:w={cw}:h={th}:color={m_col}:t=fill,format=yuv420p,setsar=1[{out_lbl}]"
+            )
+        else:
+            lines.append(f"[{stack_lbl}]format=yuv420p,setsar=1[{out_lbl}]")
+        return f"{mode} ({int(round(layout.split_ratio_top*100))}/{int(round((1-layout.split_ratio_top)*100))})"
+
+    m_lbl = _bound_mask(masks.ang_mask_lbls[shot_idx], "am")
+    lines.extend(
+        [
+            f"[{seg_prefix}_top]pad={cw}:{ch}:0:0:black,format=rgba[{seg_prefix}_t_pad]",
+            f"[{seg_prefix}_t_pad][{m_lbl}]alphamerge[{seg_prefix}_t_alpha]",
+            f"[{seg_prefix}_bot]pad={cw}:{ch}:0:{geom.bot_panel_y}:black,format=rgba[{seg_prefix}_b_pad]",
+        ]
+    )
+    if masks.ang_div_lbls:
+        d_lbl = _bound_mask(masks.ang_div_lbls[shot_idx], "ad")
+        lines.append(f"[{seg_prefix}_b_pad][{seg_prefix}_t_alpha]overlay=0:0:shortest=0[{seg_prefix}_ang_cmp]")
+        lines.append(f"[{seg_prefix}_ang_cmp][{d_lbl}]overlay=0:0:shortest=0,format=yuv420p,setsar=1[{out_lbl}]")
+    else:
+        lines.append(f"[{seg_prefix}_b_pad][{seg_prefix}_t_alpha]overlay=0:0:shortest=0,format=yuv420p,setsar=1[{out_lbl}]")
+    return f"{mode} angled ({layout.divider.angle_deg:+.1f}deg)"
+
+
+def _normalize_shots_for_compile(
+    layout: LayoutLayerConfig,
+    main_dur: float,
+    aspect_ratio: str,
+) -> list[ShotCropSegment]:
+    """Normalize valid auto-face `shot_crops` into contiguous segments covering `[0, main_dur]`."""
+    if aspect_ratio == "16:9" or layout.framing_tracking_mode != "auto_face" or len(layout.shot_crops) <= 1:
+        return []
+    raw: list[ShotCropSegment] = []
+    for seg in layout.shot_crops:
+        t0 = max(0.0, round(float(seg.t_start), 3))
+        t1 = min(main_dur, round(float(seg.t_end), 3))
+        if t0 < main_dur - 0.08 and t1 - t0 >= 0.08:
+            cp = seg.model_copy(deep=True)
+            cp.t_start = t0
+            cp.t_end = t1
+            raw.append(cp)
+    if len(raw) <= 1:
+        return []
+    raw[0].t_start = 0.0
+    raw[-1].t_end = round(main_dur, 3)
+    for i in range(1, len(raw)):
+        mid = round(raw[i].t_start, 3)
+        raw[i - 1].t_end = mid
+        raw[i].t_start = mid
+    return [s for s in raw if s.t_end - s.t_start >= 0.08]
 
 
 def compile_composer_ffmpeg_plan(
@@ -1477,222 +1820,162 @@ def compile_composer_ffmpeg_plan(
     lines: list[str] = []
     extra_inputs: list[tuple[Path, bool]] = []
     temp_assets: list[Path] = []
+    sfx_events: list[tuple[float, Path, float]] = []
     next_idx = int(base_extra_input_idx)
 
     layout = config.layout
-    mode = layout.mode
     src_v = f"{prefix}_vsrc"
     lines.append(f"[0:v]setpts=PTS-STARTPTS[{src_v}]")
 
-    if config.aspect_ratio == "16:9":
-        crop_w, crop_h, crop_x, crop_y = compute_pixel_crop_rect(layout.top_crop, src_w, src_h, cw, ch)
-        lines.append(
-            f"[{src_v}]crop={crop_w}:{crop_h}:{crop_x}:{crop_y},scale={cw}:{ch}:flags=lanczos,setsar=1[framed]"
-        )
-        summary = "16:9_custom"
-    elif mode == "single_focus":
-        valid_shots = []
-        if layout.framing_tracking_mode == "auto_face" and len(layout.shot_crops) > 1:
-            for seg in layout.shot_crops:
-                t0 = max(0.0, round(float(seg.t_start), 3))
-                t1 = min(main_dur, round(float(seg.t_end), 3))
-                if t0 < main_dur - 0.08 and t1 - t0 >= 0.08:
-                    valid_shots.append([t0, t1, seg.top_crop])
-        if len(valid_shots) > 1:
-            valid_shots[0][0] = 0.0
-            valid_shots[-1][1] = round(main_dur, 3)
-            fps_safe = max(10.0, min(120.0, float(fps or 30.0)))
-            split_lbls = "".join(f"[{prefix}_s{i}]" for i in range(len(valid_shots)))
-            lines.append(f"[{src_v}]fps={fps_safe:.3f},split={len(valid_shots)}{split_lbls}")
-            concat_ins: list[str] = []
-            for i, (t0, t1, shot_crop) in enumerate(valid_shots):
-                crop_w, crop_h, crop_x, crop_y = compute_pixel_crop_rect(shot_crop, src_w, src_h, cw, ch)
-                out_seg = f"{prefix}_sv{i}"
-                lines.append(
-                    f"[{prefix}_s{i}]trim=start={t0:.3f}:end={t1:.3f},setpts=PTS-STARTPTS,"
-                    f"crop={crop_w}:{crop_h}:{crop_x}:{crop_y},scale={cw}:{ch}:flags=lanczos,setsar=1[{out_seg}]"
-                )
-                concat_ins.append(f"[{out_seg}]")
-            lines.append(f"{''.join(concat_ins)}concat=n={len(valid_shots)}:v=1:a=0,setsar=1[framed]")
-            summary = f"single_focus ({len(valid_shots)} angles)"
-        else:
-            active_crop, _ = layout.resolve_crops_at_time(0.0)
-            crop_w, crop_h, crop_x, crop_y = compute_pixel_crop_rect(active_crop, src_w, src_h, cw, ch)
-            lines.append(
-                f"[{src_v}]crop={crop_w}:{crop_h}:{crop_x}:{crop_y},scale={cw}:{ch}:flags=lanczos,setsar=1[framed]"
-            )
-            summary = "single_focus"
-    elif mode == "blurred_frame":
-        bg_w, bg_h, bg_x, bg_y = compute_pixel_crop_rect(layout.bottom_crop, src_w, src_h, cw, ch)
-        fg_ratio_map = {"1:1": (cw, cw), "4:3": (cw, int(round(cw * 0.75))), "16:9": (cw, int(round(cw * 9.0 / 16.0)))}
-        fg_w, fg_h = fg_ratio_map.get(layout.blurred_frame_aspect, (cw, int(round(cw * 0.75))))
-        fg_h = min(ch, _make_even(fg_h, 2, ch))
-        fc_w, fc_h, fc_x, fc_y = compute_pixel_crop_rect(layout.top_crop, src_w, src_h, fg_w, fg_h)
-        blur_r = max(2, min(60, int(layout.background_blur_strength)))
-        darken = max(-0.5, min(0.3, float(layout.background_darken)))
-        y_off = max(0, (ch - fg_h) // 2)
+    fps_safe = max(10.0, min(120.0, float(fps or 30.0)))
+    valid_shots = _normalize_shots_for_compile(layout, main_dur, config.aspect_ratio)
+    n_shots = max(1, len(valid_shots))
 
-        lines.extend(
-            [
-                f"[{src_v}]split=2[{prefix}_bg_in][{prefix}_fg_in]",
-                (
-                    f"[{prefix}_bg_in]crop={bg_w}:{bg_h}:{bg_x}:{bg_y},"
-                    f"scale={cw}:{ch}:flags=bilinear,boxblur={blur_r}:3,eq=brightness={darken:.2f},setsar=1[{prefix}_bg]"
-                ),
-            ]
-        )
-        if layout.frame_corner_radius_px > 0 or layout.frame_border_width_px > 0:
-            fg_mask, fg_border = render_frame_shape_assets(
-                width=fg_w,
-                height=fg_h,
-                shape="rounded_rect",
-                corner_radius_px=layout.frame_corner_radius_px,
-                border_width_px=layout.frame_border_width_px,
-                border_color_hex=layout.frame_border_color_hex,
-                out_dir=work_dir,
-                prefix=f"{prefix}_bf",
-            )
-            m_idx = next_idx
-            next_idx += 1
-            extra_inputs.append((fg_mask, False))
-            temp_assets.append(fg_mask)
-            lines.extend(
-                [
-                    f"[{prefix}_fg_in]crop={fc_w}:{fc_h}:{fc_x}:{fc_y},scale={fg_w}:{fg_h}:flags=lanczos,format=rgba,setsar=1[{prefix}_fg]",
-                    f"[{m_idx}:v]format=gray[{prefix}_bf_m]",
-                    f"[{prefix}_fg][{prefix}_bf_m]alphamerge[{prefix}_fg_a]",
-                ]
-            )
-            if fg_border is not None:
-                b_idx = next_idx
-                next_idx += 1
-                extra_inputs.append((fg_border, False))
-                temp_assets.append(fg_border)
-                lines.append(f"[{prefix}_bg][{prefix}_fg_a]overlay=x=0:y={y_off}:shortest=0[{prefix}_bf_cmp]")
-                lines.append(f"[{prefix}_bf_cmp][{b_idx}:v]overlay=x=0:y={y_off}:shortest=0,format=yuv420p,setsar=1[framed]")
-            else:
-                lines.append(f"[{prefix}_bg][{prefix}_fg_a]overlay=x=0:y={y_off}:shortest=0,format=yuv420p,setsar=1[framed]")
-        else:
-            lines.extend(
-                [
-                    f"[{prefix}_fg_in]crop={fc_w}:{fc_h}:{fc_x}:{fc_y},scale={fg_w}:{fg_h}:flags=lanczos,setsar=1[{prefix}_fg]",
-                    f"[{prefix}_bg][{prefix}_fg]overlay=x=(W-w)/2:y=(H-h)/2,setsar=1[framed]",
-                ]
-            )
-        summary = f"blurred_frame ({layout.blurred_frame_aspect})"
-    elif mode == "pip_facecam":
-        bg_w, bg_h, bg_x, bg_y = compute_pixel_crop_rect(layout.bottom_crop, src_w, src_h, cw, ch)
-        px, py, pip_w, pip_h = compute_pip_rect(cw, ch, layout)
-        pc_w, pc_h, pc_x, pc_y = compute_pixel_crop_rect(layout.top_crop, src_w, src_h, pip_w, pip_h)
+    masks, next_idx = _prepare_static_masks(
+        layout=layout,
+        aspect_ratio=config.aspect_ratio,
+        cw=cw,
+        ch=ch,
+        n_shots=n_shots,
+        fps_safe=fps_safe,
+        work_dir=work_dir,
+        prefix=prefix,
+        lines=lines,
+        extra_inputs=extra_inputs,
+        temp_assets=temp_assets,
+        next_idx=next_idx,
+    )
 
-        pip_mask, pip_border = render_frame_shape_assets(
-            width=pip_w,
-            height=pip_h,
-            shape=layout.pip_shape,
-            corner_radius_px=layout.frame_corner_radius_px,
-            border_width_px=layout.frame_border_width_px,
-            border_color_hex=layout.frame_border_color_hex,
-            out_dir=work_dir,
-            prefix=f"{prefix}_pip",
+    if len(valid_shots) <= 1:
+        active_top, active_bot = layout.resolve_crops_at_time(0.0)
+        summary = _emit_layout_for_stream(
+            in_lbl=src_v,
+            out_lbl="framed",
+            seg_prefix=prefix,
+            shot_idx=0,
+            seg_dur_sec=None,
+            top_crop=active_top,
+            bot_crop=active_bot,
+            layout=layout,
+            aspect_ratio=config.aspect_ratio,
+            src_w=src_w,
+            src_h=src_h,
+            cw=cw,
+            ch=ch,
+            masks=masks,
+            lines=lines,
         )
-        m_idx = next_idx
-        next_idx += 1
-        extra_inputs.append((pip_mask, False))
-        temp_assets.append(pip_mask)
-
-        lines.extend(
-            [
-                f"[{src_v}]split=2[{prefix}_bg_in][{prefix}_pip_in]",
-                f"[{prefix}_bg_in]crop={bg_w}:{bg_h}:{bg_x}:{bg_y},scale={cw}:{ch}:flags=lanczos,setsar=1[{prefix}_bg]",
-                f"[{prefix}_pip_in]crop={pc_w}:{pc_h}:{pc_x}:{pc_y},scale={pip_w}:{pip_h}:flags=lanczos,format=rgba,setsar=1[{prefix}_pip_fg]",
-                f"[{m_idx}:v]format=gray[{prefix}_pip_m]",
-                f"[{prefix}_pip_fg][{prefix}_pip_m]alphamerge[{prefix}_pip_a]",
-            ]
-        )
-        if pip_border is not None:
-            b_idx = next_idx
-            next_idx += 1
-            extra_inputs.append((pip_border, False))
-            temp_assets.append(pip_border)
-            lines.append(f"[{prefix}_bg][{prefix}_pip_a]overlay=x={px}:y={py}:shortest=0[{prefix}_pip_cmp]")
-            lines.append(f"[{prefix}_pip_cmp][{b_idx}:v]overlay=x={px}:y={py}:shortest=0,format=yuv420p,setsar=1[framed]")
-        else:
-            lines.append(f"[{prefix}_bg][{prefix}_pip_a]overlay=x={px}:y={py}:shortest=0,format=yuv420p,setsar=1[framed]")
-        summary = f"pip_facecam ({layout.pip_shape} {layout.pip_position})"
     else:
-        # split_screen or multi_speaker_split
-        geom = compute_split_geometry(cw, ch, layout.split_ratio_top, layout.divider.angle_deg)
-        tc_w, tc_h, tc_x, tc_y = compute_pixel_crop_rect(
-            layout.top_crop, src_w, src_h, cw, geom.top_panel_h
-        )
-        bc_w, bc_h, bc_x, bc_y = compute_pixel_crop_rect(
-            layout.bottom_crop, src_w, src_h, cw, geom.bot_panel_h
-        )
+        resolved_trs = resolve_shot_transitions(valid_shots, layout.transition)
+        split_lbls = "".join(f"[{prefix}_s{i}]" for i in range(n_shots))
+        lines.append(f"[{src_v}]fps={fps_safe:.3f},split={n_shots}{split_lbls}")
 
-        lines.append(f"[{src_v}]split=2[{prefix}_t_in][{prefix}_b_in]")
-        lines.append(
-            f"[{prefix}_t_in]crop={tc_w}:{tc_h}:{tc_x}:{tc_y},"
-            f"scale={cw}:{geom.top_panel_h}:flags=lanczos,setsar=1[{prefix}_top]"
-        )
-        lines.append(
-            f"[{prefix}_b_in]crop={bc_w}:{bc_h}:{bc_x}:{bc_y},"
-            f"scale={cw}:{geom.bot_panel_h}:flags=lanczos,setsar=1[{prefix}_bot]"
-        )
+        post_fx_windows: list[tuple[float, float, str]] = []
+        base_summary = layout.mode
 
-        if not geom.is_angled:
-            stack_lbl = f"{prefix}_stacked"
-            lines.append(f"[{prefix}_top][{prefix}_bot]vstack=inputs=2,setsar=1[{stack_lbl}]")
-            cur_split = stack_lbl
-            if layout.divider.enabled and layout.divider.thickness_px > 0:
-                th = int(layout.divider.thickness_px)
-                y_border = max(0, geom.split_y - (th + 4) // 2)
-                y_main = max(0, geom.split_y - th // 2)
-                b_col = layout.divider.border_color_hex[:7]
-                m_col = layout.divider.color_hex[:7]
+        for i, seg in enumerate(valid_shots):
+            seg_dur = round(float(seg.t_end) - float(seg.t_start), 3)
+            d_out = resolved_trs[i + 1].duration_sec if (i + 1 < n_shots and resolved_trs[i + 1] is not None) else 0.0
+            in_tr = resolved_trs[i]
+            tr_in_d = in_tr.duration_sec if in_tr is not None else 0.0
+            _, post_fx_in = map_transition_to_ffmpeg_xfade(in_tr.tr_type) if in_tr is not None else ("fade", None)
+
+            trim_lbl = f"{prefix}_st{i}"
+            lines.append(f"[{prefix}_s{i}]trim=start={seg.t_start:.3f}:end={seg.t_end:.3f},setpts=PTS-STARTPTS[{trim_lbl}]")
+
+            comp_lbl = f"{prefix}_sf{i}"
+            base_summary = _emit_layout_for_stream(
+                in_lbl=trim_lbl,
+                out_lbl=comp_lbl,
+                seg_prefix=f"{prefix}_sh{i}",
+                shot_idx=i,
+                seg_dur_sec=seg_dur,
+                top_crop=seg.top_crop,
+                bot_crop=seg.bottom_crop or layout.bottom_crop,
+                layout=layout,
+                aspect_ratio=config.aspect_ratio,
+                src_w=src_w,
+                src_h=src_h,
+                cw=cw,
+                ch=ch,
+                masks=masks,
+                lines=lines,
+            )
+
+            cur_seg_lbl = comp_lbl
+            if post_fx_in == "zoom_out" and tr_in_d > 0.0:
+                z_lbl = f"{prefix}_sz{i}"
                 lines.append(
-                    f"[{cur_split}]drawbox=x=0:y={y_border}:w={cw}:h={th + 4}:color={b_col}:t=fill,"
-                    f"drawbox=x=0:y={y_main}:w={cw}:h={th}:color={m_col}:t=fill,setsar=1[framed]"
+                    f"[{cur_seg_lbl}]scale=w='if(lt(t,{tr_in_d:.3f}),trunc({cw}*(1+0.18*(1-t/{tr_in_d:.3f}))/2)*2,{cw})':"
+                    f"h='if(lt(t,{tr_in_d:.3f}),trunc({ch}*(1+0.18*(1-t/{tr_in_d:.3f}))/2)*2,{ch})':eval=frame,"
+                    f"crop={cw}:{ch}:(iw-{cw})/2:(ih-{ch})/2,format=yuv420p,setsar=1[{z_lbl}]"
+                )
+                cur_seg_lbl = z_lbl
+
+            out_seg = f"{prefix}_sv{i}"
+            if d_out > 0.0:
+                lines.append(
+                    f"[{cur_seg_lbl}]tpad=stop_mode=clone:stop_duration={d_out:.3f},"
+                    f"trim=0:{seg_dur + d_out:.3f},setpts=PTS-STARTPTS,format=yuv420p,setsar=1[{out_seg}]"
                 )
             else:
-                lines.append(f"[{cur_split}]setsar=1[framed]")
-            summary = f"{mode} ({int(round(layout.split_ratio_top*100))}/{int(round((1-layout.split_ratio_top)*100))})"
+                lines.append(f"[{cur_seg_lbl}]setpts=PTS-STARTPTS,format=yuv420p,setsar=1[{out_seg}]")
+
+        # Partition shots into xfade runs separated by hard-cut boundaries (where resolved_trs[j] is None)
+        run_outputs: list[str] = []
+        idx = 0
+        while idx < n_shots:
+            run_start = idx
+            cur_run_lbl = f"{prefix}_sv{run_start}"
+            acc_dur = round(float(valid_shots[run_start].t_end) - float(valid_shots[run_start].t_start), 3)
+            j = run_start + 1
+            while j < n_shots and resolved_trs[j] is not None:
+                tr = resolved_trs[j]
+                assert tr is not None
+                xf_name, post_fx = map_transition_to_ffmpeg_xfade(tr.tr_type)
+                nxt_lbl = f"{prefix}_xf_{j}"
+                lines.append(
+                    f"[{cur_run_lbl}][{prefix}_sv{j}]xfade=transition={xf_name}:"
+                    f"duration={tr.duration_sec:.3f}:offset={acc_dur:.3f},setsar=1[{nxt_lbl}]"
+                )
+                cur_run_lbl = nxt_lbl
+                acc_dur = round(acc_dur + (float(valid_shots[j].t_end) - float(valid_shots[j].t_start)), 3)
+                if post_fx in ("whip", "blur_swap", "glitch"):
+                    post_fx_windows.append((tr.cut_time_sec, round(tr.cut_time_sec + tr.duration_sec, 3), post_fx))
+                if tr.sfx != "none":
+                    wav_path = resolve_transition_sfx_path(tr.sfx)
+                    if wav_path is not None:
+                        sfx_events.append((round(intro_shift + tr.cut_time_sec, 3), wav_path, tr.sfx_volume))
+                j += 1
+            run_outputs.append(cur_run_lbl)
+            idx = j
+
+        if len(run_outputs) == 1:
+            pre_fx_lbl = run_outputs[0]
         else:
-            mask_path, div_path = render_angled_split_assets(
-                cw, ch, layout.split_ratio_top, layout.divider, work_dir, prefix=prefix
-            )
-            mask_idx = next_idx
-            next_idx += 1
-            extra_inputs.append((mask_path, False))
-            temp_assets.append(mask_path)
+            pre_fx_lbl = f"{prefix}_concat_tr"
+            run_ins = "".join(f"[{r}]" for r in run_outputs)
+            lines.append(f"{run_ins}concat=n={len(run_outputs)}:v=1:a=0,setsar=1[{pre_fx_lbl}]")
 
-            lines.append(
-                f"[{prefix}_top]pad={cw}:{ch}:0:0:black,format=rgba[{prefix}_t_pad]"
-            )
-            lines.append(
-                f"[{mask_idx}:v]format=gray[{prefix}_ang_m]"
-            )
-            lines.append(
-                f"[{prefix}_t_pad][{prefix}_ang_m]alphamerge[{prefix}_t_alpha]"
-            )
-            lines.append(
-                f"[{prefix}_bot]pad={cw}:{ch}:0:{geom.bot_panel_y}:black,format=rgba[{prefix}_b_pad]"
-            )
-            if div_path is not None:
-                div_idx = next_idx
-                next_idx += 1
-                extra_inputs.append((div_path, False))
-                temp_assets.append(div_path)
-                lines.append(
-                    f"[{prefix}_b_pad][{prefix}_t_alpha]overlay=0:0:shortest=0[{prefix}_ang_cmp]"
-                )
-                lines.append(
-                    f"[{prefix}_ang_cmp][{div_idx}:v]overlay=0:0:shortest=0,format=yuv420p,setsar=1[framed]"
-                )
-            else:
-                lines.append(
-                    f"[{prefix}_b_pad][{prefix}_t_alpha]overlay=0:0:shortest=0,format=yuv420p,setsar=1[framed]"
-                )
-            summary = f"{mode} angled ({layout.divider.angle_deg:+.1f}deg)"
+        fx_filters: list[str] = []
+        for t0_fx, t1_fx, fx_kind in post_fx_windows:
+            if fx_kind == "whip":
+                fx_filters.append(f"avgblur=sizeX=20:sizeY=2:enable='between(t,{t0_fx:.3f},{t1_fx:.3f})'")
+            elif fx_kind == "blur_swap":
+                fx_filters.append(f"boxblur=10:2:enable='between(t,{t0_fx:.3f},{t1_fx:.3f})'")
+            elif fx_kind == "glitch":
+                fx_filters.append(f"rgbashift=rh=8:bh=-8:enable='between(t,{t0_fx:.3f},{t1_fx:.3f})'")
+
+        if fx_filters:
+            lines.append(f"[{pre_fx_lbl}]{','.join(fx_filters)},format=yuv420p,setsar=1[framed]")
+        else:
+            lines.append(f"[{pre_fx_lbl}]format=yuv420p,setsar=1[framed]")
+
+        tr_cnt = sum(1 for t in resolved_trs if t is not None)
+        if tr_cnt > 0:
+            summary = f"{base_summary} ({n_shots} angles, {tr_cnt} transisi)"
+        else:
+            summary = f"{base_summary} ({n_shots} angles)"
 
     cur_lbl = "framed"
 
@@ -1878,6 +2161,7 @@ def compile_composer_ffmpeg_plan(
         ass_path=ass_path,
         temp_fonts_dir=temp_fonts_dir,
         temp_asset_paths=temp_assets,
+        sfx_events=sfx_events,
         video_output_label="vout",
         output_width=cw,
         output_height=ch,

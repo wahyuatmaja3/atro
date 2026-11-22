@@ -188,6 +188,35 @@ def apply_initial_style_overrides(
             cfg.layout.top_crop.w = 0.32
             cfg.layout.top_crop.h = 1.0
 
+    tr = cfg.layout.transition
+    if overrides.get("transition_mode") in ("auto", "fixed"):
+        tr.mode = str(overrides["transition_mode"])  # type: ignore[assignment]
+    if overrides.get("transition_type") in (
+        "none",
+        "fade",
+        "crossfade",
+        "dip_black",
+        "slide_left",
+        "slide_right",
+        "slide_up",
+        "slide_down",
+        "zoom_in",
+        "zoom_out",
+        "whip",
+        "blur_swap",
+        "glitch",
+        "wipe",
+    ):
+        tr.type = str(overrides["transition_type"])  # type: ignore[assignment]
+    if overrides.get("transition_duration_sec") is not None:
+        tr.duration_sec = max(0.10, min(0.60, float(overrides["transition_duration_sec"])))
+    if overrides.get("transition_easing") in ("linear", "ease_out", "ease_in_out"):
+        tr.easing = str(overrides["transition_easing"])  # type: ignore[assignment]
+    if overrides.get("transition_sfx") in ("none", "whoosh", "swipe", "pop"):
+        tr.sfx = str(overrides["transition_sfx"])  # type: ignore[assignment]
+    if overrides.get("transition_sfx_volume") is not None:
+        tr.sfx_volume = max(0.0, min(1.0, float(overrides["transition_sfx_volume"])))
+
     return cfg
 
 
@@ -420,6 +449,7 @@ def build_ffmpeg_composer_cut_command(
     extra_video_inputs: list[tuple[Path, bool]],
     intro_tts_path: Optional[Path] = None,
     backsound_path: Optional[Path] = None,
+    transition_sfx_paths: Optional[list[Path]] = None,
     audio_output_label: Optional[str] = "aout",
     video_output_label: str = "vout",
 ) -> list[str]:
@@ -450,6 +480,9 @@ def build_ffmpeg_composer_cut_command(
 
     if backsound_path is not None:
         cmd.extend(["-stream_loop", "-1", "-i", str(backsound_path)])
+
+    for sfx_path in transition_sfx_paths or []:
+        cmd.extend(["-i", str(sfx_path)])
 
     cmd.extend(
         [
@@ -906,9 +939,10 @@ class CutterService:
         )
         main_dur = max(0.5, round(padded_end - padded_start, 3))
 
-        # Auto-detect face & camera-angle crops when requested by layout config
+        # Auto-detect face & camera-angle crops when requested and not yet populated
         if (
             config.layout.framing_tracking_mode == "auto_face"
+            and not config.layout.shot_crops
             and (config.layout.top_crop.auto_detect or config.layout.bottom_crop.auto_detect)
         ):
             detected_segs = await apply_auto_detect_to_layout(
@@ -988,7 +1022,23 @@ class CutterService:
 
             next_audio_idx = 1 + len(plan.extra_video_inputs)
             intro_input_idx = next_audio_idx if has_intro else None
-            bgm_input_idx = next_audio_idx + (1 if has_intro else 0)
+            if has_intro:
+                next_audio_idx += 1
+            bgm_input_idx = next_audio_idx if bgm_track is not None else 1
+            if bgm_track is not None:
+                next_audio_idx += 1
+
+            sfx_paths: list[Path] = []
+            sfx_idx_by_path: dict[Path, int] = {}
+            sfx_chain_events: list[tuple[float, int, float]] = []
+            for ev_t, ev_path, ev_vol in plan.sfx_events:
+                if not ev_path.is_file():
+                    continue
+                if ev_path not in sfx_idx_by_path:
+                    sfx_idx_by_path[ev_path] = next_audio_idx
+                    sfx_paths.append(ev_path)
+                    next_audio_idx += 1
+                sfx_chain_events.append((ev_t, sfx_idx_by_path[ev_path], ev_vol))
 
             audio_lines, audio_label = build_audio_filter_chain(
                 has_source_audio=download.has_audio,
@@ -1001,6 +1051,7 @@ class CutterService:
                 intro_duration_sec=intro_dur if has_intro else 0.0,
                 bgm_input_idx=bgm_input_idx,
                 enable_loudnorm=config.audio.vocal_loudnorm,
+                transition_sfx_events=sfx_chain_events,
             )
 
             filter_script_text = ";\n".join(plan.filter_lines + audio_lines)
@@ -1016,6 +1067,7 @@ class CutterService:
                 extra_video_inputs=plan.extra_video_inputs,
                 intro_tts_path=tts_path if has_intro else None,
                 backsound_path=bgm_track,
+                transition_sfx_paths=sfx_paths,
                 audio_output_label=audio_label,
                 video_output_label=plan.video_output_label,
             )

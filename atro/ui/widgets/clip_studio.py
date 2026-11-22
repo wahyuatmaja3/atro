@@ -72,6 +72,7 @@ from atro.core.schemas import (
 from atro.modules.cutter.backsound import scan_backsound_tracks
 from atro.modules.cutter.composer_renderer import detect_composer_shot_crops_sync
 from atro.modules.cutter.service import apply_initial_style_overrides, apply_style_template_from_config
+from atro.modules.cutter.transitions import TRANSITION_CHOICES, active_transition_window_at
 from atro.ui.widgets.preview_canvas import (
     FrameExtractorCache,
     LivePreviewCanvas9x16,
@@ -710,6 +711,56 @@ class ClipStudioWidget(QWidget):
         split_row.addWidget(self.split_ratio_lbl)
         mf.addRow("Ukuran Atas vs Bawah", split_row)
         vbox.addWidget(mode_grp)
+
+        tr_grp = QGroupBox("Transisi Antar-Kamera (Saat Potongan Pindah Orang)")
+        tf = QFormLayout(tr_grp)
+        tf.setSpacing(8)
+        self.tr_mode_combo = QComboBox()
+        self.tr_mode_combo.addItem("Otomatis (Sesuai Konteks Pembicara)", "auto")
+        self.tr_mode_combo.addItem("Manual (Pilih Jenis Transisi)", "fixed")
+        self.tr_mode_combo.currentIndexChanged.connect(self._on_ui_mutated)
+        tf.addRow("Mode Transisi", self.tr_mode_combo)
+
+        tr_type_row = QHBoxLayout()
+        self.tr_type_combo = QComboBox()
+        for tr_val, tr_lbl in TRANSITION_CHOICES:
+            self.tr_type_combo.addItem(tr_lbl, tr_val)
+        self.tr_type_combo.currentIndexChanged.connect(self._on_ui_mutated)
+        self.tr_dur_spin = QDoubleSpinBox()
+        self.tr_dur_spin.setRange(0.10, 0.60)
+        self.tr_dur_spin.setSingleStep(0.05)
+        self.tr_dur_spin.setDecimals(2)
+        self.tr_dur_spin.setSuffix(" s")
+        self.tr_dur_spin.valueChanged.connect(self._on_ui_mutated)
+        tr_type_row.addWidget(self.tr_type_combo, 1)
+        tr_type_row.addWidget(self.tr_dur_spin)
+        tf.addRow("Efek & Durasi", tr_type_row)
+
+        tr_sfx_row = QHBoxLayout()
+        self.tr_easing_combo = QComboBox()
+        self.tr_easing_combo.addItem("Halus (Ease In-Out)", "ease_in_out")
+        self.tr_easing_combo.addItem("Cepat Awal (Ease Out)", "ease_out")
+        self.tr_easing_combo.addItem("Konstan (Linear)", "linear")
+        self.tr_easing_combo.currentIndexChanged.connect(self._on_ui_mutated)
+        self.tr_sfx_combo = QComboBox()
+        self.tr_sfx_combo.addItem("Tanpa Suara", "none")
+        self.tr_sfx_combo.addItem("Whoosh (Wuss)", "whoosh")
+        self.tr_sfx_combo.addItem("Swipe (Geser)", "swipe")
+        self.tr_sfx_combo.addItem("Pop (Klik)", "pop")
+        self.tr_sfx_combo.currentIndexChanged.connect(self._on_ui_mutated)
+        tr_sfx_row.addWidget(self.tr_easing_combo, 1)
+        tr_sfx_row.addWidget(self.tr_sfx_combo, 1)
+        tf.addRow("Kurva & Suara SFX", tr_sfx_row)
+
+        tr_vol_row = QHBoxLayout()
+        self.tr_sfx_vol_slider = QSlider(Qt.Orientation.Horizontal)
+        self.tr_sfx_vol_slider.setRange(0, 100)
+        self.tr_sfx_vol_lbl = QLabel("35%")
+        self.tr_sfx_vol_slider.valueChanged.connect(self._on_ui_mutated)
+        tr_vol_row.addWidget(self.tr_sfx_vol_slider, 1)
+        tr_vol_row.addWidget(self.tr_sfx_vol_lbl)
+        tf.addRow("Volume SFX Transisi", tr_vol_row)
+        vbox.addWidget(tr_grp)
 
         div_grp = QGroupBox("Garis Pembatas Tengah (Lurus / Miring)")
         df = QFormLayout(div_grp)
@@ -1660,6 +1711,18 @@ class ClipStudioWidget(QWidget):
         self.frame_corner_spin.setValue(cfg.layout.frame_corner_radius_px)
         self.frame_border_w_spin.setValue(cfg.layout.frame_border_width_px)
         self.frame_border_col_btn.set_color_hex(cfg.layout.frame_border_color_hex)
+
+        tr = cfg.layout.transition
+        self.tr_mode_combo.setCurrentIndex(max(0, self.tr_mode_combo.findData(tr.mode)))
+        self.tr_type_combo.setCurrentIndex(max(0, self.tr_type_combo.findData(tr.type)))
+        self.tr_type_combo.setEnabled(tr.mode == "fixed")
+        self.tr_dur_spin.setValue(tr.duration_sec)
+        self.tr_easing_combo.setCurrentIndex(max(0, self.tr_easing_combo.findData(tr.easing)))
+        self.tr_sfx_combo.setCurrentIndex(max(0, self.tr_sfx_combo.findData(tr.sfx)))
+        tr_vol_pct = int(round(tr.sfx_volume * 100))
+        self.tr_sfx_vol_slider.setValue(tr_vol_pct)
+        self.tr_sfx_vol_lbl.setText(f"{tr_vol_pct}%")
+
         self._sync_crop_spins_from_config()
 
         # Subtitles
@@ -1850,6 +1913,17 @@ class ClipStudioWidget(QWidget):
         cfg.layout.frame_corner_radius_px = self.frame_corner_spin.value()
         cfg.layout.frame_border_width_px = self.frame_border_w_spin.value()
         cfg.layout.frame_border_color_hex = self.frame_border_col_btn.color_hex()
+
+        tr = cfg.layout.transition
+        tr.mode = self.tr_mode_combo.currentData() or "auto"
+        self.tr_type_combo.setEnabled(tr.mode == "fixed")
+        tr.type = self.tr_type_combo.currentData() or "fade"
+        tr.duration_sec = round(self.tr_dur_spin.value(), 2)
+        tr.easing = self.tr_easing_combo.currentData() or "ease_in_out"
+        tr.sfx = self.tr_sfx_combo.currentData() or "none"
+        tr_vol_pct = self.tr_sfx_vol_slider.value()
+        tr.sfx_volume = round(tr_vol_pct / 100.0, 2)
+        self.tr_sfx_vol_lbl.setText(f"{tr_vol_pct}%")
 
         # Subtitles
         subs = cfg.subtitles
@@ -2300,6 +2374,17 @@ class ClipStudioWidget(QWidget):
 
         src_ts = p_start + self._rel_time_sec
         frame_bgr = self._frame_cache.get_frame(self._source_path, src_ts)
+        prev_frame_bgr = None
+        if self._config.layout.framing_tracking_mode == "auto_face" and len(self._config.layout.shot_crops) > 1:
+            tr_win = active_transition_window_at(
+                self._config.layout.shot_crops,
+                self._config.layout.transition,
+                self._rel_time_sec,
+            )
+            if tr_win is not None:
+                prev_ts = max(p_start, p_start + tr_win[2].cut_time_sec - 0.04)
+                prev_frame_bgr = self._frame_cache.get_frame(self._source_path, prev_ts)
+
         self.crop_selector.set_state(self._config, frame_bgr, rel_time_sec=self._rel_time_sec)
         self._sync_crop_spins_from_config()
         self.preview_canvas.render_state(
@@ -2309,6 +2394,7 @@ class ClipStudioWidget(QWidget):
             segments=self._transcript_segments,
             clip_start_sec=p_start,
             clip_end_sec=p_end,
+            prev_source_frame_bgr=prev_frame_bgr,
         )
 
     def _on_export_clicked(self) -> None:

@@ -60,6 +60,7 @@ def build_audio_filter_chain(
     intro_duration_sec: float = 0.0,
     bgm_input_idx: int = 1,
     enable_loudnorm: bool = False,
+    transition_sfx_events: Optional[list[tuple[float, int, float]]] = None,
 ) -> tuple[list[str], Optional[str]]:
     """Build FFmpeg filter_complex audio lines and return `(lines, output_label)`."""
     dur_main = max(0.5, round(float(duration_sec), 3))
@@ -67,12 +68,19 @@ def build_audio_filter_chain(
     has_intro = intro_tts_input_idx is not None and dur_intro > 0.0
     total_dur = round(dur_main + (dur_intro if has_intro else 0.0), 3)
     vol = max(0.0, min(1.0, float(bgm_volume)))
+    valid_sfx = [
+        (max(0.0, round(float(t), 3)), int(idx), max(0.0, min(1.0, float(sv))))
+        for t, idx, sv in (transition_sfx_events or [])
+        if 0.0 <= float(t) < max(0.05, total_dur - 0.05) and float(sv) > 0.005
+    ]
+    has_sfx = bool(valid_sfx)
 
-    if not has_source_audio and not has_backsound and not has_intro:
+    if not has_source_audio and not has_backsound and not has_intro and not has_sfx:
         return [], None
 
     lines: list[str] = []
     has_speech_stream = has_source_audio or has_intro
+    final_base_lbl = "base_aout" if has_sfx else "aout"
 
     if has_intro:
         lines.append(
@@ -93,10 +101,8 @@ def build_audio_filter_chain(
         else:
             lines.append(f"anullsrc=channel_layout=stereo:sample_rate=48000:d={dur_main:.3f}[a_main]")
 
-        target_lbl = "voice_clean" if has_backsound else "aout"
+        target_lbl = "voice_clean" if has_backsound else final_base_lbl
         lines.append(f"[a_intro][a_main]concat=n=2:v=0:a=1[{target_lbl}]")
-        if not has_backsound:
-            return lines, "aout"
     elif has_source_audio:
         voice_parts = ["aresample=async=1:first_pts=0"]
         if enable_voice_polish:
@@ -107,9 +113,9 @@ def build_audio_filter_chain(
         voice_chain = ",".join(voice_parts)
 
         if not has_backsound:
-            lines.append(f"[0:a]{voice_chain}[aout]")
-            return lines, "aout"
-        lines.append(f"[0:a]{voice_chain}[voice_clean]")
+            lines.append(f"[0:a]{voice_chain}[{final_base_lbl}]")
+        else:
+            lines.append(f"[0:a]{voice_chain}[voice_clean]")
 
     if has_backsound:
         fade_in = round(min(1.2, total_dur * 0.25), 3)
@@ -130,15 +136,52 @@ def build_audio_filter_chain(
                     "[bgm_base][voice_sc]sidechaincompress=threshold=0.03:ratio=4:attack=25:release=350[bgm_duck]"
                 )
                 lines.append(
-                    "[voice_main][bgm_duck]amix=inputs=2:duration=first:dropout_transition=2:normalize=0,"
-                    "alimiter=limit=0.95[aout]"
+                    f"[voice_main][bgm_duck]amix=inputs=2:duration=first:dropout_transition=2:normalize=0,"
+                    f"alimiter=limit=0.95[{final_base_lbl}]"
                 )
             else:
                 lines.append(
-                    "[voice_clean][bgm_base]amix=inputs=2:duration=first:dropout_transition=2:normalize=0,"
-                    "alimiter=limit=0.95[aout]"
+                    f"[voice_clean][bgm_base]amix=inputs=2:duration=first:dropout_transition=2:normalize=0,"
+                    f"alimiter=limit=0.95[{final_base_lbl}]"
                 )
         else:
-            lines.append("[bgm_base]alimiter=limit=0.95[aout]")
+            lines.append(f"[bgm_base]alimiter=limit=0.95[{final_base_lbl}]")
+    elif not has_speech_stream and has_sfx:
+        lines.append(f"anullsrc=channel_layout=stereo:sample_rate=48000:d={total_dur:.3f}[{final_base_lbl}]")
+
+    if has_sfx:
+        # Group events by input index so shared WAV inputs get asplit cleanly
+        counts_by_idx: dict[int, int] = {}
+        for _, in_idx, _ in valid_sfx:
+            counts_by_idx[in_idx] = counts_by_idx.get(in_idx, 0) + 1
+        split_cursor: dict[int, int] = {}
+        for in_idx, cnt in counts_by_idx.items():
+            if cnt > 1:
+                outs = "".join(f"[sfx_in_{in_idx}_{j}]" for j in range(cnt))
+                lines.append(f"[{in_idx}:a]asplit={cnt}{outs}")
+                split_cursor[in_idx] = 0
+
+        sfx_lbls: list[str] = []
+        for k, (ev_t, in_idx, sfx_vol) in enumerate(valid_sfx):
+            if in_idx in split_cursor:
+                slot = split_cursor[in_idx]
+                split_cursor[in_idx] = slot + 1
+                in_lbl = f"sfx_in_{in_idx}_{slot}"
+            else:
+                in_lbl = f"{in_idx}:a"
+            delay_ms = max(0, int(round(ev_t * 1000.0)))
+            out_sfx = f"sfx_ev_{k}"
+            lines.append(
+                f"[{in_lbl}]aformat=sample_rates=48000:channel_layouts=stereo,"
+                f"volume={sfx_vol:.3f},adelay={delay_ms}|{delay_ms},"
+                f"apad=whole_dur={total_dur:.3f},atrim=0:{total_dur:.3f},asetpts=PTS-STARTPTS[{out_sfx}]"
+            )
+            sfx_lbls.append(f"[{out_sfx}]")
+
+        mix_inputs = f"[{final_base_lbl}]" + "".join(sfx_lbls)
+        lines.append(
+            f"{mix_inputs}amix=inputs={1 + len(sfx_lbls)}:duration=first:dropout_transition=0:normalize=0,"
+            f"alimiter=limit=0.95[aout]"
+        )
 
     return lines, "aout"

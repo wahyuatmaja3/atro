@@ -1267,5 +1267,298 @@ async def test_batch_apply_style_and_batch_render_multiple_clips(tmp_path: Path)
     assert len(rr.rendered_clips) == 3
 
 
+def test_transition_planner_and_qimage_preview_blending() -> None:
+    ensure_qt_gui_app()
+    from atro.core.composer_schema import CropBoxConfig, ShotCropSegment, TransitionConfig
+    from atro.modules.cutter.transitions import (
+        MAX_XFADE_NODES,
+        active_transition_window_at,
+        blend_transition_qimages,
+        resolve_shot_transitions,
+    )
+
+    shots = [
+        ShotCropSegment(t_start=0.0, t_end=3.0, top_crop=CropBoxConfig(x=0.05, y=0.0, w=0.35, h=1.0), speaker_id="SPK_A", reason="speaker_match"),
+        ShotCropSegment(t_start=3.0, t_end=5.5, top_crop=CropBoxConfig(x=0.55, y=0.0, w=0.35, h=1.0), speaker_id="SPK_B", reason="reaction"),
+        ShotCropSegment(t_start=5.5, t_end=5.9, top_crop=CropBoxConfig(x=0.20, y=0.0, w=0.35, h=1.0), speaker_id="SPK_A", reason="fallback"),
+        ShotCropSegment(t_start=5.9, t_end=9.0, top_crop=CropBoxConfig(x=0.30, y=0.0, w=0.45, h=1.0), reason="group"),
+    ]
+    res = resolve_shot_transitions(shots, TransitionConfig(mode="auto", duration_sec=0.30, sfx="whoosh"))
+    assert res[0] is None
+    assert res[1] is not None and res[1].tr_type == "zoom_in" and res[1].sfx == "whoosh"
+    # Shot 2 is 0.40s (<0.50s), so both boundaries touching shot 2 are skipped safely
+    assert res[2] is None
+    assert res[3] is None
+
+    # Cap at MAX_XFADE_NODES
+    many_shots = [
+        ShotCropSegment(t_start=i * 1.0, t_end=(i + 1) * 1.0, top_crop=CropBoxConfig(x=0.1, y=0.0, w=0.35, h=1.0))
+        for i in range(30)
+    ]
+    res_many = resolve_shot_transitions(many_shots, TransitionConfig(mode="fixed", type="slide_left", duration_sec=0.20))
+    assert sum(1 for t in res_many if t is not None) == MAX_XFADE_NODES
+
+    # Preview transition window & QImage blend verification
+    frame_a = np.full((720, 1280, 3), (20, 40, 220), dtype=np.uint8)
+    frame_b = np.full((720, 1280, 3), (220, 80, 20), dtype=np.uint8)
+    cfg = build_preset_config("podcast", clip_title="Transisi Preview", start_time=0.0, end_time=6.0)
+    cfg.timing.padding_sec = 0.0
+    cfg.layout.framing_tracking_mode = "auto_face"
+    cfg.layout.shot_crops = [
+        ShotCropSegment(t_start=0.0, t_end=3.0, top_crop=CropBoxConfig(x=0.0, y=0.0, w=0.35, h=1.0)),
+        ShotCropSegment(t_start=3.0, t_end=6.0, top_crop=CropBoxConfig(x=0.6, y=0.0, w=0.35, h=1.0)),
+    ]
+    cfg.layout.transition = TransitionConfig(mode="fixed", type="slide_left", duration_sec=0.40, sfx="none")
+    win = active_transition_window_at(cfg.layout.shot_crops, cfg.layout.transition, 3.20)
+    assert win is not None
+    assert win[3] == pytest.approx(0.5, abs=0.02)
+
+    rendered = render_preview_frame(
+        source_frame_bgr=frame_b,
+        prev_source_frame_bgr=frame_a,
+        config=cfg,
+        rel_time_sec=3.20,
+        segments=[],
+        clip_start_sec=0.0,
+        clip_end_sec=6.0,
+    )
+    assert rendered.width() == 1080 and rendered.height() == 1920
+    # Left half reflects outgoing red-ish frame_a, right half reflects incoming blue-ish frame_b
+    px_left = rendered.pixelColor(200, 960)
+    px_right = rendered.pixelColor(880, 960)
+    assert px_left.red() > px_right.red()
+    assert px_right.blue() > px_left.blue()
+
+    for tr_type in (
+        "fade",
+        "crossfade",
+        "dip_black",
+        "slide_left",
+        "slide_right",
+        "slide_up",
+        "slide_down",
+        "zoom_in",
+        "zoom_out",
+        "whip",
+        "blur_swap",
+        "glitch",
+        "wipe",
+    ):
+        blended = blend_transition_qimages(rendered, rendered, 0.5, tr_type)  # type: ignore[arg-type]
+        assert blended.width() == 1080 and blended.height() == 1920
+
+    # Verify ClipStudioWidget transition controls sync & Step 2 overrides
+    from atro.ui.widgets.clip_studio import ClipStudioWidget
+
+    studio = ClipStudioWidget(settings_provider=lambda: AppSettings())
+    try:
+        studio._load_config_into_ui(cfg)
+        assert studio.tr_mode_combo.currentData() == "fixed"
+        assert studio.tr_type_combo.isEnabled() is True
+        assert studio.tr_type_combo.currentData() == "slide_left"
+        studio.tr_mode_combo.setCurrentIndex(studio.tr_mode_combo.findData("auto"))
+        assert studio.tr_type_combo.isEnabled() is False
+        studio.tr_sfx_combo.setCurrentIndex(studio.tr_sfx_combo.findData("whoosh"))
+        studio.tr_sfx_vol_slider.setValue(42)
+        updated_cfg = studio.current_config()
+        assert updated_cfg.layout.transition.mode == "auto"
+        assert updated_cfg.layout.transition.sfx == "whoosh"
+        assert updated_cfg.layout.transition.sfx_volume == pytest.approx(0.42, abs=0.02)
+    finally:
+        studio.close()
+        studio.deleteLater()
+
+    ovr_cfg = build_preset_config("podcast", clip_title="Override Test", start_time=0.0, end_time=10.0)
+    apply_initial_style_overrides(
+        ovr_cfg,
+        {
+            "transition_mode": "fixed",
+            "transition_type": "whip",
+            "transition_duration_sec": 0.35,
+            "transition_sfx": "swipe",
+            "transition_sfx_volume": 0.65,
+        },
+    )
+    assert ovr_cfg.layout.transition.mode == "fixed"
+    assert ovr_cfg.layout.transition.type == "whip"
+    assert ovr_cfg.layout.transition.duration_sec == pytest.approx(0.35, abs=0.01)
+    assert ovr_cfg.layout.transition.sfx == "swipe"
+    assert ovr_cfg.layout.transition.sfx_volume == pytest.approx(0.65, abs=0.01)
+
+
+async def test_composer_real_ffmpeg_multi_shot_transitions_and_sfx(tmp_path: Path) -> None:
+    settings = AppSettings(
+        workspace_dir=tmp_path / "ws",
+        bin_dir=tmp_path / "bin",
+        backsound_dir=tmp_path / "bgm",
+    )
+    preflight = check_startup_dependencies(settings)
+    if not (preflight.ffmpeg.available and preflight.ffprobe.available):
+        pytest.skip("FFmpeg / FFprobe tidak tersedia")
+
+    ffmpeg_path = preflight.ffmpeg.path
+    ffprobe_path = preflight.ffprobe.path
+
+    from atro.core.composer_schema import CropBoxConfig, ShotCropSegment, TransitionConfig
+    from atro.modules.cutter.sfx import ensure_builtin_sfx_assets
+
+    ensure_builtin_sfx_assets()
+
+    src_mp4 = tmp_path / "tri_cam_src.mp4"
+    # Left=Red, Middle=Green, Right=Blue panels + 440Hz tone so shot swaps & sync are measurable
+    create_cmd = [
+        ffmpeg_path,
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=#C82828:s=426x720:d=6:r=24",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=#22AA44:s=428x720:d=6:r=24",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=#2266EE:s=426x720:d=6:r=24",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=440:duration=6:sample_rate=48000",
+        "-filter_complex",
+        "[0:v][1:v][2:v]hstack=inputs=3[v]",
+        "-map",
+        "[v]",
+        "-map",
+        "3:a",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        str(src_mp4),
+    ]
+    res = subprocess.run(create_cmd, capture_output=True, text=True, check=False)
+    assert res.returncode == 0, res.stderr
+
+    job_dir = tmp_path / "job"
+    job_dir.mkdir(parents=True, exist_ok=True)
+    dl = DownloadResult(
+        job_id="tr_job",
+        url="https://youtu.be/tr_job",
+        video_id="tr_job",
+        title="Test Transisi",
+        channel="ATROTester",
+        duration_sec=6.0,
+        width=1280,
+        height=720,
+        fps=24.0,
+        has_audio=True,
+        source_video_path=str(src_mp4),
+    )
+    shots = [
+        ShotCropSegment(
+            t_start=0.0,
+            t_end=2.0,
+            top_crop=CropBoxConfig(x=0.02, y=0.0, w=0.30, h=1.0),
+            bottom_crop=CropBoxConfig(x=0.0, y=0.0, w=1.0, h=1.0),
+            speaker_id="SPK_1",
+        ),
+        ShotCropSegment(
+            t_start=2.0,
+            t_end=4.0,
+            top_crop=CropBoxConfig(x=0.35, y=0.0, w=0.30, h=1.0),
+            bottom_crop=CropBoxConfig(x=0.0, y=0.0, w=1.0, h=1.0),
+            speaker_id="SPK_2",
+            transition_in=TransitionConfig(mode="fixed", type="slide_left", duration_sec=0.30, sfx="whoosh", sfx_volume=0.4),
+        ),
+        ShotCropSegment(
+            t_start=4.0,
+            t_end=6.0,
+            top_crop=CropBoxConfig(x=0.68, y=0.0, w=0.30, h=1.0),
+            bottom_crop=CropBoxConfig(x=0.0, y=0.0, w=1.0, h=1.0),
+            speaker_id="SPK_3",
+            transition_in=TransitionConfig(mode="fixed", type="whip", duration_sec=0.25, sfx="swipe", sfx_volume=0.35),
+        ),
+    ]
+
+    # Case A: single_focus + slide_left + whip + multiple transition SFX
+    cfg_sf = build_preset_config("podcast", clip_title="Klip Transisi SF", start_time=0.0, end_time=6.0, clip_index=1)
+    cfg_sf.canvas_width, cfg_sf.canvas_height = 540, 960
+    cfg_sf.timing.padding_sec = 0.0
+    cfg_sf.timing.opening_tts_enabled = False
+    cfg_sf.subtitles.enabled = False
+    cfg_sf.overlays.hook_banner.enabled = False
+    cfg_sf.overlays.watermark.enabled = False
+    cfg_sf.overlays.climax_effects.progress_bar_enabled = False
+    cfg_sf.layout.framing_tracking_mode = "auto_face"
+    cfg_sf.layout.shot_crops = [s.model_copy(deep=True) for s in shots]
+
+    out_sf = await CutterService().render_clip_with_composer_config(
+        job_id="tr_job",
+        download=dl,
+        config=cfg_sf,
+        job_dir=job_dir,
+        preflight=preflight,
+        logger=JobLogger("tr_job", job_dir / "job.log"),
+        update_render_result=False,
+    )
+    out_sf_path = Path(out_sf.output_path)
+    assert out_sf_path.is_file() and out_sf_path.stat().st_size > 0
+    probe_sf = subprocess.run(
+        [ffprobe_path, "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(out_sf_path)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert abs(float(probe_sf.stdout.strip()) - 6.0) <= 0.12
+
+    # Case B: blurred_frame multi-shot with rounded mask + zoom_out + glitch
+    shots_bf = [s.model_copy(deep=True) for s in shots]
+    shots_bf[1].transition_in = TransitionConfig(mode="fixed", type="zoom_out", duration_sec=0.30, sfx="pop")
+    shots_bf[2].transition_in = TransitionConfig(mode="fixed", type="glitch", duration_sec=0.25, sfx="none")
+    cfg_bf = build_preset_config("podcast", clip_title="Klip Transisi BF", start_time=0.0, end_time=6.0, clip_index=2)
+    cfg_bf.canvas_width, cfg_bf.canvas_height = 540, 960
+    cfg_bf.timing.padding_sec = 0.0
+    cfg_bf.timing.opening_tts_enabled = False
+    cfg_bf.subtitles.enabled = False
+    cfg_bf.overlays.hook_banner.enabled = False
+    cfg_bf.overlays.watermark.enabled = False
+    cfg_bf.overlays.climax_effects.progress_bar_enabled = False
+    cfg_bf.layout.mode = "blurred_frame"
+    cfg_bf.layout.frame_corner_radius_px = 28
+    cfg_bf.layout.frame_border_width_px = 6
+    cfg_bf.layout.framing_tracking_mode = "auto_face"
+    cfg_bf.layout.shot_crops = shots_bf
+
+    out_bf = await CutterService().render_clip_with_composer_config(
+        job_id="tr_job",
+        download=dl,
+        config=cfg_bf,
+        job_dir=job_dir,
+        preflight=preflight,
+        logger=JobLogger("tr_job", job_dir / "job.log"),
+        update_render_result=False,
+    )
+    out_bf_path = Path(out_bf.output_path)
+    assert out_bf_path.is_file() and out_bf_path.stat().st_size > 0
+    probe_bf = subprocess.run(
+        [ffprobe_path, "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(out_bf_path)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert abs(float(probe_bf.stdout.strip()) - 6.0) <= 0.12
+    assert "transisi" in out_sf.framing_summary.lower()
+    assert "transisi" in out_bf.framing_summary.lower()
+
+
+
 
 
