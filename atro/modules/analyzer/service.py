@@ -22,7 +22,13 @@ from atro.core.schemas import (
 from atro.core.subprocess_utils import JobCancelledError
 from atro.modules.analyzer.openai_compat import call_openai_compatible_sync
 from atro.modules.analyzer.prompts import build_system_instruction, build_user_prompt
-from atro.modules.analyzer.validator import build_heuristic_focus_hints, validate_and_sanitize_clips
+from atro.modules.analyzer.validator import (
+    build_heuristic_focus_hints,
+    build_heuristic_sfx_cues,
+    sanitize_topic_outline,
+    validate_and_sanitize_clips,
+)
+from atro.modules.cutter.sfx import list_all_sfx_names
 from atro.modules.transcriber.service import format_transcript_lines
 
 
@@ -86,8 +92,13 @@ class AnalyzerService:
         if not transcript.segments:
             raise RuntimeError("Transkrip kosong; tidak ada konten untuk dianalisis.")
 
+        available_sfx = list_all_sfx_names()
         formatted_transcript = format_transcript_lines(transcript)
-        system_instruction = build_system_instruction(request, download.duration_sec)
+        system_instruction = build_system_instruction(
+            request,
+            download.duration_sec,
+            available_sfx=available_sfx,
+        )
         user_prompt = build_user_prompt(download, formatted_transcript)
 
         if settings.llm_provider == "openai_compatible":
@@ -158,6 +169,7 @@ class AnalyzerService:
             raw_selection,
             video_duration_sec=download.duration_sec,
             request=request,
+            available_sfx=available_sfx,
         )
         for clip in clips:
             if not clip.focus_hints:
@@ -166,14 +178,29 @@ class AnalyzerService:
                     clip.start_time,
                     clip.end_time,
                 )
+            if not clip.sfx_cues and available_sfx:
+                clip.sfx_cues = build_heuristic_sfx_cues(
+                    transcript.segments,
+                    clip.start_time,
+                    clip.end_time,
+                    available_sfx=available_sfx,
+                )
 
         for warn in warnings:
             logger.warning("analyzer", warn)
 
+        topic_outline = sanitize_topic_outline(
+            raw_selection,
+            clips=clips,
+            video_duration_sec=download.duration_sec,
+        )
+
         result = AnalysisResult(
             job_id=job_id,
             model=result_model_label,
+            platform_target=request.platform_target,
             clips=clips,
+            topic_outline=topic_outline,
             validation_warnings=warnings,
         )
 

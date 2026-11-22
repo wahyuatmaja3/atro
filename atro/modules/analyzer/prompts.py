@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from typing import Optional
+
 from atro.core.schemas import DownloadResult, JobRequest
 
 
-def build_system_instruction(request: JobRequest, video_duration_sec: float) -> str:
+def build_system_instruction(
+    request: JobRequest,
+    video_duration_sec: float,
+    available_sfx: Optional[Sequence[str]] = None,
+) -> str:
     """Build strict editorial system instructions tailored to edit_format and casual titles."""
     if request.edit_format == "game":
         format_guidance = (
@@ -22,8 +29,39 @@ def build_system_instruction(request: JobRequest, video_duration_sec: float) -> 
             "'Pas Ditanya Soal Ini Langsung Kicep', 'Jujur Banget Sih Pengakuannya Kali Ini'.\n"
         )
 
+    plat_label = (
+        "TikTok (ritme storytelling kuat, pacing dinamis 20-120 detik)"
+        if getattr(request, "platform_target", "youtube_shorts") == "tiktok"
+        else "YouTube Shorts (hook super tajam di 1.5 detik pertama, padat <= 60 detik)"
+    )
+    excluded = getattr(request, "excluded_time_spans", None) or []
+    excluded_note = ""
+    if excluded:
+        spans_str = ", ".join(
+            f"[{s[0]:.1f}s - {s[1]:.1f}s]"
+            for s in excluded
+            if isinstance(s, (list, tuple)) and len(s) >= 2
+        )
+        if spans_str:
+            excluded_note = (
+                f"\n7. KLIP ALTERNATIF: HINDARI rentang waktu yang sudah pernah diklip sebelumnya: {spans_str}. "
+                "Cari sudut pandang atau momen menarik lain di luar rentang tersebut.\n"
+            )
+
+    sfx_list = [s.strip() for s in (available_sfx or []) if s and s.strip()]
+    sfx_guidance = ""
+    if sfx_list:
+        sfx_preview = ", ".join(sfx_list[:75])
+        sfx_guidance = (
+            "- sfx_cues (opsional): Pilih 1-4 momen punchline, kaget, canggung, tertawa, atau penekanan cerita di dalam klip "
+            "untuk dipicu efek suara meme (t_sec dalam detik absolut transkrip, sfx_name, reason). "
+            "Berikan jarak minimal 2.5 detik antar SFX dan HANYA gunakan nama persis dari daftar SFX tersedia berikut: "
+            f"[{sfx_preview}].\n"
+        )
+
     return (
         "Anda adalah editor video short-form profesional yang mengkurasi momen terbaik dari transkrip video.\n"
+        f"Target Platform Utama: {plat_label}.\n"
         f"Tugas Anda adalah memilih tepat {request.clip_count} klip terbaik yang berdiri sendiri (standalone) "
         "dari transkrip ber-timestamp berikut.\n\n"
         f"{format_guidance}\n"
@@ -33,7 +71,7 @@ def build_system_instruction(request: JobRequest, video_duration_sec: float) -> 
         "3. Tidak terpotong di tengah kalimat: start_time dan end_time HARUS berada pada batas awal dan akhir segmen/kalimat yang utuh.\n"
         f"4. Target durasi: usahakan setiap klip berdurasi antara {request.min_duration_sec} hingga {request.max_duration_sec} detik.\n"
         "5. Tidak tumpang tindih (non-overlapping): rentang waktu antar klip tidak boleh saling bertumpukan.\n"
-        f"6. Batas waktu valid: start_time >= 0 dan end_time <= {video_duration_sec:.2f} detik.\n\n"
+        f"6. Batas waktu valid: start_time >= 0 dan end_time <= {video_duration_sec:.2f} detik.{excluded_note}\n\n"
         "Aturan Gaya Judul & Output JSON:\n"
         "- title: HARUS pendek (4-8 kata), bergaya kasual, santai, natural seperti bahasa sehari-hari di TikTok/Shorts Indonesia, "
         "dan enak dibacakan oleh pengisi suara di opening. HINDARI judul kaku/formal/akademis (seperti 'Analisis...', 'Pembahasan Mengenai...', 'Fenomena...').\n"
@@ -41,6 +79,8 @@ def build_system_instruction(request: JobRequest, video_duration_sec: float) -> 
         "- virality_score: Integer 1 sampai 10 (10 = paling berpotensi viral).\n"
         "- reason: Penjelasan singkat mengapa hook 3 detik pertama, klimaks, dan nilai retensinya kuat.\n"
         "- focus_hints (opsional): Daftar segmen titik fokus perbincangan (t_start, t_end, role: 'speaker'|'reaction'|'group', target_hint, reason) bila ada momen penting menyorot reaksi atau semua peserta.\n"
+        f"{sfx_guidance}"
+        "- topic_outline (opsional): Daftar topik pembahasan utama video (topic, start_time, end_time, summary).\n"
         "Gunakan bahasa yang sama dengan bahasa utama video untuk title dan reason."
     )
 
