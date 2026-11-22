@@ -24,6 +24,7 @@ class FaceBox:
     w: float
     h: float
     conf: float = 1.0
+    activity: float = 0.0
 
     @property
     def cx(self) -> float:
@@ -108,8 +109,7 @@ def classify_shot_layout(
     if not observations:
         return "center_crop", [(0.5, 0.4)], (0.0, 0.0, 1.0, 1.0)
 
-    # Cluster faces by horizontal center across frames
-    # Structure: [sum_cx, sum_cy, sum_x1, sum_y1, sum_x2, sum_y2, count, frame_indices_set]
+    # Cluster faces by horizontal center across frames and aggregate speaking activity
     clusters: list[dict[str, Any]] = []
     for frame_idx, frame_faces in enumerate(observations):
         used_clusters: set[int] = set()
@@ -125,6 +125,8 @@ def classify_shot_layout(
                     best_dist = dist
                     best_idx = c_idx
 
+            act_val = max(0.0, float(getattr(box, "activity", 0.0)))
+            area_val = box.w * box.h
             if best_idx >= 0:
                 cl = clusters[best_idx]
                 cl["sum_cx"] += box.cx
@@ -135,6 +137,12 @@ def classify_shot_layout(
                 cl["sum_y2"] += box.y2
                 cl["count"] += 1
                 cl["frames"].add(frame_idx)
+                cl["sum_act"] += act_val
+                if act_val > 0.0:
+                    cl["act_hits"] += 1
+                if act_val >= 1.8:
+                    cl["active_frames"] += 1
+                cl["sum_area"] += area_val
                 used_clusters.add(best_idx)
             else:
                 clusters.append(
@@ -147,6 +155,10 @@ def classify_shot_layout(
                         "sum_y2": box.y2,
                         "count": 1,
                         "frames": {frame_idx},
+                        "sum_act": act_val,
+                        "act_hits": 1 if act_val > 0.0 else 0,
+                        "active_frames": 1 if act_val >= 1.8 else 0,
+                        "sum_area": area_val,
                     }
                 )
                 used_clusters.add(len(clusters) - 1)
@@ -159,8 +171,23 @@ def classify_shot_layout(
     if not persistent:
         persistent = [max(clusters, key=lambda c: len(c["frames"]))]
 
-    # Sort left to right
-    persistent.sort(key=lambda c: c["sum_cx"] / c["count"])
+    has_activity = any(cl["sum_act"] > 0.05 for cl in persistent)
+    if has_activity:
+        def _speaker_rank(cl: dict[str, Any]) -> float:
+            cnt = max(1, cl["count"])
+            mean_act = cl["sum_act"] / max(1, cl["act_hits"])
+            active_ratio = cl["active_frames"] / cnt
+            presence = len(cl["frames"]) / max(1, len(observations))
+            mean_area = cl["sum_area"] / cnt
+            return (
+                (mean_act * (0.70 + 0.30 * active_ratio))
+                * (0.65 + 0.35 * presence)
+                * (1.0 + 1.5 * min(0.15, mean_area))
+            )
+
+        persistent.sort(key=_speaker_rank, reverse=True)
+    else:
+        persistent.sort(key=lambda c: c["sum_cx"] / c["count"])
 
     centers: list[tuple[float, float]] = []
     min_x1, min_y1 = 1.0, 1.0
@@ -186,9 +213,7 @@ def classify_shot_layout(
     outer_span = max(0.0, bbox[2] - bbox[0])
 
     if len(centers) == 1 or outer_span <= crop_w_frac * 0.88:
-        mid_cx = sum(c[0] for c in centers) / len(centers)
-        mid_cy = sum(c[1] for c in centers) / len(centers)
-        return "single_focus", [(mid_cx, mid_cy)], bbox
+        return "single_focus", [centers[0]], bbox
 
     if len(centers) == 2 and abs(centers[1][0] - centers[0][0]) > 0.25:
         return "split_screen", centers, bbox
@@ -472,8 +497,147 @@ def _detect_faces_in_frame(
     return boxes
 
 
+def _measure_face_speaking_activity(
+    gray_cur: Any,
+    gray_prev: Any,
+    box: FaceBox,
+    prev_boxes: list[FaceBox],
+) -> float:
+    """Measure non-rigid lower-face / mouth articulation relative to head motion."""
+    import cv2
+    import numpy as np
+
+    if gray_cur is None or gray_prev is None or not prev_boxes:
+        return 0.0
+
+    matched: Optional[FaceBox] = None
+    best_dist = 1e9
+    for cand in prev_boxes:
+        dx = abs(box.cx - cand.cx)
+        dy = abs(box.cy - cand.cy)
+        if dx < 0.08 and dy < 0.08:
+            d = (dx * dx) + (dy * dy)
+            if d < best_dist:
+                best_dist = d
+                matched = cand
+    if matched is None:
+        return 0.0
+
+    sh, sw = gray_cur.shape[:2]
+
+    def _crop_norm_patch(img: Any, fb: FaceBox, y0_frac: float, y1_frac: float) -> Any:
+        x1 = max(0, min(sw - 2, int(round((fb.x + fb.w * 0.20) * sw))))
+        x2 = max(x1 + 2, min(sw, int(round((fb.x + fb.w * 0.80) * sw))))
+        y1 = max(0, min(sh - 2, int(round((fb.y + fb.h * y0_frac) * sh))))
+        y2 = max(y1 + 2, min(sh, int(round((fb.y + fb.h * y1_frac) * sh))))
+        patch = cv2.resize(img[y1:y2, x1:x2], (20, 14), interpolation=cv2.INTER_AREA).astype(np.float32)
+        return patch - float(np.mean(patch))
+
+    m_cur = _crop_norm_patch(gray_cur, box, 0.52, 0.96)
+    m_prev = _crop_norm_patch(gray_prev, matched, 0.52, 0.96)
+    u_cur = _crop_norm_patch(gray_cur, box, 0.12, 0.48)
+    u_prev = _crop_norm_patch(gray_prev, matched, 0.12, 0.48)
+
+    m_diff = float(np.mean(np.abs(m_cur - m_prev)))
+    u_diff = float(np.mean(np.abs(u_cur - u_prev)))
+    act = max(0.0, m_diff - 0.55 * u_diff) + (0.35 * m_diff)
+    return min(15.0, act)
+
+
+def _split_group_on_speaker_turns(
+    grp: list[tuple[float, list[FaceBox]]],
+) -> list[list[tuple[float, list[FaceBox]]]]:
+    """Split a long fixed multi-person camera shot when the active speaker switches turns."""
+    if len(grp) < 24 or (grp[-1][0] - grp[0][0]) < 2.6:
+        return [grp]
+
+    clusters: list[dict[str, Any]] = []
+    for f_idx, (_, frame_faces) in enumerate(grp):
+        for box in frame_faces:
+            best_idx = -1
+            best_dist = 0.14
+            for c_idx, cl in enumerate(clusters):
+                dist = abs(box.cx - (cl["sum_cx"] / cl["cnt"]))
+                if dist < best_dist:
+                    best_dist = dist
+                    best_idx = c_idx
+            if best_idx >= 0:
+                cl = clusters[best_idx]
+                cl["sum_cx"] += box.cx
+                cl["cnt"] += 1
+                cl["frames"].add(f_idx)
+            else:
+                clusters.append({"sum_cx": box.cx, "cnt": 1, "frames": {f_idx}})
+
+    min_hits = max(4, math.ceil(len(grp) * 0.25))
+    persistent = [cl for cl in clusters if len(cl["frames"]) >= min_hits]
+    if len(persistent) < 2:
+        return [grp]
+
+    pers_cxs = [cl["sum_cx"] / cl["cnt"] for cl in persistent]
+    k = len(pers_cxs)
+    n = len(grp)
+    act_matrix = [[0.0] * n for _ in range(k)]
+    for i, (_, frame_faces) in enumerate(grp):
+        for box in frame_faces:
+            best_c = min(range(k), key=lambda ci: abs(box.cx - pers_cxs[ci]))
+            if abs(box.cx - pers_cxs[best_c]) < 0.14:
+                act_matrix[best_c][i] = max(act_matrix[best_c][i], float(box.activity))
+
+    # Rolling 1.1s dominance per sample
+    dom: list[Optional[int]] = [None] * n
+    times = [item[0] for item in grp]
+    for i in range(n):
+        ti = times[i]
+        lo = i
+        while lo > 0 and (ti - times[lo - 1]) <= 0.55:
+            lo -= 1
+        hi = i
+        while hi + 1 < n and (times[hi + 1] - ti) <= 0.55:
+            hi += 1
+        scores = [sum(act_matrix[c][lo : hi + 1]) / max(1, hi - lo + 1) for c in range(k)]
+        ranked = sorted(range(k), key=lambda c: scores[c], reverse=True)
+        best_c = ranked[0]
+        second_score = scores[ranked[1]] if len(ranked) > 1 else 0.0
+        if scores[best_c] >= 2.2 and scores[best_c] >= second_score * 1.25:
+            dom[i] = best_c
+
+    # Collect contiguous dominant runs lasting >= 1.1s
+    turns: list[tuple[int, int]] = []  # (start_idx, owner_cluster)
+    i = 0
+    while i < n:
+        c = dom[i]
+        if c is None:
+            i += 1
+            continue
+        j = i
+        while j + 1 < n and dom[j + 1] == c:
+            j += 1
+        if (times[j] - times[i]) >= 1.1:
+            if not turns or turns[-1][1] != c:
+                turns.append((i, c))
+        i = j + 1
+
+    if len(turns) <= 1:
+        return [grp]
+
+    split_indices = [0]
+    for start_idx, _ in turns[1:]:
+        if start_idx >= split_indices[-1] + 8 and (n - start_idx) >= 8:
+            split_indices.append(start_idx)
+
+    if len(split_indices) <= 1:
+        return [grp]
+
+    out: list[list[tuple[float, list[FaceBox]]]] = []
+    for s_i, idx0 in enumerate(split_indices):
+        idx1 = split_indices[s_i + 1] if (s_i + 1) < len(split_indices) else n
+        out.append(grp[idx0:idx1])
+    return out
+
+
 def _analyze_shots_sync(ctx: FramingContext) -> list[ShotSegmentPlan]:
-    """Sample frames in [ctx.start_sec, ctx.end_sec], detect angle cuts and faces."""
+    """Sample frames in [ctx.start_sec, ctx.end_sec] at high rate for zero-lag cuts and active speaker."""
     import cv2
     import numpy as np
 
@@ -490,8 +654,8 @@ def _analyze_shots_sync(ctx: FramingContext) -> list[ShotSegmentPlan]:
                 yunet = cv2.FaceDetectorYN.create(
                     str(yunet_path),
                     "",
-                    (320, 240),
-                    score_threshold=0.50,
+                    (320, 180),
+                    score_threshold=0.48,
                     nms_threshold=0.30,
                 )
             except Exception:
@@ -505,88 +669,149 @@ def _analyze_shots_sync(ctx: FramingContext) -> list[ShotSegmentPlan]:
         frontal_clf = cv2.CascadeClassifier(str(frontal_path)) if frontal_path.is_file() else None
         profile_clf = cv2.CascadeClassifier(str(profile_path)) if profile_path.is_file() else None
 
-        # Sample every ~0.40s (capped at 48 samples) using sequential cap.grab() for 10x speed
-        sample_step = max(0.40, duration / 48.0)
-        timestamps: list[float] = []
-        t = 0.0
-        while t < duration - 0.08:
-            timestamps.append(round(t, 3))
-            t += sample_step
-        if not timestamps:
-            timestamps.append(0.0)
-
         src_fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
         if src_fps <= 1.0 or src_fps > 120.0:
             src_fps = max(10.0, min(60.0, float(ctx.fps or 30.0)))
 
+        # Step every 1-2 grabbed frames (10-15 fps) so camera cuts align to <= 1 frame
+        grab_skip = 1 if duration <= 16.0 else max(1, min(2, int(round(src_fps / 11.0))))
+        step_dt = (grab_skip + 1) / src_fps
+
         if ctx.start_sec > 0.05:
             cap.set(cv2.CAP_PROP_POS_MSEC, ctx.start_sec * 1000.0)
 
-        samples: list[tuple[float, Any, Any, list[FaceBox]]] = []
-        prev_rel_t: Optional[float] = None
-        for s_idx, rel_t in enumerate(timestamps):
-            frame = None
-            ok = False
-            if prev_rel_t is None:
-                ok, frame = cap.read()
-            else:
-                n_frames = max(1, int(round((rel_t - prev_rel_t) * src_fps)))
-                grab_ok = True
-                for _ in range(n_frames - 1):
-                    if not cap.grab():
-                        grab_ok = False
-                        break
-                if grab_ok:
-                    ok, frame = cap.read()
-                if not ok or frame is None:
-                    cap.set(cv2.CAP_PROP_POS_MSEC, (ctx.start_sec + rel_t) * 1000.0)
-                    ok, frame = cap.read()
+        prev_grid = None
+        prev_hist = None
+        prev_gray = None
+        prev_t_seen = -1.0
+        last_raw_boxes: list[FaceBox] = []
+        prev_scored_boxes: list[FaceBox] = []
+        raw_groups: list[list[tuple[float, list[FaceBox]]]] = []
+        step_idx = 0
+        max_steps = int(math.ceil(duration / max(0.02, step_dt))) + 20
 
-            prev_rel_t = rel_t
+        while step_idx < max_steps:
+            ok, frame = cap.read()
             if not ok or frame is None:
-                continue
+                break
+
+            pos_ms = float(cap.get(cv2.CAP_PROP_POS_MSEC) or 0.0)
+            est_t = round(step_idx * step_dt, 3)
+            if pos_ms > 0.0 and (pos_ms / 1000.0) + 0.5 >= ctx.start_sec:
+                rel_t = max(0.0, round((pos_ms / 1000.0) - ctx.start_sec, 3))
+                if rel_t < prev_t_seen:
+                    rel_t = max(prev_t_seen, est_t)
+            else:
+                rel_t = max(0.0, est_t)
+            if rel_t > duration - 0.02 and step_idx > 0:
+                break
+            prev_t_seen = rel_t
 
             fh, fw = frame.shape[:2]
-            if fw > 480:
-                scale = 480.0 / fw
-                small = cv2.resize(frame, (480, max(2, int(round(fh * scale)))), interpolation=cv2.INTER_AREA)
+            if fw > 320:
+                scale = 320.0 / fw
+                small = cv2.resize(frame, (320, max(2, int(round(fh * scale)))), interpolation=cv2.INTER_AREA)
             else:
                 small = frame
 
-            # HSV histogram + spatial grayscale grid for camera-angle cut detection
             hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
             hist = cv2.calcHist([hsv], [0, 1], None, [24, 16], [0, 180, 0, 256])
             cv2.normalize(hist, hist, 0, 1, cv2.NORM_MINMAX)
             gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+            gray_f = gray.astype(np.float32)
             grid = cv2.resize(gray, (32, 18), interpolation=cv2.INTER_AREA).astype(np.float32)
 
-            boxes = _detect_faces_in_frame(
-                small,
-                gray,
-                yunet,
-                frontal_clf,
-                profile_clf,
-                run_haar_fallback=(yunet is None or s_idx % 2 == 0),
-            )
-            samples.append((rel_t, hist, grid, boxes))
+            is_cut = False
+            luma_diff = 0.0
+            corr = 1.0
+            if prev_grid is not None and prev_hist is not None:
+                luma_diff = float(np.mean(np.abs(grid - prev_grid))) / 255.0
+                corr = float(cv2.compareHist(prev_hist, hist, cv2.HISTCMP_CORREL))
+                if corr < 0.75 or luma_diff > 0.115 or (corr < 0.88 and luma_diff > 0.080):
+                    is_cut = True
 
-        if not samples:
+            run_detect = (
+                (step_idx == 0)
+                or is_cut
+                or (luma_diff > 0.042)
+                or (corr < 0.94)
+                or (not last_raw_boxes)
+                or (step_idx % 3 == 0)
+            )
+            if run_detect:
+                haar_flag = (yunet is None) or (step_idx % 6 == 0) or is_cut
+                cur_raw = _detect_faces_in_frame(
+                    small,
+                    gray,
+                    yunet,
+                    frontal_clf,
+                    profile_clf,
+                    run_haar_fallback=haar_flag,
+                )
+                if (
+                    not is_cut
+                    and step_idx > 0
+                    and (luma_diff > 0.042 or corr < 0.94)
+                    and cur_raw
+                    and prev_scored_boxes
+                ):
+                    prev_cx = _primary_face_cx(prev_scored_boxes)
+                    cur_cx = _primary_face_cx(cur_raw)
+                    count_changed = len(cur_raw) != len(prev_scored_boxes)
+                    face_jumped = (
+                        prev_cx is not None and cur_cx is not None and abs(cur_cx - prev_cx) > 0.14
+                    )
+                    if face_jumped or count_changed:
+                        is_cut = True
+                last_raw_boxes = cur_raw
+            else:
+                cur_raw = last_raw_boxes
+
+            scored_boxes: list[FaceBox] = []
+            for b in cur_raw:
+                act = 0.0
+                if not is_cut and prev_gray is not None:
+                    act = _measure_face_speaking_activity(gray_f, prev_gray, b, prev_scored_boxes)
+                scored_boxes.append(FaceBox(b.x, b.y, b.w, b.h, b.conf, act))
+
+            if is_cut and raw_groups:
+                cut_t = max(
+                    raw_groups[-1][0][0] + 0.05,
+                    round(rel_t - (grab_skip * 0.5) / src_fps, 3),
+                )
+                raw_groups.append([(cut_t, scored_boxes)])
+            elif not raw_groups:
+                raw_groups.append([(0.0, scored_boxes)])
+            else:
+                raw_groups[-1].append((rel_t, scored_boxes))
+
+            prev_grid = grid
+            prev_hist = hist
+            prev_gray = gray_f
+            prev_scored_boxes = scored_boxes
+            step_idx += 1
+
+            grab_ok = True
+            for _ in range(grab_skip):
+                if not cap.grab():
+                    grab_ok = False
+                    break
+            if not grab_ok:
+                break
+
+        if not raw_groups:
             return []
 
-        # Partition into raw shots across color, spatial layout, and face-jump angle cuts
-        raw_groups: list[list[tuple[float, list[FaceBox]]]] = [[(samples[0][0], samples[0][3])]]
-        for idx in range(1, len(samples)):
-            cur_t, _, _, cur_boxes = samples[idx]
-            if _is_camera_angle_cut(samples, idx, raw_groups[-1]):
-                raw_groups.append([(cur_t, cur_boxes)])
-            else:
-                raw_groups[-1].append((cur_t, cur_boxes))
+        # Refine long static multi-person shots across active speaker turns
+        split_groups: list[list[tuple[float, list[FaceBox]]]] = []
+        for grp in raw_groups:
+            split_groups.extend(_split_group_on_speaker_turns(grp))
 
         # Convert groups into continuous time segments [t_start, t_end] covering 0..duration
         raw_shots: list[ShotSegmentPlan] = []
-        for g_idx, grp in enumerate(raw_groups):
+        for g_idx, grp in enumerate(split_groups):
             t_start = 0.0 if g_idx == 0 else grp[0][0]
-            t_end = duration if g_idx == len(raw_groups) - 1 else raw_groups[g_idx + 1][0][0]
+            t_end = duration if g_idx == len(split_groups) - 1 else split_groups[g_idx + 1][0][0]
             obs = [item[1] for item in grp]
             mode, centers, bbox = classify_shot_layout(obs, ctx.source_width, ctx.source_height)
             raw_shots.append(
@@ -599,36 +824,36 @@ def _analyze_shots_sync(ctx: FramingContext) -> list[ShotSegmentPlan]:
                 )
             )
 
-        # Merge ultra-short (< 0.45s) faceless (center_crop) shots into neighbor
+        # Merge ultra-short (< 0.30s) or faceless (< 0.45s) micro-segments into neighbor
         merged: list[ShotSegmentPlan] = []
         for shot in raw_shots:
-            if merged and (shot.t_end - shot.t_start) < 0.45 and shot.mode == "center_crop":
+            seg_dur = shot.t_end - shot.t_start
+            if merged and (seg_dur < 0.30 or (seg_dur < 0.45 and shot.mode == "center_crop")):
                 merged[-1].t_end = shot.t_end
             else:
                 merged.append(shot)
 
-        if len(merged) >= 2 and (merged[0].t_end - merged[0].t_start) < 0.45 and merged[0].mode == "center_crop":
-            merged[1].t_start = merged[0].t_start
-            merged.pop(0)
+        if len(merged) >= 2:
+            first_dur = merged[0].t_end - merged[0].t_start
+            if first_dur < 0.30 or (first_dur < 0.45 and merged[0].mode == "center_crop"):
+                merged[1].t_start = merged[0].t_start
+                merged.pop(0)
 
-        # Merge adjacent shots with identical mode and nearly identical face centers
+        # Compact only adjacent segments whose primary active-speaker focus didn't shift
         compacted: list[ShotSegmentPlan] = []
         for shot in merged:
-            if compacted and compacted[-1].mode == shot.mode and len(compacted[-1].centers) == len(shot.centers):
-                max_shift = (
-                    max(abs(c1[0] - c2[0]) for c1, c2 in zip(compacted[-1].centers, shot.centers))
-                    if shot.centers
-                    else 0.0
-                )
-                if max_shift < 0.07:
+            if compacted and compacted[-1].mode == shot.mode and compacted[-1].centers and shot.centers:
+                dx0 = abs(compacted[-1].centers[0][0] - shot.centers[0][0])
+                dy0 = abs(compacted[-1].centers[0][1] - shot.centers[0][1])
+                if dx0 < 0.04 and dy0 < 0.04:
                     prev = compacted[-1]
                     total_dur = max(0.1, (prev.t_end - prev.t_start) + (shot.t_end - shot.t_start))
                     w_prev = (prev.t_end - prev.t_start) / total_dur
                     w_cur = (shot.t_end - shot.t_start) / total_dur
-                    prev.centers = [
-                        (c1[0] * w_prev + c2[0] * w_cur, c1[1] * w_prev + c2[1] * w_cur)
-                        for c1, c2 in zip(prev.centers, shot.centers)
-                    ]
+                    prev.centers[0] = (
+                        prev.centers[0][0] * w_prev + shot.centers[0][0] * w_cur,
+                        prev.centers[0][1] * w_prev + shot.centers[0][1] * w_cur,
+                    )
                     prev.bbox = (
                         min(prev.bbox[0], shot.bbox[0]),
                         min(prev.bbox[1], shot.bbox[1]),
@@ -639,8 +864,8 @@ def _analyze_shots_sync(ctx: FramingContext) -> list[ShotSegmentPlan]:
                     continue
             compacted.append(shot)
 
-        # Cap to max 16 shots to support fast-cut multi-angle podcasts cleanly
-        while len(compacted) > 16:
+        # Allow up to 36 shots to support fast multi-angle & multi-turn podcasts cleanly
+        while len(compacted) > 36:
             shortest_idx = min(range(len(compacted)), key=lambda i: compacted[i].t_end - compacted[i].t_start)
             if shortest_idx > 0:
                 compacted[shortest_idx - 1].t_end = compacted[shortest_idx].t_end

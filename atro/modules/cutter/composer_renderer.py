@@ -161,14 +161,14 @@ def _shot_to_crop_boxes(
 ) -> tuple[CropBoxConfig, CropBoxConfig]:
     """Convert one detected `ShotSegmentPlan` into normalized top & bottom CropBoxConfig."""
     if mode == "multi_speaker_split" and len(shot.centers) >= 2:
-        (cx1, cy1), (cx2, cy2) = shot.centers[0], shot.centers[1]
+        (cx1, cy1), (cx2, cy2) = sorted(shot.centers[:2], key=lambda c: c[0])
         top_box = CropBoxConfig(
             auto_detect=True,
             x=max(0.0, min(0.65, cx1 - 0.18)),
             y=max(0.0, min(0.50, cy1 - 0.25)),
             w=0.36,
             h=0.65,
-            label=f"Speaker 1 (Angle #{angle_idx})",
+            label=f"Speaker Kiri (#{angle_idx})",
         )
         bot_box = CropBoxConfig(
             auto_detect=True,
@@ -176,7 +176,7 @@ def _shot_to_crop_boxes(
             y=max(0.0, min(0.50, cy2 - 0.25)),
             w=0.36,
             h=0.65,
-            label=f"Speaker 2 (Angle #{angle_idx})",
+            label=f"Speaker Kanan (#{angle_idx})",
         )
         return top_box, bot_box
 
@@ -192,7 +192,7 @@ def _shot_to_crop_boxes(
             y=round(ty, 4),
             w=crop_w,
             h=crop_h,
-            label=f"Angle #{angle_idx}",
+            label=f"Speaker #{angle_idx}",
         ),
         CropBoxConfig(
             auto_detect=True,
