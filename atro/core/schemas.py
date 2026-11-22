@@ -175,6 +175,16 @@ class TranscriptResult(BaseModel):
     segments: list[TranscriptSegment]
 
 
+class GeminiFocusHintItem(BaseModel):
+    """Gemini Structured Output POI focus hint item (kept flat without exclusiveMinimum)."""
+
+    t_start: float = Field(description="Waktu mulai segmen POI dalam detik absolut transkrip.")
+    t_end: float = Field(description="Waktu selesai segmen POI dalam detik absolut transkrip.")
+    role: str = Field(default="speaker", description="Jenis sorotan kamera: 'speaker', 'reaction', atau 'group'.")
+    target_hint: str = Field(default="", description="Petunjuk pihak yang penting disorot (misal 'host', 'narasumber', 'reaksi pendengar', 'semua').")
+    reason: str = Field(default="", description="Alasan singkat titik fokus obrolan di segmen tersebut.")
+
+
 class GeminiClipItem(BaseModel):
     """Gemini Structured Output schema item (kept simple without exclusiveMinimum)."""
 
@@ -183,6 +193,10 @@ class GeminiClipItem(BaseModel):
     end_time: float = Field(description="Waktu selesai klip dalam detik (> start_time).")
     virality_score: int = Field(description="Skor potensi viral klip dari 1 sampai 10.")
     reason: str = Field(description="Alasan pemilihan klip mencakup kekuatan hook 3 detik pertama dan klimaks.")
+    focus_hints: list[GeminiFocusHintItem] = Field(
+        default_factory=list,
+        description="Opsional: titik penting perbincangan (POI) untuk memandu kamera ke pembicara inti, reaksi, atau group.",
+    )
 
 
 class GeminiClipSelectionSchema(BaseModel):
@@ -193,6 +207,22 @@ class GeminiClipSelectionSchema(BaseModel):
     )
 
 
+class FocusHintItem(BaseModel):
+    """Validated Point-of-Interest hint for camera focus planning inside a clip."""
+
+    t_start: float = Field(ge=0.0)
+    t_end: float = Field(gt=0.0)
+    role: Literal["speaker", "reaction", "group"] = "speaker"
+    target_hint: str = ""
+    reason: str = ""
+
+    @model_validator(mode="after")
+    def _validate_span(self) -> "FocusHintItem":
+        if self.t_end <= self.t_start:
+            self.t_end = round(self.t_start + 1.0, 3)
+        return self
+
+
 class ClipCandidate(BaseModel):
     """Validated clip candidate produced by Module 3 (analyzer)."""
 
@@ -201,6 +231,7 @@ class ClipCandidate(BaseModel):
     end_time: float = Field(gt=0.0)
     virality_score: int = Field(ge=1, le=10)
     reason: str
+    focus_hints: list[FocusHintItem] = Field(default_factory=list)
 
     @field_validator("title", "reason")
     @classmethod

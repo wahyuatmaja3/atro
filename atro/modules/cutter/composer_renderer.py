@@ -221,8 +221,12 @@ def detect_composer_shot_crops_sync(
     src_w: int = 1920,
     src_h: int = 1080,
     fps: float = 30.0,
+    layout: Optional[LayoutLayerConfig] = None,
+    job_dir: Optional[Path] = None,
+    focus_hints: Optional[list] = None,
+    transcript_segments: Optional[list[TranscriptSegment]] = None,
 ) -> list[ShotCropSegment]:
-    """Detect all camera angles and face crops across `[start_sec, end_sec]`."""
+    """Detect all camera angles, speakers, and POI face crops across `[start_sec, end_sec]`."""
     duration = max(0.5, round(float(end_sec) - float(start_sec), 3))
     ctx = FramingContext(
         source_path=source_path,
@@ -264,8 +268,33 @@ def detect_composer_shot_crops_sync(
                     top_crop=top_box,
                     bottom_crop=bot_box,
                     shot_mode="single_focus",
+                    reason="speaker_match",
+                    confidence=0.85,
                 )
             ]
+
+    # V2 Podcast / Multi-Angle / Multi-Speaker ShotPlanner (diarization + SFace + POI)
+    try:
+        from atro.modules.cutter.framing.shot_planner import plan_podcast_shots_sync
+
+        eff_layout = layout or LayoutLayerConfig(mode=mode)
+        v2_shots = plan_podcast_shots_sync(
+            source_path=source_path,
+            start_sec=start_sec,
+            end_sec=end_sec,
+            layout=eff_layout,
+            src_w=src_w,
+            src_h=src_h,
+            fps=fps,
+            job_dir=job_dir,
+            focus_hints=focus_hints,
+            transcript_segments=transcript_segments,
+            mode_override=mode,
+        )
+        if v2_shots:
+            return v2_shots
+    except Exception:
+        pass
 
     shots = _analyze_shots_sync(ctx)
     if not shots:
@@ -327,6 +356,9 @@ def apply_auto_detect_to_layout_sync(
     src_w: int = 1920,
     src_h: int = 1080,
     fps: float = 30.0,
+    job_dir: Optional[Path] = None,
+    focus_hints: Optional[list] = None,
+    transcript_segments: Optional[list[TranscriptSegment]] = None,
 ) -> list[ShotCropSegment]:
     """Detect all angle/face crops in `[start_sec, end_sec]` and populate `layout`."""
     segs = detect_composer_shot_crops_sync(
@@ -337,6 +369,10 @@ def apply_auto_detect_to_layout_sync(
         src_w=src_w,
         src_h=src_h,
         fps=fps,
+        layout=layout,
+        job_dir=job_dir,
+        focus_hints=focus_hints,
+        transcript_segments=transcript_segments,
     )
     if segs:
         layout.shot_crops = segs
@@ -355,6 +391,9 @@ async def apply_auto_detect_to_layout(
     src_w: int = 1920,
     src_h: int = 1080,
     fps: float = 30.0,
+    job_dir: Optional[Path] = None,
+    focus_hints: Optional[list] = None,
+    transcript_segments: Optional[list[TranscriptSegment]] = None,
 ) -> list[ShotCropSegment]:
     """Async wrapper around apply_auto_detect_to_layout_sync."""
     return await asyncio.to_thread(
@@ -366,6 +405,9 @@ async def apply_auto_detect_to_layout(
         src_w,
         src_h,
         fps,
+        job_dir,
+        focus_hints,
+        transcript_segments,
     )
 
 

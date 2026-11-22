@@ -23,6 +23,7 @@ from atro.core.presets import (
 from atro.core.schemas import (
     AnalysisResult,
     DownloadResult,
+    FocusHintItem,
     JobRequest,
     PreflightReport,
     RenderResult,
@@ -652,6 +653,7 @@ class CutterService:
                     cancel_event=cancel_event,
                     virality_score=clip.virality_score,
                     reason=clip.reason,
+                    focus_hints=clip.focus_hints,
                     update_render_result=False,
                 )
                 rendered_clips.append(rendered_item)
@@ -850,6 +852,9 @@ class CutterService:
                     src_w=download.width,
                     src_h=download.height,
                     fps=download.fps,
+                    job_dir=job_dir,
+                    focus_hints=clip.focus_hints,
+                    transcript_segments=transcript_segments,
                 )
             saved_cfg_path = save_job_clip_config(job_dir, default_cfg)
 
@@ -910,6 +915,7 @@ class CutterService:
         cancel_event: Optional[asyncio.Event] = None,
         virality_score: int = 8,
         reason: str = "Custom Composer Render",
+        focus_hints: Optional[list[FocusHintItem]] = None,
         update_render_result: bool = True,
     ) -> RenderedClip:
         """Render a single clip using full 1:1 WYSIWYG ClipComposerConfig."""
@@ -953,6 +959,9 @@ class CutterService:
                 src_w=download.width,
                 src_h=download.height,
                 fps=download.fps,
+                job_dir=job_dir,
+                focus_hints=focus_hints,
+                transcript_segments=transcript_segments,
             )
             logger.info(
                 "cutter",
@@ -1238,6 +1247,7 @@ class CutterService:
                 cancel_event=cancel_event,
                 virality_score=clip.virality_score,
                 reason=clip.reason,
+                focus_hints=clip.focus_hints,
                 update_render_result=True,
             )
             rendered_list.append(rendered)

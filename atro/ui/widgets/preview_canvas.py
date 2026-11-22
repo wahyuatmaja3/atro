@@ -11,15 +11,16 @@ import numpy as np
 from PyQt6.QtCore import QPointF, QRectF, Qt, pyqtSignal
 from PyQt6.QtGui import (
     QColor,
+    QContextMenuEvent,
     QFont,
     QImage,
     QMouseEvent,
     QPainter,
     QPen,
 )
-from PyQt6.QtWidgets import QSizePolicy, QWidget
+from PyQt6.QtWidgets import QMenu, QSizePolicy, QWidget
 
-from atro.core.composer_schema import ClipComposerConfig, CropBoxConfig
+from atro.core.composer_schema import ClipComposerConfig, CropBoxConfig, ShotCropSegment
 from atro.core.schemas import TranscriptSegment
 from atro.modules.cutter.composer_renderer import render_preview_frame
 
@@ -503,3 +504,180 @@ class LivePreviewCanvas9x16(QWidget):
         self._drag_overlay = None
         self._drag_bubble_idx = -1
         self.setCursor(Qt.CursorShape.ArrowCursor)
+
+
+_SPEAKER_LANE_COLORS: tuple[str, ...] = (
+    "#F97316",  # SPK_1 Orange
+    "#38BDF8",  # SPK_2 Sky Blue
+    "#22C55E",  # SPK_3 Emerald
+    "#F59E0B",  # SPK_4 Amber
+    "#A855F7",  # SPK_5 Purple
+    "#EC4899",  # SPK_6 Pink
+)
+
+
+def _lane_color_for_shot(seg: ShotCropSegment, idx: int) -> QColor:
+    if seg.reason == "group":
+        return QColor("#14B8A6")
+    key = seg.speaker_id or seg.face_id or ""
+    if key.startswith("SPK_"):
+        try:
+            n = max(1, int(key.split("_", 1)[1]))
+            return QColor(_SPEAKER_LANE_COLORS[(n - 1) % len(_SPEAKER_LANE_COLORS)])
+        except Exception:
+            pass
+    if key.startswith("FACE_") and len(key) >= 6:
+        ch = key[5]
+        if ch.isalpha():
+            return QColor(_SPEAKER_LANE_COLORS[(ord(ch.upper()) - ord("A")) % len(_SPEAKER_LANE_COLORS)])
+    return QColor(_SPEAKER_LANE_COLORS[idx % len(_SPEAKER_LANE_COLORS)])
+
+
+class FaceLaneTimelineWidget(QWidget):
+    """Interactive color-coded timeline strip showing speaker/camera shot cuts & manual edit actions."""
+
+    time_clicked = pyqtSignal(float)
+    split_requested = pyqtSignal(float)
+    speaker_assigned = pyqtSignal(int, str)
+    pin_speaker_requested = pyqtSignal(str)
+    apply_manual_crop_requested = pyqtSignal(int)
+    redetect_from_requested = pyqtSignal(float)
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setFixedHeight(28)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setMouseTracking(True)
+        self._shots: list[ShotCropSegment] = []
+        self._aliases: dict[str, str] = {}
+        self._duration: float = 10.0
+        self._rel_time: float = 0.0
+        self._pinned_speaker: Optional[str] = None
+
+    def set_state(
+        self,
+        shots: list[ShotCropSegment],
+        duration_sec: float,
+        rel_time_sec: float,
+        aliases: Optional[dict[str, str]] = None,
+        pinned_speaker_id: Optional[str] = None,
+    ) -> None:
+        self._shots = list(shots or [])
+        self._duration = max(0.5, float(duration_sec))
+        self._rel_time = max(0.0, min(self._duration, float(rel_time_sec)))
+        self._aliases = dict(aliases or {})
+        self._pinned_speaker = pinned_speaker_id
+        self.update()
+
+    def _x_to_time(self, x: float) -> float:
+        w = max(1.0, float(self.width()))
+        return max(0.0, min(self._duration, (x / w) * self._duration))
+
+    def _shot_index_at(self, t_sec: float) -> int:
+        for i, s in enumerate(self._shots):
+            if s.t_start <= t_sec <= s.t_end:
+                return i
+        return 0 if self._shots else -1
+
+    def paintEvent(self, _event) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = self.rect()
+        w = float(rect.width())
+        h = float(rect.height())
+
+        p.fillRect(rect, QColor("#141923"))
+
+        if not self._shots:
+            p.setPen(QColor("#64748B"))
+            p.setFont(QFont("Segoe UI", 8))
+            p.drawText(rect, Qt.AlignmentFlag.AlignCenter, "Belum ada segmen kamera terdeteksi (klik Deteksi Wajah atau klik kanan)")
+        else:
+            p.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+            for i, s in enumerate(self._shots):
+                x0 = (max(0.0, s.t_start) / self._duration) * w
+                x1 = (min(self._duration, s.t_end) / self._duration) * w
+                seg_w = max(2.0, x1 - x0)
+                col = _lane_color_for_shot(s, i)
+                is_cur = s.t_start <= self._rel_time <= s.t_end
+                fill_col = col.lighter(115) if is_cur else col.darker(115)
+                fill_col.setAlpha(230 if is_cur else 185)
+                box = QRectF(x0 + 1.0, 2.0, max(2.0, seg_w - 2.0), h - 4.0)
+                p.setPen(QPen(QColor("#FFFFFF" if is_cur else "#0B0E14"), 1.2))
+                p.setBrush(fill_col)
+                p.drawRoundedRect(box, 4.0, 4.0)
+
+                if seg_w >= 46:
+                    raw_id = s.speaker_id or s.face_id or f"#{i + 1}"
+                    lbl = self._aliases.get(raw_id, raw_id)
+                    if s.reason == "reaction":
+                        lbl = f"{lbl} (Reaksi)"
+                    elif s.reason == "group":
+                        lbl = "Grup"
+                    p.setPen(QColor("#0B0E14"))
+                    p.drawText(box.adjusted(4, 0, -4, 0), Qt.AlignmentFlag.AlignCenter, lbl)
+
+        # Playhead indicator line
+        px = max(1.0, min(w - 2.0, (self._rel_time / self._duration) * w))
+        p.setPen(QPen(QColor("#FFFFFF"), 2.0))
+        p.drawLine(QPointF(px, 0.0), QPointF(px, h))
+        p.end()
+
+    def mouseMoveEvent(self, event: Optional[QMouseEvent]) -> None:
+        if event is None or not self._shots:
+            return
+        t = self._x_to_time(event.position().x())
+        idx = self._shot_index_at(t)
+        if 0 <= idx < len(self._shots):
+            s = self._shots[idx]
+            spk = s.speaker_id or s.face_id or f"Angle #{idx + 1}"
+            alias = self._aliases.get(spk, spk)
+            self.setToolTip(
+                f"{alias} [{s.t_start:.1f}s - {s.t_end:.1f}s] • {s.reason} ({int(round(s.confidence * 100))}%)\n"
+                "Klik untuk lompat, klik kanan untuk atur/pin/potong segmen."
+            )
+
+    def mousePressEvent(self, event: Optional[QMouseEvent]) -> None:
+        if event is None:
+            return
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.time_clicked.emit(round(self._x_to_time(event.position().x()), 3))
+
+    def contextMenuEvent(self, event: Optional[QContextMenuEvent]) -> None:
+        if event is None:
+            return
+        t_sec = round(self._x_to_time(event.position().x()), 3)
+        seg_idx = self._shot_index_at(t_sec)
+        menu = QMenu(self)
+
+        split_act = menu.addAction(f"Potong Segmen di {t_sec:.1f}s (Split)")
+        apply_crop_act = menu.addAction("Pakai Kotak Crop Manual Ini pada Segmen") if seg_idx >= 0 else None
+        spk_menu = menu.addMenu("Tandai Pembicara Segmen Ini") if seg_idx >= 0 else None
+        spk_actions: dict[object, str] = {}
+        if spk_menu is not None:
+            for k in range(1, 6):
+                sid = f"SPK_{k}"
+                al = self._aliases.get(sid, f"Pembicara {k}")
+                act = spk_menu.addAction(f"{sid} ({al})")
+                spk_actions[act] = sid
+
+        cur_spk = (self._shots[seg_idx].speaker_id or "SPK_1") if (0 <= seg_idx < len(self._shots)) else "SPK_1"
+        pin_act = menu.addAction(f"Pin Fokus ke {self._aliases.get(cur_spk, cur_spk)}") if seg_idx >= 0 else None
+        unpin_act = menu.addAction("Lepas Pin Pembicara (Otomatis)") if self._pinned_speaker else None
+        redetect_act = menu.addAction(f"Deteksi Ulang Mulai {t_sec:.1f}s")
+
+        chosen = menu.exec(event.globalPos())
+        if chosen is None:
+            return
+        if chosen == split_act:
+            self.split_requested.emit(t_sec)
+        elif apply_crop_act is not None and chosen == apply_crop_act and seg_idx >= 0:
+            self.apply_manual_crop_requested.emit(seg_idx)
+        elif chosen in spk_actions and seg_idx >= 0:
+            self.speaker_assigned.emit(seg_idx, spk_actions[chosen])
+        elif pin_act is not None and chosen == pin_act:
+            self.pin_speaker_requested.emit(cur_spk)
+        elif unpin_act is not None and chosen == unpin_act:
+            self.pin_speaker_requested.emit("")
+        elif chosen == redetect_act:
+            self.redetect_from_requested.emit(t_sec)

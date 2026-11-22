@@ -22,7 +22,7 @@ from atro.core.schemas import (
 from atro.core.subprocess_utils import JobCancelledError
 from atro.modules.analyzer.openai_compat import call_openai_compatible_sync
 from atro.modules.analyzer.prompts import build_system_instruction, build_user_prompt
-from atro.modules.analyzer.validator import validate_and_sanitize_clips
+from atro.modules.analyzer.validator import build_heuristic_focus_hints, validate_and_sanitize_clips
 from atro.modules.transcriber.service import format_transcript_lines
 
 
@@ -159,6 +159,13 @@ class AnalyzerService:
             video_duration_sec=download.duration_sec,
             request=request,
         )
+        for clip in clips:
+            if not clip.focus_hints:
+                clip.focus_hints = build_heuristic_focus_hints(
+                    transcript.segments,
+                    clip.start_time,
+                    clip.end_time,
+                )
 
         for warn in warnings:
             logger.warning("analyzer", warn)

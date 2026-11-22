@@ -216,6 +216,7 @@ class LayoutLayerConfig(BaseModel):
     group_mode: GroupMode = "fit_all_blur"
     min_shot_sec: float = Field(default=1.2, ge=0.3, le=5.0)
     pinned_speaker_id: Optional[str] = None
+    speaker_aliases: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("frame_border_color_hex", mode="before")
     @classmethod

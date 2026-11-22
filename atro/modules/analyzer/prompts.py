@@ -40,6 +40,7 @@ def build_system_instruction(request: JobRequest, video_duration_sec: float) -> 
         "- start_time & end_time: Angka detik desimal sesuai timestamp pada transkrip.\n"
         "- virality_score: Integer 1 sampai 10 (10 = paling berpotensi viral).\n"
         "- reason: Penjelasan singkat mengapa hook 3 detik pertama, klimaks, dan nilai retensinya kuat.\n"
+        "- focus_hints (opsional): Daftar segmen titik fokus perbincangan (t_start, t_end, role: 'speaker'|'reaction'|'group', target_hint, reason) bila ada momen penting menyorot reaksi atau semua peserta.\n"
         "Gunakan bahasa yang sama dengan bahasa utama video untuk title dan reason."
     )
 

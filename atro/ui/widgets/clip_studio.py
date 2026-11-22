@@ -44,6 +44,7 @@ from atro.config import AppSettings
 from atro.core.composer_schema import (
     ClipComposerConfig,
     CommentBubbleItem,
+    ShotCropSegment,
     TranscriptSegmentOverride,
 )
 from atro.core.presets import (
@@ -74,6 +75,7 @@ from atro.modules.cutter.composer_renderer import detect_composer_shot_crops_syn
 from atro.modules.cutter.service import apply_initial_style_overrides, apply_style_template_from_config
 from atro.modules.cutter.transitions import TRANSITION_CHOICES, active_transition_window_at
 from atro.ui.widgets.preview_canvas import (
+    FaceLaneTimelineWidget,
     FrameExtractorCache,
     LivePreviewCanvas9x16,
     SourceCropSelectorWidget,
@@ -549,6 +551,15 @@ class ClipStudioWidget(QWidget):
         transport.addWidget(self.time_readout_lbl)
         vis_layout.addLayout(transport)
 
+        self.face_lane = FaceLaneTimelineWidget()
+        self.face_lane.time_clicked.connect(self._on_lane_seek)
+        self.face_lane.split_requested.connect(self._on_lane_split)
+        self.face_lane.speaker_assigned.connect(self._on_lane_speaker_assigned)
+        self.face_lane.pin_speaker_requested.connect(self._on_lane_pin_speaker)
+        self.face_lane.apply_manual_crop_requested.connect(self._on_lane_apply_crop)
+        self.face_lane.redetect_from_requested.connect(self._on_lane_redetect_from)
+        vis_layout.addWidget(self.face_lane)
+
         trim_row = QHBoxLayout()
         trim_row.setSpacing(10)
         self.trim_start_spin = QDoubleSpinBox()
@@ -761,6 +772,50 @@ class ClipStudioWidget(QWidget):
         tr_vol_row.addWidget(self.tr_sfx_vol_lbl)
         tf.addRow("Volume SFX Transisi", tr_vol_row)
         vbox.addWidget(tr_grp)
+
+        spk_grp = QGroupBox("Fokus Pembicara & Podcast AI")
+        sf = QFormLayout(spk_grp)
+        sf.setSpacing(8)
+        self.focus_strategy_combo = QComboBox()
+        self.focus_strategy_combo.addItem("Otomatis (Topik & Reaksi POI)", "auto_topic")
+        self.focus_strategy_combo.addItem("Pembicara Aktif Saja", "active_speaker")
+        self.focus_strategy_combo.addItem("Manual / Pin Pembicara", "manual")
+        self.focus_strategy_combo.currentIndexChanged.connect(self._on_ui_mutated)
+        sf.addRow("Strategi Sorotan", self.focus_strategy_combo)
+
+        grp_min_row = QHBoxLayout()
+        self.group_mode_combo = QComboBox()
+        self.group_mode_combo.addItem("Fokus 1 Orang Saja", "focus_only")
+        self.group_mode_combo.addItem("Tampil Semua + Blur saat Ramai", "fit_all_blur")
+        self.group_mode_combo.addItem("Split 2 Pembicara", "grid")
+        self.group_mode_combo.currentIndexChanged.connect(self._on_ui_mutated)
+        self.min_shot_spin = QDoubleSpinBox()
+        self.min_shot_spin.setRange(0.8, 3.0)
+        self.min_shot_spin.setSingleStep(0.1)
+        self.min_shot_spin.setDecimals(1)
+        self.min_shot_spin.setSuffix(" s")
+        self.min_shot_spin.valueChanged.connect(self._on_ui_mutated)
+        grp_min_row.addWidget(self.group_mode_combo, 1)
+        grp_min_row.addWidget(QLabel("Min Tahan"))
+        grp_min_row.addWidget(self.min_shot_spin)
+        sf.addRow("Mode Ramai & Durasi", grp_min_row)
+
+        pin_row = QHBoxLayout()
+        self.pin_speaker_combo = QComboBox()
+        self.pin_speaker_combo.addItem("Bebas (Otomatis Ikut Bicara)", "")
+        for k in range(1, 6):
+            self.pin_speaker_combo.addItem(f"SPK_{k}", f"SPK_{k}")
+        self.pin_speaker_combo.currentIndexChanged.connect(self._on_ui_mutated)
+        self.speaker_alias_edit = QLineEdit()
+        self.speaker_alias_edit.setPlaceholderText("Nama pembicara aktif (misal: Host)")
+        alias_apply_btn = QPushButton("Namai")
+        alias_apply_btn.setObjectName("SmallAction")
+        alias_apply_btn.clicked.connect(self._on_apply_speaker_alias)
+        pin_row.addWidget(self.pin_speaker_combo, 1)
+        pin_row.addWidget(self.speaker_alias_edit, 1)
+        pin_row.addWidget(alias_apply_btn)
+        sf.addRow("Pin & Nama Pembicara", pin_row)
+        vbox.addWidget(spk_grp)
 
         div_grp = QGroupBox("Garis Pembatas Tengah (Lurus / Miring)")
         df = QFormLayout(div_grp)
@@ -1723,6 +1778,17 @@ class ClipStudioWidget(QWidget):
         self.tr_sfx_vol_slider.setValue(tr_vol_pct)
         self.tr_sfx_vol_lbl.setText(f"{tr_vol_pct}%")
 
+        self.focus_strategy_combo.setCurrentIndex(
+            max(0, self.focus_strategy_combo.findData(cfg.layout.focus_strategy))
+        )
+        self.group_mode_combo.setCurrentIndex(
+            max(0, self.group_mode_combo.findData(cfg.layout.group_mode))
+        )
+        self.min_shot_spin.setValue(cfg.layout.min_shot_sec)
+        self.pin_speaker_combo.setCurrentIndex(
+            max(0, self.pin_speaker_combo.findData(cfg.layout.pinned_speaker_id or ""))
+        )
+
         self._sync_crop_spins_from_config()
 
         # Subtitles
@@ -1924,6 +1990,12 @@ class ClipStudioWidget(QWidget):
         tr_vol_pct = self.tr_sfx_vol_slider.value()
         tr.sfx_volume = round(tr_vol_pct / 100.0, 2)
         self.tr_sfx_vol_lbl.setText(f"{tr_vol_pct}%")
+
+        cfg.layout.focus_strategy = self.focus_strategy_combo.currentData() or "auto_topic"
+        cfg.layout.group_mode = self.group_mode_combo.currentData() or "focus_only"
+        cfg.layout.min_shot_sec = round(self.min_shot_spin.value(), 1)
+        pin_val = self.pin_speaker_combo.currentData() or None
+        cfg.layout.pinned_speaker_id = str(pin_val) if pin_val else None
 
         # Subtitles
         subs = cfg.subtitles
@@ -2157,15 +2229,27 @@ class ClipStudioWidget(QWidget):
         self.bgm_track_combo.setCurrentIndex(idx)
         self._on_ui_mutated()
 
+    def _active_clip_focus_hints(self) -> list:
+        if self._analysis is None:
+            return []
+        for c in self._analysis.clips:
+            if abs(float(c.start_time) - float(self._config.timing.start_time)) < 0.8:
+                return list(getattr(c, "focus_hints", []) or [])
+        return []
+
     def _run_auto_detect_crops(self) -> None:
         if self._source_path is None or not self._source_path.is_file():
             return
         p_start, p_end = self._effective_window()
         src_path = self._source_path
-        mode = self._config.layout.mode
+        layout_snap = self._config.layout.model_copy(deep=True)
+        mode = layout_snap.mode
         src_w = self._download.width if self._download else 1920
         src_h = self._download.height if self._download else 1080
         fps = self._download.fps if self._download else 30.0
+        job_dir = Path(self._job_state.workspace_dir) if self._job_state is not None else None
+        hints = self._active_clip_focus_hints()
+        segs_tr = list(self._transcript_segments)
 
         self._detect_request_id += 1
         req_id = self._detect_request_id
@@ -2174,7 +2258,7 @@ class ClipStudioWidget(QWidget):
         self._config.layout.top_crop.auto_detect = True
         self._config.layout.bottom_crop.auto_detect = True
         self.auto_detect_btn.setEnabled(False)
-        self.auto_detect_btn.setText("Mendeteksi Angle...")
+        self.auto_detect_btn.setText("Mendeteksi Pembicara & Angle...")
 
         def _worker() -> None:
             try:
@@ -2186,6 +2270,10 @@ class ClipStudioWidget(QWidget):
                     src_w=src_w,
                     src_h=src_h,
                     fps=fps,
+                    layout=layout_snap,
+                    job_dir=job_dir,
+                    focus_hints=hints,
+                    transcript_segments=segs_tr,
                 )
             except Exception:
                 segs = []
@@ -2217,6 +2305,136 @@ class ClipStudioWidget(QWidget):
             self._refresh_preview()
         else:
             self.auto_detect_btn.setText("Deteksi Wajah Otomatis")
+
+    # --- Interactive Face Lane & Speaker Corrections ---
+    def _on_lane_seek(self, rel_t: float) -> None:
+        p_start, p_end = self._effective_window()
+        dur = max(0.5, p_end - p_start)
+        self._rel_time_sec = max(0.0, min(dur, float(rel_t)))
+        self._refresh_preview()
+
+    def _on_lane_split(self, t_sec: float) -> None:
+        p_start, p_end = self._effective_window()
+        dur = max(0.5, p_end - p_start)
+        lay = self._config.layout
+        if not lay.shot_crops:
+            lay.shot_crops = [
+                ShotCropSegment(
+                    t_start=0.0,
+                    t_end=round(dur, 3),
+                    top_crop=lay.top_crop.model_copy(deep=True),
+                    speaker_id="SPK_1",
+                    reason="manual",
+                )
+            ]
+        for i, seg in enumerate(lay.shot_crops):
+            if seg.t_start + 0.35 <= t_sec <= seg.t_end - 0.35:
+                orig_end = seg.t_end
+                seg.t_end = round(t_sec, 3)
+                new_seg = seg.model_copy(deep=True)
+                new_seg.t_start = round(t_sec, 3)
+                new_seg.t_end = orig_end
+                new_seg.reason = "manual"
+                lay.shot_crops.insert(i + 1, new_seg)
+                break
+        lay.framing_tracking_mode = "auto_face"
+        if self._job_state is not None:
+            save_job_clip_config(Path(self._job_state.workspace_dir), self._config)
+        self._refresh_preview()
+
+    def _on_lane_speaker_assigned(self, seg_idx: int, speaker_id: str) -> None:
+        lay = self._config.layout
+        if 0 <= seg_idx < len(lay.shot_crops):
+            seg = lay.shot_crops[seg_idx]
+            seg.speaker_id = speaker_id
+            seg.reason = "manual"
+            seg.top_crop.label = lay.speaker_aliases.get(speaker_id, speaker_id)
+            if self._job_state is not None:
+                save_job_clip_config(Path(self._job_state.workspace_dir), self._config)
+            self._refresh_preview()
+
+    def _on_lane_pin_speaker(self, speaker_id: str) -> None:
+        self._config.layout.pinned_speaker_id = speaker_id or None
+        self._syncing_ui = True
+        self.pin_speaker_combo.setCurrentIndex(
+            max(0, self.pin_speaker_combo.findData(speaker_id or ""))
+        )
+        self._syncing_ui = False
+        self._run_auto_detect_crops()
+
+    def _on_lane_apply_crop(self, seg_idx: int) -> None:
+        lay = self._config.layout
+        if 0 <= seg_idx < len(lay.shot_crops):
+            seg = lay.shot_crops[seg_idx]
+            seg.top_crop = lay.top_crop.model_copy(deep=True)
+            seg.top_crop.auto_detect = False
+            seg.reason = "manual"
+            if self._job_state is not None:
+                save_job_clip_config(Path(self._job_state.workspace_dir), self._config)
+            self._refresh_preview()
+
+    def _on_lane_redetect_from(self, t_sec: float) -> None:
+        if self._source_path is None or not self._source_path.is_file():
+            return
+        p_start, p_end = self._effective_window()
+        dur = max(0.5, p_end - p_start)
+        split_rel = max(0.0, min(dur - 0.5, float(t_sec)))
+        tail_segs = detect_composer_shot_crops_sync(
+            source_path=self._source_path,
+            start_sec=p_start + split_rel,
+            end_sec=p_end,
+            mode=self._config.layout.mode,
+            src_w=self._download.width if self._download else 1920,
+            src_h=self._download.height if self._download else 1080,
+            fps=self._download.fps if self._download else 30.0,
+            layout=self._config.layout,
+            job_dir=Path(self._job_state.workspace_dir) if self._job_state is not None else None,
+            focus_hints=self._active_clip_focus_hints(),
+            transcript_segments=self._transcript_segments,
+        )
+        if not tail_segs:
+            return
+        kept: list[ShotCropSegment] = []
+        for s in self._config.layout.shot_crops:
+            if s.t_start >= split_rel - 0.05:
+                continue
+            cp = s.model_copy(deep=True)
+            cp.t_end = min(cp.t_end, round(split_rel, 3))
+            if cp.t_end - cp.t_start >= 0.15:
+                kept.append(cp)
+        for ts in tail_segs:
+            ts.t_start = round(split_rel + ts.t_start, 3)
+            ts.t_end = min(round(dur, 3), round(split_rel + ts.t_end, 3))
+            if ts.t_end - ts.t_start >= 0.15:
+                kept.append(ts)
+        if kept:
+            kept[0].t_start = 0.0
+            kept[-1].t_end = round(dur, 3)
+            self._config.layout.shot_crops = kept
+            self._config.layout.framing_tracking_mode = "auto_face"
+            if self._job_state is not None:
+                save_job_clip_config(Path(self._job_state.workspace_dir), self._config)
+            self._refresh_preview()
+
+    def _on_apply_speaker_alias(self) -> None:
+        alias = self.speaker_alias_edit.text().strip()
+        if not alias:
+            return
+        lay = self._config.layout
+        active_spk: Optional[str] = None
+        for seg in lay.shot_crops:
+            if seg.t_start <= self._rel_time_sec <= seg.t_end and seg.speaker_id:
+                active_spk = seg.speaker_id
+                break
+        if active_spk is None:
+            active_spk = lay.pinned_speaker_id or "SPK_1"
+        lay.speaker_aliases[active_spk] = alias
+        for seg in lay.shot_crops:
+            if seg.speaker_id == active_spk:
+                seg.top_crop.label = alias
+        if self._job_state is not None:
+            save_job_clip_config(Path(self._job_state.workspace_dir), self._config)
+        self._refresh_preview()
 
     # --- Transcript Table Editing ---
     def _reload_transcript_table(self) -> None:
@@ -2386,6 +2604,13 @@ class ClipStudioWidget(QWidget):
                 prev_frame_bgr = self._frame_cache.get_frame(self._source_path, prev_ts)
 
         self.crop_selector.set_state(self._config, frame_bgr, rel_time_sec=self._rel_time_sec)
+        self.face_lane.set_state(
+            shots=self._config.layout.shot_crops,
+            duration_sec=dur,
+            rel_time_sec=self._rel_time_sec,
+            aliases=self._config.layout.speaker_aliases,
+            pinned_speaker_id=self._config.layout.pinned_speaker_id,
+        )
         self._sync_crop_spins_from_config()
         self.preview_canvas.render_state(
             source_frame_bgr=frame_bgr,

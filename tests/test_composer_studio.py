@@ -1559,6 +1559,170 @@ async def test_composer_real_ffmpeg_multi_shot_transitions_and_sfx(tmp_path: Pat
     assert "transisi" in out_bf.framing_summary.lower()
 
 
+def test_five_speaker_three_camera_shot_planner() -> None:
+    from atro.core.composer_schema import LayoutLayerConfig
+    from atro.core.schemas import FocusHintItem
+    from atro.modules.cutter.framing.diarization import SpeakerSegment
+    from atro.modules.cutter.framing.face_identity import DetectedFaceObs, FaceIdentityTracker
+    from atro.modules.cutter.framing.face_tracking import FaceBox
+    from atro.modules.cutter.framing.shot_planner import _SampleFrame, plan_podcast_shots_from_observations
+
+    # Deterministic distinct embeddings for 5 speakers (orthogonal-ish unit vectors)
+    def _vec(dim_idx: int) -> np.ndarray:
+        v = np.zeros(128, dtype=np.float32)
+        v[dim_idx * 10 : (dim_idx + 1) * 10] = 1.0
+        return v / float(np.linalg.norm(v))
+
+    v_a, v_b, v_c, v_d, v_e = (_vec(k) for k in range(5))
+
+    tracker = FaceIdentityTracker(sface_threshold=0.50)
+    samples: list[_SampleFrame] = []
+    step = 0.20
+    t = 0.0
+    prev_angle = 0
+    while t <= 15.0:
+        if t < 3.5:
+            # Cam 1 (wide left/center/right: A, B talking loudly, C quiet)
+            angle = 1
+            raw = [
+                DetectedFaceObs(box=FaceBox(0.10, 0.25, 0.12, 0.22, 0.95, 0.4), sface_vec=v_a),
+                DetectedFaceObs(box=FaceBox(0.44, 0.25, 0.12, 0.22, 0.96, 4.8), sface_vec=v_b),
+                DetectedFaceObs(box=FaceBox(0.78, 0.25, 0.12, 0.22, 0.94, 0.3), sface_vec=v_c),
+            ]
+        elif t < 6.0:
+            # Cam 2 (Host D talking, Guest E makes brief 0.4s interjection at 4.2..4.6, Guest A listens)
+            angle = 2
+            e_act = 5.5 if 4.2 <= t <= 4.6 else 0.3
+            d_act = 1.0 if 4.2 <= t <= 4.6 else 4.2
+            raw = [
+                DetectedFaceObs(box=FaceBox(0.16, 0.24, 0.12, 0.22, 0.95, d_act), sface_vec=v_d),
+                DetectedFaceObs(box=FaceBox(0.46, 0.24, 0.12, 0.22, 0.95, e_act), sface_vec=v_e),
+                DetectedFaceObs(box=FaceBox(0.76, 0.24, 0.12, 0.22, 0.95, 0.4), sface_vec=v_a),
+            ]
+        elif t < 9.0:
+            # Cam 3 close-up on Guest B solo
+            angle = 3
+            raw = [
+                DetectedFaceObs(box=FaceBox(0.42, 0.20, 0.16, 0.28, 0.97, 4.5), sface_vec=v_b),
+            ]
+        elif t < 12.0:
+            # Back to Cam 1: reaction POI around 9.4..10.8 highlights C
+            angle = 4
+            raw = [
+                DetectedFaceObs(box=FaceBox(0.10, 0.25, 0.12, 0.22, 0.95, 2.5 if t > 10.9 else 0.4), sface_vec=v_a),
+                DetectedFaceObs(box=FaceBox(0.44, 0.25, 0.12, 0.22, 0.95, 0.3), sface_vec=v_b),
+                DetectedFaceObs(box=FaceBox(0.78, 0.25, 0.12, 0.22, 0.95, 3.6 if 9.2 <= t <= 10.9 else 0.3), sface_vec=v_c),
+            ]
+        else:
+            # 12.0..15.0: Group wide banter (all 4 visible during crosstalk)
+            angle = 5
+            raw = [
+                DetectedFaceObs(box=FaceBox(0.08, 0.25, 0.11, 0.20, 0.94, 2.2), sface_vec=v_a),
+                DetectedFaceObs(box=FaceBox(0.32, 0.25, 0.11, 0.20, 0.94, 2.4), sface_vec=v_b),
+                DetectedFaceObs(box=FaceBox(0.56, 0.25, 0.11, 0.20, 0.94, 2.0), sface_vec=v_d),
+                DetectedFaceObs(box=FaceBox(0.80, 0.25, 0.11, 0.20, 0.94, 1.8), sface_vec=v_e),
+            ]
+
+        is_cut = angle != prev_angle and t > 0.0
+        prev_angle = angle
+        assigned = tracker.assign_frame(raw, angle_id=angle, is_cut=is_cut)
+        # Same-frame uniqueness constraint
+        assert len({f.face_id for f in assigned}) == len(assigned)
+        samples.append(_SampleFrame(rel_t=round(t, 3), abs_t=round(t, 3), angle_id=angle, is_cut=is_cut, faces=assigned))
+        t += step
+
+    diar = [
+        SpeakerSegment(start=0.0, end=3.5, speaker_id="SPK_B", confidence=0.92),
+        SpeakerSegment(start=3.5, end=6.0, speaker_id="SPK_D", confidence=0.90),
+        SpeakerSegment(start=6.0, end=9.0, speaker_id="SPK_B", confidence=0.95),
+        SpeakerSegment(start=9.0, end=12.0, speaker_id="SPK_A", confidence=0.88),
+        SpeakerSegment(start=12.0, end=13.5, speaker_id="SPK_A", confidence=0.85),
+        SpeakerSegment(start=13.5, end=15.0, speaker_id="SPK_D", confidence=0.85),
+    ]
+    hints = [
+        FocusHintItem(t_start=9.2, t_end=10.8, role="reaction", target_hint="reaksi guest c", reason="Tertawa kaget"),
+        FocusHintItem(t_start=12.0, t_end=15.0, role="group", target_hint="semua pembicara", reason="Debat seru bareng"),
+    ]
+    layout = LayoutLayerConfig(mode="single_focus", focus_strategy="auto_topic", group_mode="fit_all_blur", min_shot_sec=1.2)
+    shots = plan_podcast_shots_from_observations(samples, 15.0, layout, diar, focus_hints=hints)
+    assert len(shots) >= 4
+    # No ultra-short whips from 0.4s interjection at t=4.2..4.6
+    for s in shots:
+        assert (s.t_end - s.t_start) >= 0.75
+    # Verify reaction cutaway and group wide blurred_frame segments are produced cleanly
+    reasons = [s.reason for s in shots]
+    assert "reaction" in reasons
+    assert any(s.reason == "group" and s.shot_mode == "blurred_frame" for s in shots)
+    # Cross-camera identity preserved: initial 0..3.5 focused center B (~0.50 cx -> crop.x ~0.33),
+    # 3.5..6.0 stayed focused on left D (~0.22 cx -> crop.x < 0.15) ignoring brief 0.4s interjection
+    assert 0.25 <= shots[0].top_crop.x <= 0.42
+    cam2_shots = [s for s in shots if 3.5 <= s.t_start < 5.5]
+    assert cam2_shots and all(s.top_crop.x < 0.18 for s in cam2_shots)
+
+
+def test_diarization_speaker_map_cache_and_studio_face_lane(tmp_path: Path) -> None:
+    ensure_qt_gui_app()
+    import wave
+    from atro.modules.cutter.framing.diarization import (
+        SpeakerSegment,
+        diarize_audio_window_sync,
+        load_job_speaker_map,
+    )
+    from atro.ui.widgets.clip_studio import ClipStudioWidget
+    from atro.core.composer_schema import CropBoxConfig, ShotCropSegment
+
+    # Create a real synthetic 16kHz 3-second WAV with alternating pulses + silence
+    wav_path = tmp_path / "test_podcast.wav"
+    sr = 16000
+    t_arr = np.arange(sr * 3, dtype=np.float32) / sr
+    sig = np.zeros_like(t_arr)
+    sig[:sr] = 0.25 * np.sin(2 * np.pi * 210 * t_arr[:sr])
+    sig[sr * 2 :] = 0.25 * np.sin(2 * np.pi * 430 * t_arr[sr * 2 :])
+    pcm = (np.clip(sig, -1.0, 1.0) * 32767.0).astype(np.int16)
+    with wave.open(str(wav_path), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sr)
+        wf.writeframes(pcm.tobytes())
+
+    job_dir = tmp_path / "job"
+    segs1 = diarize_audio_window_sync(wav_path, start_sec=0.0, end_sec=3.0, job_dir=job_dir)
+    smap = load_job_speaker_map(job_dir)
+    assert len(smap.windows) == 1
+    assert smap.windows[0].method in ("sherpa_onnx", "spectral_fallback")
+
+    # Deleting WAV proves second call reads strictly from cached speaker_map.json
+    wav_path.unlink()
+    segs2 = diarize_audio_window_sync(wav_path, start_sec=0.2, end_sec=2.8, job_dir=job_dir)
+    assert len(segs2) == len([s for s in segs1 if s.end > 0.2 and s.start < 2.8 and min(2.8, s.end) - max(0.2, s.start) >= 0.15])
+
+    # Verify Studio Face Lane & Speaker Pin/Alias controls
+    studio = ClipStudioWidget(settings_provider=lambda: AppSettings())
+    try:
+        cfg = build_preset_config("podcast", clip_title="Face Lane Test", start_time=0.0, end_time=10.0)
+        cfg.timing.padding_sec = 0.0
+        cfg.layout.framing_tracking_mode = "auto_face"
+        cfg.layout.shot_crops = [
+            ShotCropSegment(t_start=0.0, t_end=5.0, top_crop=CropBoxConfig(x=0.1, y=0.0, w=0.34, h=1.0), speaker_id="SPK_1", reason="speaker_match"),
+            ShotCropSegment(t_start=5.0, t_end=10.0, top_crop=CropBoxConfig(x=0.5, y=0.0, w=0.34, h=1.0), speaker_id="SPK_2", reason="speaker_match"),
+        ]
+        studio._load_config_into_ui(cfg)
+        studio._on_lane_split(2.5)
+        assert len(studio._config.layout.shot_crops) == 3
+        studio._on_lane_speaker_assigned(1, "SPK_3")
+        assert studio._config.layout.shot_crops[1].speaker_id == "SPK_3"
+        assert studio._config.layout.shot_crops[1].reason == "manual"
+        studio.speaker_alias_edit.setText("Narasumber Utama")
+        studio._on_lane_seek(3.0)
+        studio._on_apply_speaker_alias()
+        assert studio._config.layout.speaker_aliases.get("SPK_3") == "Narasumber Utama"
+        assert studio._config.layout.shot_crops[1].top_crop.label == "Narasumber Utama"
+    finally:
+        studio.close()
+        studio.deleteLater()
+
+
+
 
 
 
