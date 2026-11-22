@@ -13,6 +13,7 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QColorDialog,
     QComboBox,
+    QDialog,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
@@ -60,10 +61,17 @@ from atro.core.presets import (
     save_custom_preset,
     save_job_clip_config,
 )
-from atro.core.schemas import AnalysisResult, DownloadResult, JobState, TranscriptResult, TranscriptSegment
+from atro.core.schemas import (
+    AnalysisResult,
+    ClipCandidate,
+    DownloadResult,
+    JobState,
+    TranscriptResult,
+    TranscriptSegment,
+)
 from atro.modules.cutter.backsound import scan_backsound_tracks
 from atro.modules.cutter.composer_renderer import detect_composer_shot_crops_sync
-from atro.modules.cutter.service import apply_initial_style_overrides
+from atro.modules.cutter.service import apply_initial_style_overrides, apply_style_template_from_config
 from atro.ui.widgets.preview_canvas import (
     FrameExtractorCache,
     LivePreviewCanvas9x16,
@@ -210,10 +218,124 @@ class HookTextEdit(QPlainTextEdit):
             self.setPlainText(normalized)
 
 
+class BatchClipRenderDialog(QDialog):
+    """Dialog for selecting multiple or all existing clips to batch-edit and re-render."""
+
+    def __init__(
+        self,
+        clips: list[ClipCandidate],
+        preselected_indices: Optional[list[int]] = None,
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Edit & Render Beberapa / Semua Klip")
+        self.setMinimumWidth(560)
+        self.setMinimumHeight(460)
+        self.action_mode: str = "render"
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(10)
+
+        note = QLabel(
+            "Video sudah melalui proses Transcribe & Kurasi AI. Pilih klip yang ingin "
+            "diperbarui editannya lalu render ulang langsung via FFmpeg:"
+        )
+        note.setWordWrap(True)
+        note.setObjectName("MutedText")
+        layout.addWidget(note)
+
+        sel_bar = QHBoxLayout()
+        sel_all_btn = QPushButton("Pilih Semua")
+        sel_all_btn.setObjectName("SmallAction")
+        sel_all_btn.clicked.connect(lambda: self._set_all_checked(True))
+        sel_none_btn = QPushButton("Batal Pilih")
+        sel_none_btn.setObjectName("SmallAction")
+        sel_none_btn.clicked.connect(lambda: self._set_all_checked(False))
+        sel_bar.addWidget(sel_all_btn)
+        sel_bar.addWidget(sel_none_btn)
+        sel_bar.addStretch()
+        layout.addLayout(sel_bar)
+
+        self.clips_list = QListWidget()
+        pre_set = set(preselected_indices) if preselected_indices is not None else None
+        for idx, clip in enumerate(clips, start=1):
+            label = f"#{idx:02d} — {clip.title} [{clip.start_time:.1f}s – {clip.end_time:.1f}s]"
+            item = QListWidgetItem(label)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            checked = (idx in pre_set) if pre_set is not None else True
+            item.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+            item.setData(Qt.ItemDataRole.UserRole, idx)
+            self.clips_list.addItem(item)
+        layout.addWidget(self.clips_list, 1)
+
+        self.apply_style_chk = QCheckBox(
+            "Terapkan gaya/template & settingan Studio saat ini ke semua klip terpilih"
+        )
+        self.apply_style_chk.setChecked(True)
+        layout.addWidget(self.apply_style_chk)
+
+        self.redetect_face_chk = QCheckBox(
+            "Deteksi ulang kamera multi-angle & fokus wajah pembicara aktif (Active Speaker)"
+        )
+        self.redetect_face_chk.setChecked(True)
+        layout.addWidget(self.redetect_face_chk)
+
+        btns = QHBoxLayout()
+        cancel_btn = QPushButton("Batal")
+        cancel_btn.setObjectName("SmallAction")
+        cancel_btn.clicked.connect(self.reject)
+
+        save_only_btn = QPushButton("Simpan Gaya Saja")
+        save_only_btn.setObjectName("SmallAction")
+        save_only_btn.clicked.connect(lambda: self._finish("save_only"))
+
+        render_btn = QPushButton("Simpan & Render Klip Terpilih (FFmpeg)")
+        render_btn.setObjectName("PrimaryButton")
+        render_btn.clicked.connect(lambda: self._finish("render"))
+
+        btns.addWidget(cancel_btn)
+        btns.addStretch()
+        btns.addWidget(save_only_btn)
+        btns.addWidget(render_btn)
+        layout.addLayout(btns)
+
+    def _set_all_checked(self, checked: bool) -> None:
+        state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+        for r in range(self.clips_list.count()):
+            it = self.clips_list.item(r)
+            if it is not None:
+                it.setCheckState(state)
+
+    def _finish(self, mode: str) -> None:
+        if not self.selected_clip_indices():
+            QMessageBox.warning(self, "Belum Ada Klip Dipilih", "Centang minimal 1 klip terlebih dahulu.")
+            return
+        self.action_mode = mode
+        self.accept()
+
+    def selected_clip_indices(self) -> list[int]:
+        out: list[int] = []
+        for r in range(self.clips_list.count()):
+            it = self.clips_list.item(r)
+            if it is not None and it.checkState() == Qt.CheckState.Checked:
+                val = it.data(Qt.ItemDataRole.UserRole)
+                if isinstance(val, int):
+                    out.append(val)
+        return out
+
+    def should_apply_style(self) -> bool:
+        return self.apply_style_chk.isChecked()
+
+    def should_redetect_faces(self) -> bool:
+        return self.redetect_face_chk.isChecked()
+
+
 class ClipStudioWidget(QWidget):
     """Full Interactive Template Composer, Customization Panel, and 9:16 Live Preview."""
 
     render_requested = pyqtSignal(str, object)  # (job_id, ClipComposerConfig)
+    batch_render_requested = pyqtSignal(str, object, object, bool)  # (job_id, indices, style_cfg, redetect)
     standalone_render_requested = pyqtSignal(str, object)  # (local_video_path, ClipComposerConfig)
     _auto_detect_done = pyqtSignal(int, str, object)  # (request_id, source_path_str, list[ShotCropSegment])
 
@@ -239,6 +361,7 @@ class ClipStudioWidget(QWidget):
         self._syncing_ui: bool = False
         self._detect_in_progress: bool = False
         self._detect_request_id: int = 0
+        self._preselected_batch_indices: Optional[list[int]] = None
 
         self._play_timer = QTimer(self)
         self._play_timer.setInterval(33)  # ~30 FPS live preview playback
@@ -301,7 +424,23 @@ class ClipStudioWidget(QWidget):
 
         tb_layout.addStretch()
 
-        self.export_btn = QPushButton("Simpan & Render Video (FFmpeg)")
+        self.apply_style_all_btn = QPushButton("Terapkan Gaya ke Semua")
+        self.apply_style_all_btn.setObjectName("SmallAction")
+        self.apply_style_all_btn.setToolTip(
+            "Salin gaya template, subtitle, warna, overlay & audio klip ini ke seluruh klip dalam job"
+        )
+        self.apply_style_all_btn.clicked.connect(self._on_apply_style_all_clicked)
+        tb_layout.addWidget(self.apply_style_all_btn)
+
+        self.batch_export_btn = QPushButton("Edit & Render Beberapa/Semua...")
+        self.batch_export_btn.setObjectName("SmallAction")
+        self.batch_export_btn.setToolTip(
+            "Pilih beberapa atau semua klip yang sudah ada untuk dirender ulang sekaligus tanpa transcribe ulang"
+        )
+        self.batch_export_btn.clicked.connect(lambda: self.open_batch_render_dialog())
+        tb_layout.addWidget(self.batch_export_btn)
+
+        self.export_btn = QPushButton("Simpan & Render Klip Ini")
         self.export_btn.setObjectName("PrimaryButton")
         self.export_btn.clicked.connect(self._on_export_clicked)
         tb_layout.addWidget(self.export_btn)
@@ -1239,6 +1378,9 @@ class ClipStudioWidget(QWidget):
         return w
 
     # --- Public Data Loading API ---
+    def set_batch_preselection(self, clip_indices: Optional[list[int]]) -> None:
+        self._preselected_batch_indices = list(clip_indices) if clip_indices is not None else None
+
     def load_job_context(
         self,
         state: Optional[JobState],
@@ -1246,6 +1388,7 @@ class ClipStudioWidget(QWidget):
     ) -> None:
         """Load selected JobState artifacts (metadata, transcript, analysis) into Studio."""
         self._pause_playback()
+        self._preselected_batch_indices = None
         self._job_state = state
         self._download = None
         self._analysis = None
@@ -1375,10 +1518,14 @@ class ClipStudioWidget(QWidget):
 
     def _maybe_schedule_auto_detect(self) -> None:
         """Run background multi-angle detection only when Studio tab is actually visible."""
+        crops = self._config.layout.shot_crops
+        needs_detect = (not crops) or any(
+            (s.top_crop.label or "").startswith("Angle #") for s in crops
+        )
         if (
             self.isVisible()
             and self._config.layout.framing_tracking_mode == "auto_face"
-            and not self._config.layout.shot_crops
+            and needs_detect
             and self._source_path is not None
             and self._source_path.is_file()
             and not self._detect_in_progress
@@ -2178,6 +2325,113 @@ class ClipStudioWidget(QWidget):
                 "Belum Ada Video",
                 "Pilih job klip yang sudah diproses atau klik 'Muat Video...' terlebih dahulu.",
             )
+
+    def apply_current_style_to_clips(
+        self,
+        clip_indices: list[int],
+        reset_auto_face: bool = True,
+    ) -> int:
+        """Apply active Studio style & layout settings to specified clips and persist JSON."""
+        if self._job_state is None or self._analysis is None or not self._analysis.clips:
+            return 0
+        ws_dir = Path(self._job_state.workspace_dir)
+        settings = self._settings_provider()
+        style_cfg = self.current_config()
+        updated = 0
+        for idx in dict.fromkeys(clip_indices):
+            if idx < 1 or idx > len(self._analysis.clips):
+                continue
+            if idx == style_cfg.clip_index:
+                target_cfg = style_cfg.model_copy(deep=True)
+                if reset_auto_face and target_cfg.layout.framing_tracking_mode == "auto_face":
+                    target_cfg.layout.top_crop.auto_detect = True
+                    target_cfg.layout.bottom_crop.auto_detect = True
+                    target_cfg.layout.shot_crops = []
+            else:
+                clip = self._analysis.clips[idx - 1]
+                cfg_file = ws_dir / "clip_configs" / f"clip_{idx:02d}.json"
+                existed = cfg_file.is_file()
+                target_cfg = load_or_create_job_clip_config(
+                    job_dir=ws_dir,
+                    clip_index=idx,
+                    clip_title=clip.title,
+                    start_time=clip.start_time,
+                    end_time=clip.end_time,
+                    edit_format=self._job_state.request.edit_format,
+                    padding_sec=self._job_state.request.padding_sec,
+                    transcript_segments=self._transcript_segments,
+                    backsound_dir=str(settings.backsound_dir),
+                )
+                if not existed:
+                    apply_initial_style_overrides(
+                        target_cfg,
+                        self._job_state.request.initial_style_overrides,
+                    )
+                apply_style_template_from_config(
+                    style_cfg,
+                    target_cfg,
+                    reset_auto_face=reset_auto_face,
+                )
+            save_job_clip_config(ws_dir, target_cfg)
+            updated += 1
+        return updated
+
+    def _on_apply_style_all_clicked(self) -> None:
+        if self._job_state is None or self._analysis is None or not self._analysis.clips:
+            QMessageBox.information(
+                self,
+                "Belum Ada Job",
+                "Pilih job yang sudah selesai dari Daftar Job untuk menerapkan gaya ke semua klip.",
+            )
+            return
+        all_indices = list(range(1, len(self._analysis.clips) + 1))
+        count = self.apply_current_style_to_clips(all_indices, reset_auto_face=True)
+        QMessageBox.information(
+            self,
+            "Gaya Diterapkan ke Semua Klip",
+            f"Gaya Studio saat ini telah disimpan ke {count} klip.\n\n"
+            "Klik 'Edit & Render Beberapa/Semua...' untuk langsung merender ulang videonya.",
+        )
+
+    def open_batch_render_dialog(self, preselected_indices: Optional[list[int]] = None) -> None:
+        if self._job_state is None or self._analysis is None or not self._analysis.clips:
+            QMessageBox.information(
+                self,
+                "Belum Ada Klip Job",
+                "Batch edit/render tersedia untuk klip dari job yang sudah selesai ditranscribe & dipotong.",
+            )
+            return
+        self._pause_playback()
+        pre = (
+            preselected_indices
+            if preselected_indices is not None
+            else self._preselected_batch_indices
+        )
+        dlg = BatchClipRenderDialog(
+            self._analysis.clips,
+            preselected_indices=pre,
+            parent=self,
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        indices = dlg.selected_clip_indices()
+        apply_style = dlg.should_apply_style()
+        redetect = dlg.should_redetect_faces()
+        if dlg.action_mode == "save_only":
+            if apply_style:
+                count = self.apply_current_style_to_clips(indices, reset_auto_face=redetect)
+                QMessageBox.information(
+                    self,
+                    "Pengaturan Batch Disimpan",
+                    f"Gaya Studio disimpan ke {count} klip terpilih.",
+                )
+            return
+
+        style_cfg = self.current_config() if apply_style else None
+        if style_cfg is not None:
+            # Persist active clip changes if active clip was edited before dispatching batch
+            save_job_clip_config(Path(self._job_state.workspace_dir), style_cfg)
+        self.batch_render_requested.emit(self._job_state.job_id, indices, style_cfg, redetect)
 
     def _on_caption_recipe_selected(self) -> None:
         if self._syncing_ui:

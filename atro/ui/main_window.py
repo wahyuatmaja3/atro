@@ -78,6 +78,7 @@ class MainWindow(QMainWindow):
         self._preflight: Optional[PreflightReport] = None
         self._jobs: dict[str, JobState] = {}
         self._job_cards: dict[str, JobCard] = {}
+        self._clip_cards: list[ClipCard] = []
         self._selected_job_id: Optional[str] = None
         self._style_cards: dict[str, StylePresetCard] = {}
         self._current_step: int = 0
@@ -92,6 +93,8 @@ class MainWindow(QMainWindow):
         self._bridge.log_received.connect(self._on_log_received)
         self._bridge.bridge_error.connect(self._on_bridge_error)
         self._bridge.custom_clip_rendered.connect(self._on_custom_clip_rendered)
+        self._bridge.batch_render_progress.connect(self._on_batch_render_progress)
+        self._bridge.batch_clips_rendered.connect(self._on_batch_clips_rendered)
         self._bridge.standalone_clip_rendered.connect(self._on_standalone_clip_rendered)
 
         self._build_ui()
@@ -884,10 +887,39 @@ class MainWindow(QMainWindow):
         cl.setSpacing(8)
 
         clips_hdr = QHBoxLayout()
-        clips_title = QLabel("Hasil Klip Video (Klik 'Ubah Style & Live Preview ->' untuk mengedit tampilan lagi)")
+        clips_title = QLabel("Hasil Klip Video (Centang beberapa/semua klip untuk edit massal, atau klik 'Ubah Style & Live Preview ->')")
         clips_title.setObjectName("SectionTitle")
         clips_hdr.addWidget(clips_title, 1)
         cl.addLayout(clips_hdr)
+
+        batch_bar = QHBoxLayout()
+        batch_bar.setSpacing(8)
+        self.select_all_clips_btn = QPushButton("Pilih Semua")
+        self.select_all_clips_btn.setObjectName("SmallAction")
+        self.select_all_clips_btn.clicked.connect(lambda: self._select_all_step3_clips(True))
+
+        self.deselect_all_clips_btn = QPushButton("Batal Pilih")
+        self.deselect_all_clips_btn.setObjectName("SmallAction")
+        self.deselect_all_clips_btn.clicked.connect(lambda: self._select_all_step3_clips(False))
+
+        self.selected_clips_pill = QLabel("0 klip dipilih")
+        self.selected_clips_pill.setObjectName("VersionPill")
+
+        self.batch_studio_btn = QPushButton("Edit Beberapa / Semua di Studio ->")
+        self.batch_studio_btn.setObjectName("SmallAction")
+        self.batch_studio_btn.clicked.connect(self._open_batch_in_studio)
+
+        self.batch_rerender_btn = QPushButton("Render Ulang Klip Terpilih (FFmpeg)")
+        self.batch_rerender_btn.setObjectName("PrimaryButton")
+        self.batch_rerender_btn.clicked.connect(self._rerender_selected_step3_clips)
+
+        batch_bar.addWidget(self.select_all_clips_btn)
+        batch_bar.addWidget(self.deselect_all_clips_btn)
+        batch_bar.addWidget(self.selected_clips_pill)
+        batch_bar.addStretch()
+        batch_bar.addWidget(self.batch_studio_btn)
+        batch_bar.addWidget(self.batch_rerender_btn)
+        cl.addLayout(batch_bar)
 
         self.clips_scroll = QScrollArea()
         self.clips_scroll.setWidgetResizable(True)
@@ -941,6 +973,7 @@ class MainWindow(QMainWindow):
 
         self.studio_widget = ClipStudioWidget(settings_provider=self._get_settings)
         self.studio_widget.render_requested.connect(self._on_studio_render_requested)
+        self.studio_widget.batch_render_requested.connect(self._on_studio_batch_render_requested)
         self.studio_widget.standalone_render_requested.connect(
             self._on_studio_standalone_render_requested
         )
@@ -1356,25 +1389,59 @@ class MainWindow(QMainWindow):
             self.studio_widget.load_job_context(state, select_clip_index=clip_index)
             self.go_to_step(3)
 
+    def _set_studio_render_busy(self, busy: bool, label_text: Optional[str] = None) -> None:
+        self.studio_widget.export_btn.setEnabled(not busy)
+        self.studio_widget.batch_export_btn.setEnabled(not busy)
+        self.studio_widget.apply_style_all_btn.setEnabled(not busy)
+        if hasattr(self, "batch_rerender_btn"):
+            self.batch_rerender_btn.setEnabled((not busy) and bool(self.selected_step3_clip_indices()))
+        if busy:
+            self.studio_widget.export_btn.setText(label_text or "Sedang Render FFmpeg...")
+        else:
+            self.studio_widget.export_btn.setText("Simpan & Render Klip Ini")
+            self.studio_widget.batch_export_btn.setText("Edit & Render Beberapa/Semua...")
+
     def _on_studio_render_requested(self, job_id: str, config: object) -> None:
         from atro.core.composer_schema import ClipComposerConfig
 
         if isinstance(config, ClipComposerConfig):
-            self.studio_widget.export_btn.setEnabled(False)
-            self.studio_widget.export_btn.setText("Sedang Render FFmpeg...")
+            self._set_studio_render_busy(True, "Sedang Render FFmpeg...")
             self._bridge.render_custom_clip(job_id, config)
+
+    def _on_studio_batch_render_requested(
+        self,
+        job_id: str,
+        clip_indices: object,
+        style_config: object,
+        force_redetect_faces: bool,
+    ) -> None:
+        from atro.core.composer_schema import ClipComposerConfig
+
+        if not isinstance(clip_indices, list) or not clip_indices:
+            return
+        style_cfg = style_config if isinstance(style_config, ClipComposerConfig) else None
+        self._set_studio_render_busy(True, f"Render Batch 0/{len(clip_indices)}...")
+        self.studio_widget.batch_export_btn.setText(f"Batch 0/{len(clip_indices)}...")
+        if hasattr(self, "step3_progress_bar"):
+            self.step3_progress_bar.setValue(0)
+            self.step3_progress_bar.setProperty("tone", "info")
+            _repolish(self.step3_progress_bar)
+        self._bridge.render_batch_custom_clips(
+            job_id=job_id,
+            clip_indices=[int(i) for i in clip_indices],
+            style_template_config=style_cfg,
+            force_redetect_faces=bool(force_redetect_faces),
+        )
 
     def _on_studio_standalone_render_requested(self, source_video_path: str, config: object) -> None:
         from atro.core.composer_schema import ClipComposerConfig
 
         if isinstance(config, ClipComposerConfig):
-            self.studio_widget.export_btn.setEnabled(False)
-            self.studio_widget.export_btn.setText("Sedang Render FFmpeg...")
+            self._set_studio_render_busy(True, "Sedang Render FFmpeg...")
             self._bridge.render_standalone_clip(source_video_path, config)
 
     def _on_custom_clip_rendered(self, job_id: str, rendered: object) -> None:
-        self.studio_widget.export_btn.setEnabled(True)
-        self.studio_widget.export_btn.setText("Simpan & Render Video (FFmpeg)")
+        self._set_studio_render_busy(False)
         state = self._jobs.get(job_id)
         if state is not None and self._selected_job_id == job_id:
             self._refresh_detail_panel(state)
@@ -1385,9 +1452,37 @@ class MainWindow(QMainWindow):
             f"Klip berhasil dirender ulang via FFmpeg:\n{out_path}",
         )
 
+    def _on_batch_render_progress(self, job_id: str, current_idx: int, total_cnt: int, clip_title: str) -> None:
+        self.studio_widget.export_btn.setText(f"Render {current_idx}/{total_cnt}...")
+        self.studio_widget.batch_export_btn.setText(f"Batch {current_idx}/{total_cnt}...")
+        if self._selected_job_id == job_id:
+            pct = int(round((current_idx / max(1, total_cnt)) * 100.0))
+            self.step3_progress_bar.setValue(pct)
+            self.detail_title.setText(
+                f"Job {job_id}  •  Render Batch {current_idx}/{total_cnt}: {clip_title}"
+            )
+            state = self._jobs.get(job_id)
+            if state is not None:
+                self._refresh_detail_panel(state)
+
+    def _on_batch_clips_rendered(self, job_id: str, rendered_obj: object) -> None:
+        self._set_studio_render_busy(False)
+        rendered_list = list(rendered_obj) if isinstance(rendered_obj, list) else []
+        state = self._jobs.get(job_id)
+        if state is not None and self._selected_job_id == job_id:
+            self._refresh_detail_panel(state)
+            if state.status == JobStatus.COMPLETED:
+                self.step3_progress_bar.setValue(100)
+                self.step3_progress_bar.setProperty("tone", "ok")
+                _repolish(self.step3_progress_bar)
+        QMessageBox.information(
+            self,
+            "Render Batch Selesai",
+            f"{len(rendered_list)} klip berhasil diperbarui dan dirender ulang via FFmpeg.",
+        )
+
     def _on_standalone_clip_rendered(self, rendered: object) -> None:
-        self.studio_widget.export_btn.setEnabled(True)
-        self.studio_widget.export_btn.setText("Simpan & Render Video (FFmpeg)")
+        self._set_studio_render_busy(False)
         out_path = getattr(rendered, "output_path", "")
         QMessageBox.information(
             self,
@@ -1396,9 +1491,57 @@ class MainWindow(QMainWindow):
         )
 
     def _on_bridge_error(self, msg: str) -> None:
-        self.studio_widget.export_btn.setEnabled(True)
-        self.studio_widget.export_btn.setText("Simpan & Render Video (FFmpeg)")
+        self._set_studio_render_busy(False)
         QMessageBox.critical(self, "Kesalahan Pipeline", msg)
+
+    def selected_step3_clip_indices(self) -> list[int]:
+        return [card.clip_index() for card in self._clip_cards if card.is_selected()]
+
+    def _select_all_step3_clips(self, checked: bool) -> None:
+        for card in self._clip_cards:
+            card.select_chk.blockSignals(True)
+            card.set_selected(checked)
+            card.select_chk.blockSignals(False)
+        self._update_selected_clips_ui()
+
+    def _update_selected_clips_ui(self) -> None:
+        if not hasattr(self, "selected_clips_pill"):
+            return
+        total = len(self._clip_cards)
+        sel = len(self.selected_step3_clip_indices())
+        self.selected_clips_pill.setText(f"{sel}/{total} klip dipilih" if total else "0 klip dipilih")
+        has_clips = total > 0
+        self.select_all_clips_btn.setEnabled(has_clips)
+        self.deselect_all_clips_btn.setEnabled(has_clips)
+        self.batch_studio_btn.setEnabled(has_clips)
+        self.batch_rerender_btn.setEnabled(sel > 0 and self.studio_widget.export_btn.isEnabled())
+
+    def _open_batch_in_studio(self) -> None:
+        if not self._selected_job_id:
+            return
+        state = self._jobs.get(self._selected_job_id)
+        if state is None:
+            return
+        indices = self.selected_step3_clip_indices() or [c.clip_index() for c in self._clip_cards]
+        if not indices:
+            return
+        self.studio_widget.load_job_context(state, select_clip_index=indices[0])
+        self.studio_widget.set_batch_preselection(indices)
+        self.go_to_step(3)
+
+    def _rerender_selected_step3_clips(self) -> None:
+        if not self._selected_job_id:
+            return
+        indices = self.selected_step3_clip_indices()
+        if not indices:
+            QMessageBox.warning(self, "Belum Ada Klip Dipilih", "Centang minimal 1 klip terlebih dahulu.")
+            return
+        self._on_studio_batch_render_requested(
+            self._selected_job_id,
+            indices,
+            None,
+            True,
+        )
 
     def _on_job_card_clicked(self, job_id: str) -> None:
         self._select_job(job_id)
@@ -1503,6 +1646,14 @@ class MainWindow(QMainWindow):
         clips_dir = Path(state.workspace_dir) / "clips"
         self.open_clips_dir_btn.setVisible(clips_dir.is_dir())
 
+        prev_checked = (
+            {c.clip_index(): c.is_selected() for c in self._clip_cards}
+            if getattr(self, "_last_refreshed_job_id", None) == state.job_id
+            else {}
+        )
+        self._last_refreshed_job_id = state.job_id
+        self._clip_cards.clear()
+
         for i in reversed(range(self.clips_vbox.count())):
             item = self.clips_vbox.itemAt(i)
             if item is None:
@@ -1529,7 +1680,11 @@ class MainWindow(QMainWindow):
             self.clips_empty_label.setVisible(False)
             for clip in render_result.rendered_clips:
                 card = ClipCard(clip)
+                if clip.clip_index in prev_checked:
+                    card.set_selected(prev_checked[clip.clip_index])
                 card.customize_requested.connect(self._open_clip_in_studio)
+                card.selection_changed.connect(lambda _i, _c: self._update_selected_clips_ui())
+                self._clip_cards.append(card)
                 self.clips_vbox.addWidget(card)
         else:
             if state.status == JobStatus.COMPLETED:
@@ -1546,6 +1701,7 @@ class MainWindow(QMainWindow):
             self.clips_empty_label.setVisible(True)
 
         self.clips_vbox.addStretch()
+        self._update_selected_clips_ui()
 
     def _open_job_folder(self, job_id: str) -> None:
         state = self._jobs.get(job_id)

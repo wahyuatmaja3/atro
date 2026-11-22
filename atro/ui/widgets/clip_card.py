@@ -9,6 +9,7 @@ from typing import Optional
 
 from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -33,6 +34,7 @@ class ClipCard(QFrame):
     """Displays metadata and playback actions for one rendered MP4 clip."""
 
     customize_requested = pyqtSignal(int)
+    selection_changed = pyqtSignal(int, bool)
 
     def __init__(self, clip: RenderedClip, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -43,9 +45,16 @@ class ClipCard(QFrame):
         root.setContentsMargins(14, 12, 14, 12)
         root.setSpacing(8)
 
-        # Header row: index + title + virality badge
+        # Header row: batch checkbox + index + title + virality badge
         header = QHBoxLayout()
         header.setSpacing(8)
+
+        self.select_chk = QCheckBox()
+        self.select_chk.setChecked(True)
+        self.select_chk.setToolTip("Pilih klip ini untuk edit / render ulang massal")
+        self.select_chk.toggled.connect(
+            lambda checked: self.selection_changed.emit(self._clip.clip_index, checked)
+        )
 
         title_lbl = QLabel(f"#{clip.clip_index:02d}  {clip.title}")
         title_lbl.setStyleSheet("font-size: 14px; font-weight: 600; color: #F8FAFC;")
@@ -61,6 +70,7 @@ class ClipCard(QFrame):
             tone = "warn"
         score_pill.setProperty("tone", tone)
 
+        header.addWidget(self.select_chk, 0)
         header.addWidget(title_lbl, 1)
         header.addWidget(score_pill, 0)
         root.addLayout(header)
@@ -125,6 +135,15 @@ class ClipCard(QFrame):
         actions.addWidget(locate_btn)
         actions.addWidget(play_btn)
         root.addLayout(actions)
+
+    def is_selected(self) -> bool:
+        return self.select_chk.isChecked()
+
+    def set_selected(self, checked: bool) -> None:
+        self.select_chk.setChecked(checked)
+
+    def clip_index(self) -> int:
+        return self._clip.clip_index
 
     def _open_clip(self) -> None:
         path = Path(self._clip.output_path)
