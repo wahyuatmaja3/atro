@@ -95,6 +95,48 @@ class CropBoxConfig(BaseModel):
         return self
 
 
+TransitionType = Literal[
+    "none",
+    "fade",
+    "crossfade",
+    "dip_black",
+    "slide_left",
+    "slide_right",
+    "slide_up",
+    "slide_down",
+    "zoom_in",
+    "zoom_out",
+    "whip",
+    "blur_swap",
+    "glitch",
+    "wipe",
+]
+TransitionEasing = Literal["linear", "ease_in_out", "ease_out"]
+TransitionMode = Literal["fixed", "auto"]
+TransitionSfx = Literal["none", "whoosh", "swipe", "pop"]
+FocusStrategy = Literal["auto_topic", "active_speaker", "manual"]
+GroupMode = Literal["focus_only", "fit_all_blur", "grid"]
+ShotReason = Literal[
+    "speaker_match",
+    "reaction",
+    "group",
+    "fallback",
+    "manual",
+    "legacy",
+]
+
+
+class TransitionConfig(BaseModel):
+    """Transition applied when the framing cuts between two shots."""
+
+    type: TransitionType = "none"
+    mode: TransitionMode = "fixed"
+    duration_sec: float = Field(default=0.25, ge=0.10, le=0.60)
+    easing: TransitionEasing = "ease_in_out"
+    sfx: TransitionSfx = "none"
+    sfx_volume: float = Field(default=0.5, ge=0.0, le=1.0)
+
+
 class ShotCropSegment(BaseModel):
     """Per-camera-angle / per-shot crop window within clip-local time [t_start, t_end]."""
 
@@ -103,6 +145,11 @@ class ShotCropSegment(BaseModel):
     top_crop: CropBoxConfig = Field(default_factory=CropBoxConfig)
     bottom_crop: Optional[CropBoxConfig] = None
     shot_mode: Literal["single_focus", "multi_speaker_split", "blurred_frame"] = "single_focus"
+    speaker_id: Optional[str] = None
+    face_id: Optional[str] = None
+    reason: ShotReason = "legacy"
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    transition_in: Optional[TransitionConfig] = None
 
     @model_validator(mode="after")
     def _validate_span(self) -> "ShotCropSegment":
@@ -164,6 +211,11 @@ class LayoutLayerConfig(BaseModel):
         )
     )
     shot_crops: list[ShotCropSegment] = Field(default_factory=list)
+    transition: TransitionConfig = Field(default_factory=TransitionConfig)
+    focus_strategy: FocusStrategy = "auto_topic"
+    group_mode: GroupMode = "fit_all_blur"
+    min_shot_sec: float = Field(default=1.2, ge=0.3, le=5.0)
+    pinned_speaker_id: Optional[str] = None
 
     @field_validator("frame_border_color_hex", mode="before")
     @classmethod

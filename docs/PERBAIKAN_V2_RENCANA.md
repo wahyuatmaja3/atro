@@ -300,7 +300,18 @@ Total kasar: **±4–5 minggu kerja** satu orang. Fase bisa dijalankan terpisah 
 
 ---
 
-## 9. Risiko & Pertanyaan Terbuka
+## 9. Keputusan Pengguna (2026-11-22)
+
+| Pertanyaan | Jawaban | Dampak ke rencana |
+| --- | --- | --- |
+| Jumlah orang / kamera | **5 orang, 3 kamera** | Mode grup jadi default untuk diskusi ramai; identitas wajah antar-angle wajib (F3); set uji berlabel harus 5 orang. |
+| ASR | **Lokal saja** | Tidak ada ASR cloud. Fokus mempercepat Whisper lokal. |
+| Platform | **YouTube Shorts & TikTok** | Preset platform hanya dua ini (9:16, durasi ≤60 dtk Shorts / ≤3 mnt TikTok). Preset lain ditunda. |
+| GPU | **GTX 1050** | VRAM kecil (2–4 GB): pakai model `small` int8 di GPU; wajib bundle DLL CUDA 12 (cublas/cudnn) agar tidak jatuh ke CPU; encoder NVENC (Pascal didukung). Diarization tetap di CPU. |
+| Mode UI | **Mudah (default) + Advanced opsional** | Seperti di bagian 4: Mudah untuk awam, Advanced membuka kontrol lengkap. |
+| Commit | **Commit dulu** | Selesai: commit `28e02b6`, `6432980`, `448f6f2`, `8e79190`, `dc70fc8` (belum di-push). |
+
+## 9b. Risiko & Pertanyaan Terbuka (sisa)
 
 **Risiko**
 1. Diarization lokal pada CPU bisa lambat untuk video >2 jam → perlu cache dan pilihan "lewati".
@@ -308,15 +319,9 @@ Total kasar: **±4–5 minggu kerja** satu orang. Fase bisa dijalankan terpisah 
 3. Embedding wajah bisa salah klaster bila pencahayaan berubah drastis → sediakan koreksi manual dan label alias.
 4. Rombak UI besar berisiko merusak alur yang sudah stabil → bangun di atas `ClipComposerConfig` yang sama, jangan ubah logika render saat F5.
 5. Akurasi LLM untuk POI tidak deterministik (tanpa `temperature`) → selalu ada fallback heuristik dan validasi.
+6. 5 orang dengan 3 kamera: satu kamera bisa menampilkan 2–3 orang sekaligus, sehingga pemetaan suara↔wajah bergantung pada korelasi seluruh video, bukan per shot.
 
-**Pertanyaan untuk Anda**
-1. Konten podcast utama Anda: biasanya **berapa orang** dan **berapa kamera** (kamera tetap atau berpindah)? Ini menentukan mode grup default.
-2. Mau **ASR cloud** (lebih cepat, berbayar) sebagai opsi, atau tetap 100% lokal?
-3. Platform tujuan utama (TikTok, Reels, Shorts, dll.)? Menentukan preset platform dan durasi.
-4. Mau **GPU** dipakai (kartu NVIDIA ada)? Menentukan strategi Whisper dan encoder.
-5. Isi dua post X/Threads (lihat bagian 0).
-6. Mode UI default: **Mudah** (disarankan) atau **Pro**?
-7. Apakah perubahan sekarang di working tree (belum commit) di-commit dulu sebelum fase F1 dimulai?
+**Masih terbuka:** isi post X/Threads (bagian 0).
 
 ---
 
