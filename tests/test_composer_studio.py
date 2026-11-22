@@ -1020,4 +1020,252 @@ async def test_podcast_multi_angle_face_detection_and_ffmpeg_render(
         cap_out.release()
 
 
+def test_active_speaker_selection_in_two_person_shot(tmp_path: Path, monkeypatch) -> None:
+    import cv2
+    from atro.modules.cutter import composer_renderer as cr_mod
+    from atro.modules.cutter.framing import face_tracking as ft_mod
+
+    src_mp4 = tmp_path / "two_speakers_turns.mp4"
+    writer = cv2.VideoWriter(
+        str(src_mp4),
+        cv2.VideoWriter_fourcc(*"mp4v"),
+        25.0,
+        (1280, 720),
+    )
+    assert writer.isOpened()
+    try:
+        for i in range(200):  # 8.0 seconds @ 25 FPS
+            frame = np.full((720, 1280, 3), (38, 44, 54), dtype=np.uint8)
+            # Stationary heads & eyes for both speakers
+            cv2.rectangle(frame, (179, 158), (384, 374), (160, 178, 204), -1)  # LEFT face
+            cv2.rectangle(frame, (220, 200), (340, 232), (45, 45, 45), -1)     # LEFT eyes
+            cv2.rectangle(frame, (896, 158), (1101, 374), (160, 178, 204), -1) # RIGHT face
+            cv2.rectangle(frame, (940, 200), (1060, 232), (45, 45, 45), -1)    # RIGHT eyes
+
+            mouth_open = (i % 4) < 2
+            if i < 100:
+                # 0.0..4.0s: LEFT is silent (static mouth), RIGHT speaks rapidly
+                cv2.rectangle(frame, (240, 306), (320, 322), (60, 50, 50), -1)
+                if mouth_open:
+                    cv2.rectangle(frame, (946, 290), (1052, 344), (245, 245, 245), -1)
+                else:
+                    cv2.rectangle(frame, (946, 306), (1052, 322), (30, 30, 30), -1)
+            else:
+                # 4.0..8.0s: RIGHT is silent (static mouth), LEFT speaks rapidly
+                cv2.rectangle(frame, (955, 306), (1045, 322), (60, 50, 50), -1)
+                if mouth_open:
+                    cv2.rectangle(frame, (230, 290), (336, 344), (245, 245, 245), -1)
+                else:
+                    cv2.rectangle(frame, (230, 306), (336, 322), (30, 30, 30), -1)
+            writer.write(frame)
+    finally:
+        writer.release()
+
+    # Fixed 2-person wide shot returning both faces so real mouth activity decides who speaks
+    def _two_face_detector(_small, _gray, _y, _f, _p, **_kwargs):
+        return [
+            ft_mod.FaceBox(x=0.14, y=0.22, w=0.16, h=0.30, conf=0.95),
+            ft_mod.FaceBox(x=0.70, y=0.22, w=0.16, h=0.30, conf=0.95),
+        ]
+
+    monkeypatch.setattr(ft_mod, "_detect_faces_in_frame", _two_face_detector)
+
+    cfg = build_preset_config(
+        "podcast",
+        clip_title="Debat Dua Pembicara",
+        start_time=0.0,
+        end_time=8.0,
+        clip_index=1,
+        padding_sec=0.0,
+    )
+    segs = cr_mod.apply_auto_detect_to_layout_sync(
+        source_path=src_mp4,
+        start_sec=0.0,
+        end_sec=8.0,
+        layout=cfg.layout,
+        src_w=1280,
+        src_h=720,
+        fps=25.0,
+    )
+    assert len(segs) >= 2
+    # Segment 1 (0..4s) must track the RIGHT active speaker, Segment 2 (4..8s) must switch to LEFT speaker
+    assert segs[0].top_crop.x > 0.45
+    assert segs[-1].top_crop.x < 0.30
+    assert segs[0].top_crop.label.startswith("Speaker #")
+
+
+@pytest.mark.asyncio
+async def test_batch_apply_style_and_batch_render_multiple_clips(tmp_path: Path) -> None:
+    from atro.core.presets import load_or_create_job_clip_config
+    from atro.core.schemas import (
+        AnalysisResult,
+        ClipCandidate,
+        JobArtifacts,
+        JobRequest,
+        JobState,
+        JobStatus,
+        RenderResult,
+        RenderedClip,
+        TranscriptResult,
+    )
+    from atro.pipeline.state_store import create_job_state, save_state
+    from atro.ui.widgets.clip_studio import ClipStudioWidget
+
+    ensure_qt_gui_app()
+    ws_dir = tmp_path / "ws"
+    job_id = "job_batch_01"
+    job_dir = ws_dir / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+    settings = AppSettings(
+        workspace_dir=ws_dir,
+        bin_dir=tmp_path / "bin",
+        backsound_dir=tmp_path / "bgm",
+    )
+    preflight = check_startup_dependencies(settings)
+    if not (preflight.ffmpeg.available and preflight.ffprobe.available):
+        pytest.skip("FFmpeg/ffprobe required")
+
+    source_mp4 = job_dir / "source.mp4"
+    subprocess.run(
+        [
+            preflight.ffmpeg.path,
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=6:size=1280x720:rate=25",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=6",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-shortest",
+            str(source_mp4),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+    dl = DownloadResult(
+        job_id=job_id,
+        url="https://youtu.be/batch",
+        video_id="batch",
+        title="Podcast Batch Test",
+        channel="ATROTester",
+        duration_sec=6.0,
+        width=1280,
+        height=720,
+        fps=25.0,
+        has_audio=True,
+        source_video_path=str(source_mp4),
+    )
+    (job_dir / "metadata.json").write_text(dl.model_dump_json(indent=2), encoding="utf-8")
+
+    tr = TranscriptResult(
+        job_id=job_id,
+        source="faster_whisper",
+        language="id",
+        segments=[
+            TranscriptSegment(index=0, start=0.2, end=1.8, text="Klip satu membahas strategi awal"),
+            TranscriptSegment(index=1, start=2.2, end=3.8, text="Klip dua membahas eksekusi cepat"),
+            TranscriptSegment(index=2, start=4.2, end=5.8, text="Klip tiga membahas hasil akhir"),
+        ],
+    )
+    (job_dir / "transcript.json").write_text(tr.model_dump_json(indent=2), encoding="utf-8")
+
+    analysis = AnalysisResult(
+        job_id=job_id,
+        model="gemini-4-neon",
+        clips=[
+            ClipCandidate(title="Judul Klip Satu", start_time=0.0, end_time=2.0, virality_score=9, reason="Menarik"),
+            ClipCandidate(title="Judul Klip Dua", start_time=2.0, end_time=4.0, virality_score=8, reason="Jelas"),
+            ClipCandidate(title="Judul Klip Tiga", start_time=4.0, end_time=6.0, virality_score=8, reason="Kuat"),
+        ],
+    )
+    (job_dir / "analysis.json").write_text(analysis.model_dump_json(indent=2), encoding="utf-8")
+
+    req = JobRequest(source_type="local_file", local_video_path=str(source_mp4), clip_count=3)
+    state = create_job_state(ws_dir, req, job_id=job_id)
+    state.status = JobStatus.COMPLETED
+    state.current_stage = "completed"
+    state.progress_pct = 100.0
+    state.artifacts = JobArtifacts(
+        metadata_json=str(job_dir / "metadata.json"),
+        transcript_json=str(job_dir / "transcript.json"),
+        analysis_json=str(job_dir / "analysis.json"),
+    )
+    save_state(state)
+
+    studio = ClipStudioWidget(settings_provider=lambda: settings)
+    try:
+        studio.load_job_context(state, select_clip_index=1)
+        studio.apply_preset("gaming_split")
+        studio.hook_size_spin.setValue(26)
+        studio.sub_upper_chk.setChecked(False)
+        studio.sub_size_spin.setValue(58)
+        updated_count = studio.apply_current_style_to_clips([1, 2, 3], reset_auto_face=True)
+        assert updated_count == 3
+
+        # Verify each saved JSON inherited new template + hook size while preserving own title & window
+        expected_windows = [(0.0, 2.0, "Judul Klip Satu"), (2.0, 4.0, "Judul Klip Dua"), (4.0, 6.0, "Judul Klip Tiga")]
+        for idx, (st, en, title) in enumerate(expected_windows, start=1):
+            loaded_cfg = load_or_create_job_clip_config(
+                job_dir=job_dir,
+                clip_index=idx,
+                clip_title=title,
+                start_time=st,
+                end_time=en,
+            )
+            assert loaded_cfg.clip_title == title
+            assert loaded_cfg.timing.start_time == pytest.approx(st, abs=0.01)
+            assert loaded_cfg.timing.end_time == pytest.approx(en, abs=0.01)
+            assert loaded_cfg.layout.mode == "split_screen"
+            assert loaded_cfg.overlays.hook_banner.font_size == 26
+            assert loaded_cfg.overlays.hook_banner.text == title
+            assert loaded_cfg.subtitles.uppercase is False
+            assert loaded_cfg.subtitles.font_size == 58
+
+        # Disable TTS for fast offline test rendering, then batch-render clips [1, 2, 3]
+        batch_style = studio.current_config()
+        batch_style.timing.opening_tts_enabled = False
+        batch_style.overlays.climax_effects.progress_bar_enabled = False
+    finally:
+        studio.close()
+        studio.deleteLater()
+
+    prog_events: list[tuple[int, int, str]] = []
+    rendered_list = await CutterService().render_batch_clips_with_composer(
+        job_id=job_id,
+        download=dl,
+        analysis=analysis,
+        job_dir=job_dir,
+        preflight=preflight,
+        logger=JobLogger(job_id, job_dir / "job.log"),
+        clip_indices=[1, 2, 3],
+        transcript_segments=tr.segments,
+        settings=settings,
+        style_template_config=batch_style,
+        force_redetect_faces=True,
+        on_clip_progress=lambda d, t, ttl: prog_events.append((d, t, ttl)),
+        request=req,
+    )
+    assert len(rendered_list) == 3
+    assert [p[:2] for p in prog_events] == [(1, 3), (2, 3), (3, 3)]
+    for item in rendered_list:
+        assert Path(item.output_path).is_file()
+        assert Path(item.output_path).stat().st_size > 0
+        assert item.subtitles_burned is True
+
+    rr = RenderResult.model_validate_json((job_dir / "render_result.json").read_text(encoding="utf-8"))
+    assert len(rr.rendered_clips) == 3
+
+
+
 
