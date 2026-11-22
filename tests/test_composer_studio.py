@@ -1722,6 +1722,107 @@ def test_diarization_speaker_map_cache_and_studio_face_lane(tmp_path: Path) -> N
         studio.deleteLater()
 
 
+def test_twenty_four_plus_template_packs_gallery_and_atrotpl_roundtrip(tmp_path: Path) -> None:
+    ensure_qt_gui_app()
+    from atro.core.presets import (
+        TEMPLATE_CATEGORIES,
+        export_template_package,
+        import_template_package,
+        recommend_templates_for_context,
+        reload_ready_templates,
+        render_template_thumbnail_qimage,
+    )
+    from atro.modules.cutter.composer_renderer import compile_composer_ffmpeg_plan
+    from atro.ui.widgets.template_gallery import TemplateGalleryWidget
+
+    packs = reload_ready_templates(user_base_dir=tmp_path)
+    assert len(packs) >= 24
+    cats = {m.get("category") for m in packs.values()}
+    assert len(cats) == len(TEMPLATE_CATEGORIES) == 9
+
+    src = np.full((360, 640, 3), (45, 55, 70), dtype=np.uint8)
+    segs = [
+        TranscriptSegment(
+            index=0,
+            start=0.0,
+            end=4.0,
+            text="Tips cuan cepat dari podcast!",
+            words=[
+                TranscriptWord(word="Tips", start=0.1, end=0.7),
+                TranscriptWord(word="cuan", start=0.7, end=1.4),
+                TranscriptWord(word="cepat", start=1.4, end=2.2),
+                TranscriptWord(word="podcast!", start=2.2, end=3.6),
+            ],
+        )
+    ]
+
+    for tid in packs:
+        cfg = build_ready_template_config(tid, clip_title=f"Uji {tid}", start_time=0.0, end_time=6.0)
+        cfg.timing.padding_sec = 0.0
+        img = render_preview_frame(src, cfg, rel_time_sec=1.2, segments=segs, clip_start_sec=0.0, clip_end_sec=6.0)
+        assert img.width() == 1080 and img.height() == 1920
+
+        ass = generate_composer_ass_file(tmp_path / f"{tid}.ass", cfg, segs, clip_duration_sec=6.0, clip_start_sec=0.0, clip_end_sec=6.0)
+        if cfg.subtitles.enabled:
+            assert ass is not None and ass.is_file()
+
+        plan = compile_composer_ffmpeg_plan(
+            config=cfg,
+            src_w=640,
+            src_h=360,
+            fps=30.0,
+            duration_sec=6.0,
+            work_dir=tmp_path / f"plan_{tid}",
+            segments=segs,
+            clip_start_sec=0.0,
+            clip_end_sec=6.0,
+        )
+        assert plan.filter_lines and plan.video_output_label == "vout"
+
+    # Verify WYSIWYG thumbnail rendering helper
+    thumb = render_template_thumbnail_qimage("podcast_panel_5_orang", width=120, height=214)
+    assert thumb.width() == 120 and thumb.height() == 214
+
+    # Verify context-aware template recommendations
+    assert "gaming_split" in recommend_templates_for_context(title="Clutch Valorant Ranked", edit_format="game")
+    assert "biz_crypto_chart" in recommend_templates_for_context(title="Strategi Saham & Cuan Crypto")
+    assert "religi_tausiyah_kalem" in recommend_templates_for_context(title="Kajian Ustadz Tentang Doa")
+    assert "podcast_panel_5_orang" in recommend_templates_for_context(title="Podcast Ngobrol Bareng Host & Tamu")
+
+    # Verify .atrotpl export & import ZIP roundtrip
+    custom_cfg = build_ready_template_config("podcast_panel_5_orang", clip_title="Custom Pack")
+    custom_cfg.subtitles.highlight_color_hex = "#FF00AA"
+    pkg_path = export_template_package(custom_cfg, tmp_path / "my_pack.atrotpl", title="Paket Pink Podcast", category="Podcast")
+    assert pkg_path.is_file()
+    imported_id = import_template_package(pkg_path, user_base_dir=tmp_path)
+    packs_after = reload_ready_templates(user_base_dir=tmp_path)
+    try:
+        assert imported_id in packs_after
+        restored_cfg = build_ready_template_config(imported_id, clip_title="Restored Clip")
+        assert restored_cfg.subtitles.highlight_color_hex == "#FF00AA"
+    finally:
+        # Clean up isolated custom template test file & restore global registry cleanly
+        user_tpl_file = tmp_path / "templates" / f"{imported_id}.json"
+        if user_tpl_file.is_file():
+            user_tpl_file.unlink()
+        reload_ready_templates(user_base_dir=tmp_path)
+
+    # Verify TemplateGalleryWidget search & category filter UI
+    gallery = TemplateGalleryWidget(columns=2, favorites=["podcast"], recommended=["podcast_panel_5_orang"])
+    try:
+        assert len(gallery.cards) >= 24
+        gallery.category_combo.setCurrentIndex(gallery.category_combo.findData("__REC__"))
+        assert gallery.cards["podcast_panel_5_orang"].isHidden() is False
+        assert gallery.cards["gaming_split"].isHidden() is True
+        gallery.category_combo.setCurrentIndex(0)
+        gallery.search_input.setText("subathon")
+        assert gallery.cards["subathon"].isHidden() is False
+    finally:
+        gallery.close()
+        gallery.deleteLater()
+
+
+
 
 
 

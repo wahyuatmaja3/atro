@@ -52,6 +52,10 @@ class AppSettings(BaseModel):
     backsound_dir: Path = Field(default_factory=lambda: get_app_base_dir() / "backsound")
     backsound_volume: float = Field(default=0.14, ge=0.0, le=1.0)
     enable_backsound_ducking: bool = True
+    favorite_templates: list[str] = Field(default_factory=list)
+    ui_theme: Literal["dark", "light"] = "dark"
+    ui_advanced_mode: bool = False
+    ui_reduce_motion: bool = False
 
     @field_validator("workspace_dir", "bin_dir", "backsound_dir", mode="before")
     @classmethod

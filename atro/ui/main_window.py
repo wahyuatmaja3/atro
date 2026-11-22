@@ -40,7 +40,9 @@ from atro.core.presets import (
     READY_TEMPLATES,
     build_ready_template_config,
     normalize_ready_template_id,
+    recommend_templates_for_context,
 )
+from atro.ui.widgets.template_gallery import TemplateGalleryWidget
 from atro.core.schemas import (
     JobRequest,
     JobState,
@@ -464,19 +466,17 @@ class MainWindow(QMainWindow):
         self.format_combo.addItem("Subathon", "subathon")
         self.format_combo.setVisible(False)
 
-        cards_grid = QGridLayout()
-        cards_grid.setSpacing(10)
-        for idx, (tid, meta) in enumerate(READY_TEMPLATES.items()):
-            sc = ReadyTemplateCard(
-                tid,
-                str(meta["badge"]),
-                str(meta["title"]),
-                str(meta["description"]),
-            )
-            sc.clicked.connect(self._select_initial_style)
-            self._style_cards[tid] = sc
-            cards_grid.addWidget(sc, idx // 4, idx % 4)
-        sty_l.addLayout(cards_grid)
+        self.step2_gallery = TemplateGalleryWidget(
+            columns=3,
+            favorites=list(self._settings.favorite_templates),
+            recommended=recommend_templates_for_context(edit_format=self._settings.default_edit_format),
+            scroll_max_height=345,
+            parent=sty_card,
+        )
+        self.step2_gallery.template_selected.connect(self._select_initial_style)
+        self.step2_gallery.favorite_toggled.connect(self._on_step2_template_favorite_toggled)
+        self._style_cards = self.step2_gallery.cards
+        sty_l.addWidget(self.step2_gallery)
 
         self._selected_template_id: str = "podcast"
         self._syncing_step2 = False
@@ -1018,6 +1018,8 @@ class MainWindow(QMainWindow):
 
         for cid, card in self._style_cards.items():
             card.set_selected(cid == tid)
+        if hasattr(self, "step2_gallery"):
+            self.step2_gallery.set_selected(tid)
 
         self._syncing_step2 = True
         idx = self.format_combo.findData(job_fmt)
@@ -1141,6 +1143,17 @@ class MainWindow(QMainWindow):
             clip_start_sec=0.0,
             clip_end_sec=12.0,
         )
+
+    def _on_step2_template_favorite_toggled(self, template_id: str, is_fav: bool) -> None:
+        favs = list(self._settings.favorite_templates)
+        if is_fav and template_id not in favs:
+            favs.append(template_id)
+        elif not is_fav and template_id in favs:
+            favs.remove(template_id)
+        self._settings.favorite_templates = favs
+        save_settings(self._settings)
+        if hasattr(self.studio_widget, "template_gallery"):
+            self.studio_widget.template_gallery.set_favorites(favs)
 
     # --- Existing Pipeline & State Handlers ---
     def _load_existing_jobs(self) -> None:

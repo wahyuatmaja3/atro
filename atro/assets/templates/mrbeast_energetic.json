@@ -1,0 +1,21 @@
+{
+  "id": "mrbeast_energetic",
+  "category": "Podcast",
+  "title": "MrBeast Pill Energetik",
+  "badge": "Kapsul Aktif • Zoom Klimaks",
+  "description": "Kapsul oranye bergerak per kata, label topik atas, hook zoom cepat & zoom punch di klimaks.",
+  "base_preset": "podcast",
+  "job_edit_format": "podcast",
+  "layout_mode": "single_focus",
+  "caption_recipe": "mrbeast_pill",
+  "placement_preset": "bottom_safe",
+  "hook_enabled": true,
+  "hook_transition_in": "zoom",
+  "vignette_enabled": true,
+  "topic_header_enabled": true,
+  "zoom_punch_enabled": true,
+  "font_family": "Arial Black",
+  "transition_mode": "auto",
+  "transition_type": "zoom_in",
+  "transition_sfx": "whoosh"
+}

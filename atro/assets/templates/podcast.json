@@ -1,0 +1,18 @@
+{
+  "id": "podcast",
+  "category": "Podcast",
+  "title": "Podcast Focus (Hormozi)",
+  "badge": "1 Pembicara • Dual Warna",
+  "description": "Fokus penuh 9:16 ke pembicara + Hook Banner pembuka + teks tebal dual warna & auto-emoji.",
+  "base_preset": "podcast",
+  "job_edit_format": "podcast",
+  "layout_mode": "single_focus",
+  "caption_recipe": "hormozi_viral",
+  "placement_preset": "bottom_safe",
+  "hook_enabled": true,
+  "hook_transition_in": "fade",
+  "vignette_enabled": true,
+  "topic_header_enabled": false,
+  "zoom_punch_enabled": false,
+  "font_family": "Arial Black"
+}

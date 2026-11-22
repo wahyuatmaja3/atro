@@ -1,0 +1,23 @@
+{
+  "id": "comedy_punch_whip",
+  "category": "Komedi",
+  "title": "Komedi Whip & Pop",
+  "badge": "1-2 Kata Besar • Whip Pan",
+  "description": "Potongan cepat berenergi dengan efek whip pan, 1-2 kata Impact raksasa & SFX Pop!",
+  "base_preset": "podcast",
+  "job_edit_format": "podcast",
+  "layout_mode": "single_focus",
+  "caption_recipe": "streamer_kinetic",
+  "placement_preset": "bottom_safe",
+  "hook_enabled": true,
+  "hook_transition_in": "whip",
+  "vignette_enabled": false,
+  "topic_header_enabled": true,
+  "zoom_punch_enabled": true,
+  "font_family": "Impact",
+  "active_word_bg_hex": "#F59E0B",
+  "progress_bar_color_hex": "#FACC15",
+  "transition_mode": "fixed",
+  "transition_type": "whip",
+  "transition_sfx": "pop"
+}

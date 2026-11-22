@@ -1,0 +1,21 @@
+{
+  "id": "gaming_split",
+  "category": "Gaming",
+  "title": "Gaming Split Esports (40:60)",
+  "badge": "Split Atas-Bawah • Garis Tengah",
+  "description": "40% wajah atas & 60% gameplay bawah + garis pembatas neon biru + subtitle tepat di tengah.",
+  "base_preset": "gaming_split",
+  "job_edit_format": "game",
+  "layout_mode": "split_screen",
+  "split_ratio_top": 0.4,
+  "divider_enabled": true,
+  "divider_angle_deg": 0.0,
+  "caption_recipe": "gamer_split",
+  "placement_preset": "split_line_center",
+  "hook_enabled": true,
+  "hook_transition_in": "zoom",
+  "vignette_enabled": true,
+  "topic_header_enabled": false,
+  "zoom_punch_enabled": true,
+  "font_family": "Arial Black"
+}

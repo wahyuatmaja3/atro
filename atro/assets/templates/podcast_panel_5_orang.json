@@ -1,0 +1,23 @@
+{
+  "id": "podcast_panel_5_orang",
+  "category": "Podcast",
+  "title": "Podcast Panel 5 Orang",
+  "badge": "Auto POI • Multi-Kamera",
+  "description": "Dirancang untuk podcast ramai (3-5 orang): pindah mulus mengikuti pembicara aktif & blur grup saat debat.",
+  "base_preset": "podcast",
+  "job_edit_format": "podcast",
+  "layout_mode": "single_focus",
+  "caption_recipe": "abdaal_minimal",
+  "placement_preset": "bottom_safe",
+  "hook_enabled": true,
+  "hook_transition_in": "fade",
+  "vignette_enabled": true,
+  "topic_header_enabled": true,
+  "zoom_punch_enabled": false,
+  "font_family": "Bahnschrift",
+  "focus_strategy": "auto_topic",
+  "group_mode": "fit_all_blur",
+  "transition_mode": "auto",
+  "transition_type": "slide_left",
+  "transition_sfx": "whoosh"
+}

@@ -1,0 +1,21 @@
+{
+  "id": "edu_abdaal_clean",
+  "category": "Edukasi",
+  "title": "Edukasi Minimalist (Abdaal)",
+  "badge": "Bersih • Font Rapi",
+  "description": "Gaya Ali Abdaal: subtitle huruf normal bersih dengan sorotan kuning-biru tanpa menutup wajah.",
+  "base_preset": "podcast",
+  "job_edit_format": "podcast",
+  "layout_mode": "single_focus",
+  "caption_recipe": "abdaal_minimal",
+  "placement_preset": "bottom_safe",
+  "hook_enabled": true,
+  "hook_transition_in": "slide",
+  "vignette_enabled": false,
+  "topic_header_enabled": false,
+  "zoom_punch_enabled": false,
+  "font_family": "Segoe UI",
+  "transition_mode": "fixed",
+  "transition_type": "fade",
+  "transition_sfx": "none"
+}

@@ -1,0 +1,22 @@
+{
+  "id": "story_drama_zoom",
+  "category": "Storytime",
+  "title": "Storytime Plot Twist",
+  "badge": "Banner Merah • Zoom In",
+  "description": "Hook banner merah mencolok + kapsul neon + zoom cepat untuk cerita tegang & plot twist.",
+  "base_preset": "podcast",
+  "job_edit_format": "podcast",
+  "layout_mode": "single_focus",
+  "caption_recipe": "lokaclip_neon",
+  "placement_preset": "bottom_safe",
+  "hook_enabled": true,
+  "hook_transition_in": "zoom",
+  "hook_accent_hex": "#EF4444",
+  "vignette_enabled": true,
+  "topic_header_enabled": false,
+  "zoom_punch_enabled": true,
+  "font_family": "Arial Black",
+  "transition_mode": "fixed",
+  "transition_type": "zoom_in",
+  "transition_sfx": "whoosh"
+}

@@ -1,0 +1,21 @@
+{
+  "id": "subathon",
+  "category": "Gaming",
+  "title": "Subathon Split Miring (-7°)",
+  "badge": "Garis Miring • Full Overlay",
+  "description": "Split diagonal ikonik -7° dengan Hook Whip cepat, chat bubble, header topik & watermark live.",
+  "base_preset": "subathon",
+  "job_edit_format": "subathon",
+  "layout_mode": "split_screen",
+  "split_ratio_top": 0.5,
+  "divider_enabled": true,
+  "divider_angle_deg": -7.0,
+  "caption_recipe": "mrbeast_pill",
+  "placement_preset": "split_line_center",
+  "hook_enabled": true,
+  "hook_transition_in": "whip",
+  "vignette_enabled": true,
+  "topic_header_enabled": true,
+  "zoom_punch_enabled": true,
+  "font_family": "Arial Black"
+}

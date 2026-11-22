@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QFontDatabase, QMouseEvent
+from PyQt6.QtGui import QColor, QFontDatabase, QImage, QMouseEvent, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -40,7 +40,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from atro.config import AppSettings
+from atro.config import AppSettings, save_settings
 from atro.core.composer_schema import (
     ClipComposerConfig,
     CommentBubbleItem,
@@ -53,12 +53,16 @@ from atro.core.presets import (
     apply_caption_recipe,
     build_preset_config,
     build_ready_template_config,
+    export_template_package,
     extract_transcript_overrides,
     generate_social_copywriting,
     get_presets_dir,
+    import_template_package,
     load_custom_preset,
     load_or_create_job_clip_config,
     normalize_ready_template_id,
+    recommend_templates_for_context,
+    reload_ready_templates,
     save_custom_preset,
     save_job_clip_config,
 )
@@ -146,9 +150,10 @@ def _repolish_widget(widget: QWidget) -> None:
 
 
 class ReadyTemplateCard(QFrame):
-    """Selectable WinUI 3 ready-made template card for 1-click full styling."""
+    """Selectable WinUI 3 ready-made template card with miniature WYSIWYG thumbnail & favorite star."""
 
     clicked = pyqtSignal(str)
+    favorite_toggled = pyqtSignal(str, bool)
 
     def __init__(
         self,
@@ -156,30 +161,66 @@ class ReadyTemplateCard(QFrame):
         badge_text: str,
         title: str,
         description: str,
+        category: str = "Podcast",
+        is_favorite: bool = False,
+        is_recommended: bool = False,
+        show_thumb: bool = True,
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
         self.template_id = template_id
         self.format_id = template_id
+        self.category = category
+        self.search_blob = f"{title} {badge_text} {description} {category} {template_id}".lower()
+        self._is_favorite = is_favorite
+        self._is_recommended = is_recommended
+
         self.setObjectName("StyleCard")
         self.setProperty("selected", False)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setMinimumHeight(104)
+        self.setMinimumHeight(112)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(11, 9, 11, 9)
-        layout.setSpacing(5)
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(10, 9, 10, 9)
+        outer.setSpacing(10)
+
+        self._thumb_lbl = QLabel()
+        self._thumb_lbl.setFixedSize(60, 106)
+        self._thumb_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._thumb_lbl.setStyleSheet(
+            "background-color: #0E1117; border: 1px solid #2A3140; border-radius: 7px; color: #64748B; font-size: 9px;"
+        )
+        self._thumb_lbl.setText("9:16")
+        self._thumb_lbl.setVisible(show_thumb)
+        outer.addWidget(self._thumb_lbl, 0, Qt.AlignmentFlag.AlignTop)
+
+        layout = QVBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
 
         top = QHBoxLayout()
+        top.setSpacing(5)
         badge = QLabel(badge_text)
         badge.setObjectName("VersionPill")
+        self._rec_lbl = QLabel("Disarankan")
+        self._rec_lbl.setObjectName("StatusPill")
+        self._rec_lbl.setProperty("tone", "ok")
+        self._rec_lbl.setVisible(is_recommended)
         self._active_lbl = QLabel("Dipilih")
         self._active_lbl.setObjectName("StatusPill")
         self._active_lbl.setProperty("tone", "info")
         self._active_lbl.setVisible(False)
+        self._fav_btn = QPushButton("★" if is_favorite else "☆")
+        self._fav_btn.setObjectName("SmallAction")
+        self._fav_btn.setFixedSize(26, 24)
+        self._fav_btn.setToolTip("Simpan ke Favorit")
+        self._fav_btn.clicked.connect(self._on_fav_clicked)
+
         top.addWidget(badge)
+        top.addWidget(self._rec_lbl)
         top.addStretch()
         top.addWidget(self._active_lbl)
+        top.addWidget(self._fav_btn)
         layout.addLayout(top)
 
         title_lbl = QLabel(title)
@@ -191,6 +232,30 @@ class ReadyTemplateCard(QFrame):
         desc_lbl.setObjectName("MutedText")
         desc_lbl.setWordWrap(True)
         layout.addWidget(desc_lbl, 1)
+        outer.addLayout(layout, 1)
+
+    def _on_fav_clicked(self) -> None:
+        self._is_favorite = not self._is_favorite
+        self._fav_btn.setText("★" if self._is_favorite else "☆")
+        self.favorite_toggled.emit(self.template_id, self._is_favorite)
+
+    def set_favorite(self, fav: bool) -> None:
+        self._is_favorite = fav
+        self._fav_btn.setText("★" if fav else "☆")
+
+    def set_recommended(self, rec: bool) -> None:
+        self._is_recommended = rec
+        self._rec_lbl.setVisible(rec)
+
+    def set_thumbnail_image(self, qimg: QImage) -> None:
+        if qimg.isNull():
+            return
+        pm = QPixmap.fromImage(qimg).scaled(
+            self._thumb_lbl.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self._thumb_lbl.setPixmap(pm)
 
     def set_selected(self, selected: bool) -> None:
         self.setProperty("selected", selected)
@@ -199,7 +264,9 @@ class ReadyTemplateCard(QFrame):
 
     def mousePressEvent(self, event: Optional[QMouseEvent]) -> None:
         if event is not None and event.button() == Qt.MouseButton.LeftButton:
-            self.clicked.emit(self.template_id)
+            child = self.childAt(event.position().toPoint())
+            if child is not self._fav_btn:
+                self.clicked.emit(self.template_id)
         super().mousePressEvent(event)
 
 
@@ -651,48 +718,45 @@ class ClipStudioWidget(QWidget):
         info_l.addWidget(info_desc)
         vbox.addWidget(info_card)
 
-        self.template_cards: dict[str, ReadyTemplateCard] = {}
-        grid = QGridLayout()
-        grid.setSpacing(8)
-        for idx, (tid, meta) in enumerate(READY_TEMPLATES.items()):
-            card = ReadyTemplateCard(
-                template_id=tid,
-                badge_text=str(meta["badge"]),
-                title=str(meta["title"]),
-                description=str(meta["description"]),
-            )
-            card.clicked.connect(self.apply_preset)
-            self.template_cards[tid] = card
-            grid.addWidget(card, idx // 2, idx % 2)
-        vbox.addLayout(grid)
+        from atro.ui.widgets.template_gallery import TemplateGalleryWidget
 
-        custom_grp = QGroupBox("Template Kustom Anda (Simpan / Muat JSON)")
+        favs = list(self._settings_provider().favorite_templates)
+        self.template_gallery = TemplateGalleryWidget(columns=1, favorites=favs, parent=w)
+        self.template_gallery.template_selected.connect(self.apply_preset)
+        self.template_gallery.favorite_toggled.connect(self._on_template_favorite_toggled)
+        self.template_cards = self.template_gallery.cards
+        vbox.addWidget(self.template_gallery, 1)
+
+        custom_grp = QGroupBox("Template Kustom & Paket (.json / .atrotpl)")
         cg_l = QVBoxLayout(custom_grp)
         cg_l.setSpacing(6)
         btn_row = QHBoxLayout()
-        save_tpl_btn = QPushButton("Simpan Jadi Template Baru...")
+        save_tpl_btn = QPushButton("Simpan JSON...")
         save_tpl_btn.setObjectName("SmallAction")
         save_tpl_btn.clicked.connect(self._save_preset_dialog)
-        load_tpl_btn = QPushButton("Muat File Template (.json)...")
+        load_tpl_btn = QPushButton("Muat JSON...")
         load_tpl_btn.setObjectName("SmallAction")
         load_tpl_btn.clicked.connect(self._load_preset_dialog)
-        refresh_tpl_btn = QPushButton("Segarkan Daftar")
-        refresh_tpl_btn.setObjectName("SmallAction")
-        refresh_tpl_btn.clicked.connect(self._refresh_saved_templates_list)
+        export_pkg_btn = QPushButton("Ekspor .atrotpl...")
+        export_pkg_btn.setObjectName("SmallAction")
+        export_pkg_btn.clicked.connect(self._export_atrotpl_dialog)
+        import_pkg_btn = QPushButton("Impor .atrotpl...")
+        import_pkg_btn.setObjectName("SmallAction")
+        import_pkg_btn.clicked.connect(self._import_atrotpl_dialog)
         btn_row.addWidget(save_tpl_btn)
         btn_row.addWidget(load_tpl_btn)
-        btn_row.addWidget(refresh_tpl_btn)
+        btn_row.addWidget(export_pkg_btn)
+        btn_row.addWidget(import_pkg_btn)
         btn_row.addStretch()
         cg_l.addLayout(btn_row)
 
         self.saved_templates_list = QListWidget()
-        self.saved_templates_list.setMaximumHeight(120)
+        self.saved_templates_list.setMaximumHeight(95)
         self.saved_templates_list.itemClicked.connect(self._on_saved_template_clicked)
         cg_l.addWidget(self.saved_templates_list)
         self._refresh_saved_templates_list()
 
         vbox.addWidget(custom_grp)
-        vbox.addStretch()
         return w
 
     def _build_layout_tab(self) -> QWidget:
@@ -1533,6 +1597,15 @@ class ClipStudioWidget(QWidget):
                 pass
 
         if self._analysis and self._analysis.clips:
+            sample_tr = " ".join(s.text for s in self._transcript_segments[:15])
+            vid_title = self._download.title if self._download else state.request.display_source
+            recs = recommend_templates_for_context(
+                title=vid_title,
+                transcript_text=sample_tr,
+                edit_format=state.request.edit_format,
+            )
+            if hasattr(self, "template_gallery"):
+                self.template_gallery.set_recommended(recs)
             target_row = 0
             for idx, clip in enumerate(self._analysis.clips, start=1):
                 self.clip_selector_combo.addItem(f"#{idx:02d} — {clip.title}", idx)
@@ -1714,6 +1787,47 @@ class ClipStudioWidget(QWidget):
         if not chosen:
             return
         self._apply_loaded_preset_path(Path(chosen))
+
+    def _on_template_favorite_toggled(self, template_id: str, is_fav: bool) -> None:
+        settings = self._settings_provider()
+        favs = list(settings.favorite_templates)
+        if is_fav and template_id not in favs:
+            favs.append(template_id)
+        elif not is_fav and template_id in favs:
+            favs.remove(template_id)
+        settings.favorite_templates = favs
+        save_settings(settings)
+
+    def _export_atrotpl_dialog(self) -> None:
+        chosen, _ = QFileDialog.getSaveFileName(
+            self,
+            "Ekspor Paket Template ATRO (.atrotpl)",
+            f"{self._config.preset_id}_pack.atrotpl",
+            "ATRO Template Package (*.atrotpl)",
+        )
+        if not chosen:
+            return
+        out = export_template_package(self._config, Path(chosen), title=self._config.preset_name)
+        QMessageBox.information(self, "Paket Diekspor", f"Paket template disimpan ke:\n{out}")
+
+    def _import_atrotpl_dialog(self) -> None:
+        chosen, _ = QFileDialog.getOpenFileName(
+            self,
+            "Impor Paket Template ATRO (.atrotpl)",
+            "",
+            "ATRO Template Package (*.atrotpl)",
+        )
+        if not chosen:
+            return
+        try:
+            installed_id = import_template_package(Path(chosen))
+            reload_ready_templates()
+            if hasattr(self, "template_gallery"):
+                self.template_gallery.rebuild_from_registry()
+                self.template_cards = self.template_gallery.cards
+            self.apply_preset(installed_id)
+        except Exception as exc:
+            QMessageBox.warning(self, "Gagal Impor Paket", str(exc))
 
     # --- Sync Config <-> Controls ---
     def _load_config_into_ui(self, cfg: ClipComposerConfig) -> None:

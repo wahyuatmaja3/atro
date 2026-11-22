@@ -1,0 +1,23 @@
+{
+  "id": "pip_facecam_bulat",
+  "category": "Gaming",
+  "title": "Gameplay + PiP Facecam Bulat",
+  "badge": "PiP Lingkaran • Neon Orange",
+  "description": "Gameplay full-screen 9:16 dengan facecam bulat pojok kanan atas bergaris oranye + kapsul aktif.",
+  "base_preset": "gaming_split",
+  "job_edit_format": "game",
+  "layout_mode": "pip_facecam",
+  "pip_shape": "circle",
+  "pip_position": "top_right",
+  "pip_scale": 0.34,
+  "frame_corner_radius_px": 28,
+  "frame_border_width_px": 6,
+  "frame_border_color_hex": "#F97316",
+  "caption_recipe": "mrbeast_pill",
+  "placement_preset": "bottom_safe",
+  "hook_enabled": false,
+  "vignette_enabled": true,
+  "topic_header_enabled": true,
+  "zoom_punch_enabled": true,
+  "font_family": "Arial Black"
+}

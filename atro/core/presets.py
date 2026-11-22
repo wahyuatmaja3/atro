@@ -26,6 +26,14 @@ from atro.core.composer_schema import (
     WatermarkConfig,
 )
 from atro.core.schemas import TranscriptSegment
+from atro.core.template_packs import (
+    TEMPLATE_CATEGORIES,
+    export_template_package,
+    import_template_package,
+    load_all_template_packs,
+    recommend_templates_for_context,
+    render_template_thumbnail_qimage,
+)
 
 BUILTIN_PRESET_IDS: tuple[str, ...] = (
     "podcast",
@@ -269,152 +277,15 @@ def generate_social_copywriting(
     }
 
 
-READY_TEMPLATES: dict[str, dict[str, Any]] = {
-    "podcast": {
-        "title": "Podcast Focus (Hormozi)",
-        "badge": "1 Pembicara • Dual Warna",
-        "description": "Fokus penuh 9:16 ke pembicara + Hook Banner pembuka + teks tebal dual warna & auto-emoji.",
-        "base_preset": "podcast",
-        "job_edit_format": "podcast",
-        "layout_mode": "single_focus",
-        "caption_recipe": "hormozi_viral",
-        "placement_preset": "bottom_safe",
-        "hook_enabled": True,
-        "hook_transition_in": "fade",
-        "vignette_enabled": True,
-        "topic_header_enabled": False,
-        "zoom_punch_enabled": False,
-    },
-    "mrbeast_energetic": {
-        "title": "MrBeast Pill Energetik",
-        "badge": "Kapsul Aktif • Zoom Klimaks",
-        "description": "Kapsul oranye bergerak per kata, label topik atas, hook zoom cepat & zoom punch di klimaks.",
-        "base_preset": "podcast",
-        "job_edit_format": "podcast",
-        "layout_mode": "single_focus",
-        "caption_recipe": "mrbeast_pill",
-        "placement_preset": "bottom_safe",
-        "hook_enabled": True,
-        "hook_transition_in": "zoom",
-        "vignette_enabled": True,
-        "topic_header_enabled": True,
-        "zoom_punch_enabled": True,
-    },
-    "gaming_split": {
-        "title": "Gaming Split Esports (40:60)",
-        "badge": "Split Atas-Bawah • Garis Tengah",
-        "description": "40% wajah atas & 60% gameplay bawah + garis pembatas neon biru + subtitle tepat di tengah.",
-        "base_preset": "gaming_split",
-        "job_edit_format": "game",
-        "layout_mode": "split_screen",
-        "split_ratio_top": 0.40,
-        "divider_enabled": True,
-        "divider_angle_deg": 0.0,
-        "caption_recipe": "gamer_split",
-        "placement_preset": "split_line_center",
-        "hook_enabled": True,
-        "hook_transition_in": "zoom",
-        "vignette_enabled": True,
-        "topic_header_enabled": False,
-        "zoom_punch_enabled": True,
-    },
-    "pip_facecam_bulat": {
-        "title": "Gameplay + PiP Facecam Bulat",
-        "badge": "PiP Lingkaran • Neon Orange",
-        "description": "Gameplay full-screen 9:16 dengan facecam bulat pojok kanan atas bergaris oranye + kapsul aktif.",
-        "base_preset": "gaming_split",
-        "job_edit_format": "game",
-        "layout_mode": "pip_facecam",
-        "pip_shape": "circle",
-        "pip_position": "top_right",
-        "pip_scale": 0.34,
-        "frame_corner_radius_px": 28,
-        "frame_border_width_px": 6,
-        "frame_border_color_hex": "#F97316",
-        "caption_recipe": "mrbeast_pill",
-        "placement_preset": "bottom_safe",
-        "hook_enabled": False,
-        "vignette_enabled": True,
-        "topic_header_enabled": True,
-        "zoom_punch_enabled": True,
-    },
-    "pip_facecam_kotak": {
-        "title": "React / Tutorial + PiP Kotak Neon",
-        "badge": "PiP Kotak • LokaClip Glow",
-        "description": "Layar presentasi/reaksi penuh + kamera kotak membulat garis ungu neon + subtitle glow kekinian.",
-        "base_preset": "gaming_split",
-        "job_edit_format": "game",
-        "layout_mode": "pip_facecam",
-        "pip_shape": "rounded_rect",
-        "pip_position": "top_left",
-        "pip_scale": 0.34,
-        "frame_corner_radius_px": 28,
-        "frame_border_width_px": 6,
-        "frame_border_color_hex": "#A855F7",
-        "caption_recipe": "lokaclip_neon",
-        "placement_preset": "bottom_safe",
-        "hook_enabled": True,
-        "hook_transition_in": "slide",
-        "vignette_enabled": True,
-        "topic_header_enabled": False,
-        "zoom_punch_enabled": False,
-    },
-    "twitch_comment": {
-        "title": "Streamer Baca Komentar Chat",
-        "badge": "Bingkai Blur • Bubble Chat",
-        "description": "Video tengah bersudut membulat + latar belakang blur + kartu pertanyaan chat + teks kinetik.",
-        "base_preset": "twitch_comment",
-        "job_edit_format": "twitch_comment",
-        "layout_mode": "blurred_frame",
-        "blurred_frame_aspect": "4:3",
-        "frame_corner_radius_px": 34,
-        "frame_border_width_px": 6,
-        "frame_border_color_hex": "#A855F7",
-        "caption_recipe": "streamer_kinetic",
-        "placement_preset": "bottom_safe",
-        "hook_enabled": False,
-        "vignette_enabled": True,
-        "topic_header_enabled": False,
-        "zoom_punch_enabled": False,
-    },
-    "subathon": {
-        "title": "Subathon Split Miring (-7°)",
-        "badge": "Garis Miring • Full Overlay",
-        "description": "Split diagonal ikonik -7° dengan Hook Whip cepat, chat bubble, header topik & watermark live.",
-        "base_preset": "subathon",
-        "job_edit_format": "subathon",
-        "layout_mode": "split_screen",
-        "split_ratio_top": 0.50,
-        "divider_enabled": True,
-        "divider_angle_deg": -7.0,
-        "caption_recipe": "mrbeast_pill",
-        "placement_preset": "split_line_center",
-        "hook_enabled": True,
-        "hook_transition_in": "whip",
-        "vignette_enabled": True,
-        "topic_header_enabled": True,
-        "zoom_punch_enabled": True,
-    },
-    "podcast_mageran_glass": {
-        "title": "Podcast Landscape + Bar Kaca",
-        "badge": "Bingkai 16:9 Utuh • Glass Bar",
-        "description": "Video horizontal 16:9 ditampilkan utuh bergaris emas + latar blur + bar kaca gelap ala Mageran.",
-        "base_preset": "podcast",
-        "job_edit_format": "podcast",
-        "layout_mode": "blurred_frame",
-        "blurred_frame_aspect": "16:9",
-        "frame_corner_radius_px": 28,
-        "frame_border_width_px": 4,
-        "frame_border_color_hex": "#FACC15",
-        "caption_recipe": "mageran_glass",
-        "placement_preset": "bottom_safe",
-        "hook_enabled": True,
-        "hook_transition_in": "fade",
-        "vignette_enabled": True,
-        "topic_header_enabled": True,
-        "zoom_punch_enabled": False,
-    },
-}
+READY_TEMPLATES: dict[str, dict[str, Any]] = load_all_template_packs()
+
+
+def reload_ready_templates(user_base_dir: Optional[Path] = None) -> dict[str, dict[str, Any]]:
+    """Reload dynamic JSON template packs (built-in + imported user .atrotpl) in-place."""
+    fresh = load_all_template_packs(user_base_dir=user_base_dir)
+    READY_TEMPLATES.clear()
+    READY_TEMPLATES.update(fresh)
+    return READY_TEMPLATES
 
 
 def normalize_ready_template_id(template_id: str) -> str:
@@ -441,6 +312,25 @@ def build_ready_template_config(
     """Build a complete all-in-one ClipComposerConfig from any READY_TEMPLATES entry."""
     tid = normalize_ready_template_id(template_id)
     meta = READY_TEMPLATES[tid]
+    if meta.get("composer_override"):
+        cfg = ClipComposerConfig.model_validate(meta["composer_override"])
+        safe_start = max(0.0, float(start_time))
+        safe_end = max(safe_start + 1.0, float(end_time))
+        cfg.preset_id = tid
+        cfg.preset_name = str(meta["title"])
+        cfg.clip_index = clip_index
+        cfg.clip_title = clip_title
+        cfg.timing.start_time = safe_start
+        cfg.timing.end_time = safe_end
+        cfg.timing.padding_sec = padding_sec
+        if backsound_dir is not None:
+            cfg.audio.backsound_dir = backsound_dir
+        cfg.overlays.hook_banner.text = clip_title
+        if cfg.overlays.climax_effects.topic_header_enabled:
+            cfg.overlays.climax_effects.topic_header_text = (clip_title or "HIGHLIGHT VIRAL").upper()[:42]
+        cfg.sync_subtitle_anchor()
+        return cfg
+
     cfg = build_preset_config(
         preset_id=str(meta["base_preset"]),
         clip_title=clip_title,
@@ -475,8 +365,28 @@ def build_ready_template_config(
         lay.divider.enabled = bool(meta["divider_enabled"])
     if "divider_angle_deg" in meta:
         lay.divider.angle_deg = float(meta["divider_angle_deg"])
+    if "divider_color_hex" in meta:
+        lay.divider.color_hex = str(meta["divider_color_hex"])
+    if "focus_strategy" in meta:
+        lay.focus_strategy = meta["focus_strategy"]
+    if "group_mode" in meta:
+        lay.group_mode = meta["group_mode"]
+    if meta.get("transition_mode") in ("auto", "fixed"):
+        lay.transition.mode = meta["transition_mode"]
+    if "transition_type" in meta:
+        lay.transition.type = meta["transition_type"]
+    if "transition_sfx" in meta:
+        lay.transition.sfx = meta["transition_sfx"]
 
     apply_caption_recipe(cfg, str(meta["caption_recipe"]))
+    if "font_family" in meta and meta["font_family"]:
+        cfg.subtitles.font_family = str(meta["font_family"])
+    if "highlight_color_hex" in meta:
+        cfg.subtitles.highlight_color_hex = str(meta["highlight_color_hex"])
+    if "secondary_keyword_color_hex" in meta:
+        cfg.subtitles.secondary_keyword_color_hex = str(meta["secondary_keyword_color_hex"])
+    if "active_word_bg_hex" in meta:
+        cfg.subtitles.active_word_bg_hex = str(meta["active_word_bg_hex"])
     cfg.subtitles.placement_preset = meta["placement_preset"]
     cfg.sync_subtitle_anchor()
 
@@ -484,10 +394,14 @@ def build_ready_template_config(
     ov.hook_banner.enabled = bool(meta.get("hook_enabled", ov.hook_banner.enabled))
     if "hook_transition_in" in meta:
         ov.hook_banner.transition_in = meta["hook_transition_in"]
+    if "hook_accent_hex" in meta:
+        ov.hook_banner.accent_color_hex = str(meta["hook_accent_hex"])
 
     cl = ov.climax_effects
     cl.vignette_enabled = bool(meta.get("vignette_enabled", False))
     cl.zoom_punch_enabled = bool(meta.get("zoom_punch_enabled", False))
+    if "progress_bar_color_hex" in meta:
+        cl.progress_bar_color_hex = str(meta["progress_bar_color_hex"])
     topic_on = bool(meta.get("topic_header_enabled", False))
     cl.topic_header_enabled = topic_on
     if topic_on and not cl.topic_header_text.strip():

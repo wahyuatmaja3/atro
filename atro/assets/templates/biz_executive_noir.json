@@ -1,0 +1,23 @@
+{
+  "id": "biz_executive_noir",
+  "category": "Bisnis",
+  "title": "Bisnis Eksekutif Noir",
+  "badge": "Profesional • Biru Cyan",
+  "description": "Tampilan profesional untuk insight bisnis & strategi karier dengan header topik atas tegas.",
+  "base_preset": "podcast",
+  "job_edit_format": "podcast",
+  "layout_mode": "single_focus",
+  "caption_recipe": "podcast_editorial",
+  "placement_preset": "bottom_safe",
+  "hook_enabled": true,
+  "hook_transition_in": "slide",
+  "hook_accent_hex": "#0EA5E9",
+  "vignette_enabled": true,
+  "topic_header_enabled": true,
+  "zoom_punch_enabled": false,
+  "font_family": "Bahnschrift",
+  "highlight_color_hex": "#38BDF8",
+  "transition_mode": "fixed",
+  "transition_type": "slide_right",
+  "transition_sfx": "none"
+}

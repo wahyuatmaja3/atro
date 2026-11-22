@@ -1,0 +1,21 @@
+{
+  "id": "twitch_comment",
+  "category": "Berita",
+  "title": "Streamer Baca Komentar Chat",
+  "badge": "Bingkai Blur • Bubble Chat",
+  "description": "Video tengah bersudut membulat + latar belakang blur + kartu pertanyaan chat + teks kinetik.",
+  "base_preset": "twitch_comment",
+  "job_edit_format": "twitch_comment",
+  "layout_mode": "blurred_frame",
+  "blurred_frame_aspect": "4:3",
+  "frame_corner_radius_px": 34,
+  "frame_border_width_px": 6,
+  "frame_border_color_hex": "#A855F7",
+  "caption_recipe": "streamer_kinetic",
+  "placement_preset": "bottom_safe",
+  "hook_enabled": false,
+  "vignette_enabled": true,
+  "topic_header_enabled": false,
+  "zoom_punch_enabled": false,
+  "font_family": "Arial Black"
+}
