@@ -19,11 +19,14 @@ from PyQt6.QtGui import (
     QFont,
     QFontMetrics,
     QImage,
+    QLinearGradient,
     QPainter,
     QPainterPath,
+    QPainterPathStroker,
     QPen,
     QPolygonF,
     QRadialGradient,
+    QTransform,
 )
 
 from atro.core.composer_schema import (
@@ -498,14 +501,432 @@ def _hook_card_dimensions(hook: HookBannerConfig, canvas_w: int) -> tuple[int, i
     return card_w, card_h, lines, font
 
 
+def _wrap_hook_lines(
+    raw_text: str,
+    font_family: str,
+    start_pt: int,
+    max_text_w: int,
+    italic: bool = False,
+    condensed: bool = True,
+    max_lines: int = 5,
+) -> tuple[list[str], QFont, QFontMetrics]:
+    """Wrap hook caption cleanly into balanced lines stepping down pt size only when a word overflows."""
+    def _build_font(pt: int) -> QFont:
+        f = QFont(font_family or "Impact", pt)
+        f.setBold(True)
+        if italic:
+            f.setItalic(False)  # Shear applied explicitly via QTransform for reliable slanted Impact
+        if condensed:
+            f.setLetterSpacing(QFont.SpacingType.PercentageSpacing, 101.0)
+        return f
+
+    def _measure(pt: int) -> tuple[list[str], QFont, QFontMetrics, int]:
+        f = _build_font(pt)
+        metrics = QFontMetrics(f)
+        wrapped: list[str] = []
+        paragraphs = [p.strip() for p in raw_text.split("\n") if p.strip()]
+        for para in paragraphs:
+            words = para.split()
+            if not words:
+                continue
+            # Single long paragraph without manual breaks: aim for balanced lines
+            cur_lines: list[str] = []
+            cur = ""
+            for w in words:
+                cand = f"{cur} {w}".strip()
+                if metrics.horizontalAdvance(cand) <= max_text_w or not cur:
+                    cur = cand
+                else:
+                    cur_lines.append(cur)
+                    cur = w
+            if cur:
+                cur_lines.append(cur)
+            # Re-balance trailing single orphan word onto balanced 2-3 lines when clean
+            if len(paragraphs) == 1 and len(cur_lines) == 2 and len(words) >= 3:
+                best_split = cur_lines
+                best_diff = abs(
+                    metrics.horizontalAdvance(cur_lines[0]) - metrics.horizontalAdvance(cur_lines[1])
+                )
+                for split_idx in range(1, len(words)):
+                    a = " ".join(words[:split_idx])
+                    b = " ".join(words[split_idx:])
+                    wa = metrics.horizontalAdvance(a)
+                    wb = metrics.horizontalAdvance(b)
+                    if wa <= max_text_w and wb <= max_text_w and abs(wa - wb) < best_diff:
+                        best_diff = abs(wa - wb)
+                        best_split = [a, b]
+                cur_lines = best_split
+            wrapped.extend(cur_lines)
+        lines_out = wrapped[:max_lines]
+        max_w = max((metrics.horizontalAdvance(ln) for ln in lines_out), default=0)
+        return lines_out, f, metrics, max_w
+
+    cur_pt = max(16, int(start_pt))
+    lines, font, fm, max_w = _measure(cur_pt)
+    while lines and max_w > max_text_w and cur_pt > 18:
+        cur_pt = max(18, cur_pt - 2)
+        lines, font, fm, max_w = _measure(cur_pt)
+    return lines, font, fm
+
+
+def _stroke_round_path(
+    painter: QPainter,
+    path: QPainterPath,
+    color: QColor,
+    diameter_px: float,
+) -> None:
+    if diameter_px <= 0.1 or path.isEmpty():
+        return
+    stroker = QPainterPathStroker()
+    stroker.setWidth(float(diameter_px))
+    stroker.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    stroker.setCapStyle(Qt.PenCapStyle.RoundCap)
+    stroked = stroker.createStroke(path)
+    painter.fillPath(stroked, color)
+
+
+def _render_stylized_hook_image(
+    hook: HookBannerConfig,
+    canvas_w: int = 1080,
+) -> Optional[tuple[QImage, int, int]]:
+    """Render viral multi-layer sticker, glow, pill, breaking, or paper opening caption PNG."""
+    raw_text = (
+        (hook.text or "")
+        .replace("\r\n", "\n")
+        .replace("\r", "\n")
+        .replace("\\n", "\n")
+        .strip()
+    )
+    if not raw_text:
+        return None
+    if hook.uppercase:
+        raw_text = raw_text.upper()
+
+    style = getattr(hook, "design_style", "viral_sticker") or "viral_sticker"
+    outline_w = max(0.0, float(getattr(hook, "outline_width", 9.0)))
+    shadow_d = max(0.0, float(getattr(hook, "shadow_depth", 8.0)))
+    sticker_w = max(0.0, float(getattr(hook, "sticker_border_width", 7.0)))
+    margin_guard = int(math.ceil(outline_w + sticker_w + shadow_d + 46))
+    max_text_w = max(240, canvas_w - max(150, margin_guard * 2))
+
+    # Pill and card styles reserve extra inner padding per line
+    if style in ("slanted_pill", "magenta_pop"):
+        max_text_w = max(240, int(canvas_w * 0.76))
+    elif style in ("breaking_bar", "paper_label"):
+        max_text_w = max(240, int(canvas_w * 0.78))
+
+    lines, font, fm = _wrap_hook_lines(
+        raw_text=raw_text,
+        font_family=getattr(hook, "font_family", "Impact") or "Impact",
+        start_pt=max(18, int(hook.font_size)),
+        max_text_w=max_text_w,
+        italic=bool(getattr(hook, "italic", True)),
+        condensed=(style in ("viral_sticker", "viral_two_tone", "viral_white_red", "toxic_lime", "cyan_arcade", "slanted_pill", "magenta_pop")),
+        max_lines=5,
+    )
+    if not lines:
+        return None
+
+    use_italic = bool(getattr(hook, "italic", True))
+    shear_tx = QTransform().shear(-0.18, 0.0) if use_italic else QTransform()
+
+    raw_paths: list[tuple[QPainterPath, QRectF]] = []
+    for ln in lines:
+        p0 = QPainterPath()
+        p0.addText(0.0, 0.0, font, ln)
+        mapped = shear_tx.map(p0) if use_italic else p0
+        br = mapped.boundingRect()
+        raw_paths.append((mapped, br))
+
+    # Vertical stack cadence
+    if style in ("slanted_pill", "magenta_pop"):
+        line_gap = max(16.0, float(fm.height()) * 0.16)
+        line_step = max(float(fm.ascent()) * 1.10, max((br.height() for _, br in raw_paths), default=48.0)) + line_gap
+    elif style in ("breaking_bar", "paper_label"):
+        line_step = max(float(fm.lineSpacing()) * 0.98, max((br.height() for _, br in raw_paths), default=40.0) * 1.18)
+    else:
+        max_glyph_h = max((br.height() for _, br in raw_paths), default=float(fm.ascent()))
+        line_step = max(max_glyph_h * 1.14, float(fm.ascent()) * 1.06)
+
+    max_br_w = max((br.width() for _, br in raw_paths), default=200.0)
+
+    if style in ("breaking_bar", "paper_label"):
+        eyebrow_h = 46 if style == "breaking_bar" and (hook.eyebrow_text or "").strip() else 0
+        box_w = min(canvas_w - 64, max(360, int(math.ceil(max_br_w)) + 88))
+        text_block_h = len(raw_paths) * line_step
+        box_h = max(92, int(math.ceil(text_block_h + 52)))
+        extra_rot = 18 if style == "paper_label" else 0
+        pad_x = int(math.ceil(shadow_d + outline_w + 26 + extra_rot))
+        pad_top = int(math.ceil((eyebrow_h * 0.72) + outline_w + 24 + extra_rot))
+        pad_bot = int(math.ceil(shadow_d + outline_w + 22 + extra_rot))
+        img_w = min(canvas_w, box_w + pad_x * 2)
+        img_h = box_h + pad_top + pad_bot
+
+        img = QImage(img_w, img_h, QImage.Format.Format_RGBA8888)
+        img.fill(Qt.GlobalColor.transparent)
+        p = QPainter(img)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+
+        bg_col = qcolor_from_hex(hook.bg_color_hex, "#FFFDF5" if style == "paper_label" else "#F0090D16")
+        acc_col = qcolor_from_hex(hook.accent_color_hex, "#DC2626")
+        txt_col = qcolor_from_hex(hook.text_color_hex, "#111827" if style == "paper_label" else "#FFFFFF")
+        out_col = qcolor_from_hex(hook.outline_color_hex, "#111827")
+        sh_col = qcolor_from_hex(hook.shadow_color_hex, "#000000")
+
+        p.save()
+        if style == "paper_label":
+            p.translate(img_w * 0.5, img_h * 0.5)
+            p.rotate(-1.8)
+            p.translate(-img_w * 0.5, -img_h * 0.5)
+
+        bx = (img_w - box_w) * 0.5
+        by = float(pad_top)
+        if shadow_d > 0.2:
+            sh_c = QColor(sh_col)
+            if style == "breaking_bar":
+                sh_c.setAlpha(155)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(sh_c)
+            p.drawRoundedRect(
+                QRectF(bx + shadow_d * 0.9, by + shadow_d, float(box_w), float(box_h)),
+                14.0 if style == "breaking_bar" else 10.0,
+                14.0 if style == "breaking_bar" else 10.0,
+            )
+
+        border_pen = QPen(out_col, max(3.5, outline_w) if style == "paper_label" else 3.0)
+        if style == "breaking_bar":
+            border_pen = QPen(acc_col, 3.0)
+        p.setPen(border_pen)
+        p.setBrush(bg_col)
+        p.drawRoundedRect(
+            QRectF(bx, by, float(box_w), float(box_h)),
+            14.0 if style == "breaking_bar" else 10.0,
+            14.0 if style == "breaking_bar" else 10.0,
+        )
+
+        if style == "breaking_bar":
+            # Left vivid accent ribbon
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(acc_col)
+            p.drawRoundedRect(QRectF(bx + 2.0, by + 2.0, 14.0, float(box_h - 4)), 6.0, 6.0)
+            eyebrow = (hook.eyebrow_text or "HOT TOPIC").strip().upper()
+            if eyebrow:
+                eb_font = QFont("Arial Black", 24)
+                eb_font.setBold(True)
+                eb_fm = QFontMetrics(eb_font)
+                eb_w = min(box_w - 40, eb_fm.horizontalAdvance(eyebrow) + 42)
+                eb_rect = QRectF(bx + 26.0, by - 24.0, float(eb_w), 46.0)
+                p.setBrush(acc_col)
+                p.drawRoundedRect(eb_rect, 10.0, 10.0)
+                p.setFont(eb_font)
+                p.setPen(QColor("#FFFFFF"))
+                p.drawText(eb_rect, Qt.AlignmentFlag.AlignCenter, eyebrow)
+
+        start_y = by + (box_h - text_block_h) * 0.5
+        for idx, (path, br) in enumerate(raw_paths):
+            tx = bx + (box_w - br.width()) * 0.5 - br.left()
+            ty = start_y + idx * line_step + (line_step - br.height()) * 0.5 - br.top()
+            p.fillPath(path.translated(tx, ty), txt_col)
+        p.restore()
+        p.end()
+        target_x = max(0, (canvas_w - img_w) // 2)
+        target_y = max(12, int(hook.pos_y) - img_h // 2)
+        return img, target_x, target_y
+
+    # Vector sticker / neon / pill / outline path positioning
+    pill_pad_x = 32.0 if style in ("slanted_pill", "magenta_pop") else 0.0
+    pill_pad_y = 11.0 if style in ("slanted_pill", "magenta_pop") else 0.0
+    pad_x = int(math.ceil(outline_w + sticker_w + abs(shadow_d) + pill_pad_x + 28))
+    pad_y = int(math.ceil(outline_w + sticker_w + abs(shadow_d) + pill_pad_y + 24))
+
+    total_block_h = (len(raw_paths) - 1) * line_step + max((br.height() for _, br in raw_paths), default=40.0)
+    content_w = int(math.ceil(max_br_w))
+    img_w = min(canvas_w, max(160, content_w + pad_x * 2))
+    img_h = max(84, int(math.ceil(total_block_h + pad_y * 2)))
+
+    positioned: list[tuple[QPainterPath, QRectF]] = []
+    cur_top = float(pad_y)
+    united = QPainterPath()
+    for path, br in raw_paths:
+        tx = (img_w - br.width()) * 0.5 - br.left()
+        ty = cur_top - br.top()
+        shifted = path.translated(tx, ty)
+        positioned.append((shifted, shifted.boundingRect()))
+        united.addPath(shifted)
+        cur_top += line_step
+
+    img = QImage(img_w, img_h, QImage.Format.Format_RGBA8888)
+    img.fill(Qt.GlobalColor.transparent)
+    p = QPainter(img)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+
+    txt_col = qcolor_from_hex(hook.text_color_hex, "#FFE600")
+    sec_col = qcolor_from_hex(getattr(hook, "secondary_text_color_hex", "#FFFFFF"), "#FFFFFF")
+    out_col = qcolor_from_hex(getattr(hook, "outline_color_hex", "#000000"), "#000000")
+    sh_col = qcolor_from_hex(getattr(hook, "shadow_color_hex", "#5B21B6"), "#5B21B6")
+    stk_col = qcolor_from_hex(getattr(hook, "sticker_border_color_hex", "#FFFFFF"), "#FFFFFF")
+    bg_col = qcolor_from_hex(hook.bg_color_hex, "#FACC15")
+
+    if style in ("slanted_pill", "magenta_pop"):
+        pill_col = bg_col if bg_col.alpha() > 16 else qcolor_from_hex(hook.accent_color_hex, "#FACC15")
+        skew_dx = 16.0 if use_italic else 0.0
+        for shifted, sbr in positioned:
+            rx0 = sbr.left() - pill_pad_x
+            rx1 = sbr.right() + pill_pad_x
+            ry0 = sbr.top() - pill_pad_y
+            ry1 = sbr.bottom() + pill_pad_y
+            poly = QPolygonF(
+                [
+                    QPointF(rx0 + skew_dx, ry0),
+                    QPointF(rx1 + skew_dx, ry0),
+                    QPointF(rx1 - skew_dx, ry1),
+                    QPointF(rx0 - skew_dx, ry1),
+                ]
+            )
+            if shadow_d > 0.2:
+                sh_poly = poly.translated(shadow_d * 0.7, shadow_d * 0.9)
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(sh_col)
+                p.drawPolygon(sh_poly)
+            if sticker_w > 0.2:
+                p.setPen(QPen(stk_col, sticker_w * 2.0, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawPolygon(poly)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(pill_col)
+            p.drawPolygon(poly)
+            if outline_w > 0.2:
+                _stroke_round_path(p, shifted, out_col, outline_w * 2.0)
+            p.fillPath(shifted, txt_col)
+    elif style == "neon_poster":
+        if shadow_d > 0.2:
+            for mult, alpha in ((2.6, 36), (1.9, 64), (1.3, 105), (0.85, 165)):
+                glow_c = QColor(sh_col)
+                glow_c.setAlpha(alpha)
+                _stroke_round_path(p, united, glow_c, outline_w * 2.0 + shadow_d * mult)
+        if outline_w > 0.2:
+            _stroke_round_path(p, united, out_col, outline_w * 2.0)
+        for shifted, sbr in positioned:
+            grad = QLinearGradient(QPointF(0.0, sbr.top()), QPointF(0.0, sbr.bottom()))
+            grad.setColorAt(0.0, txt_col)
+            grad.setColorAt(1.0, sec_col)
+            p.fillPath(shifted, QBrush(grad))
+    elif style in ("floating_outline", "gold_cinema"):
+        if shadow_d > 0.2:
+            for frac, alpha in ((1.0, 95), (0.65, 145)):
+                sc = QColor(sh_col)
+                sc.setAlpha(alpha)
+                off_p = united.translated(shadow_d * 0.45 * frac, shadow_d * 0.78 * frac)
+                _stroke_round_path(p, off_p, sc, outline_w * 2.0 + shadow_d * 0.4)
+        if outline_w > 0.2:
+            _stroke_round_path(p, united, out_col, outline_w * 2.0)
+        for shifted, sbr in positioned:
+            if style == "gold_cinema":
+                grad = QLinearGradient(QPointF(0.0, sbr.top()), QPointF(0.0, sbr.bottom()))
+                grad.setColorAt(0.0, sec_col)
+                grad.setColorAt(0.55, txt_col)
+                grad.setColorAt(1.0, qcolor_from_hex(hook.accent_color_hex, "#D97706"))
+                p.fillPath(shifted, QBrush(grad))
+            else:
+                p.fillPath(shifted, txt_col)
+    else:
+        # Signature Sticker Pop styles (viral_sticker, viral_two_tone, viral_white_red, toxic_lime, cyan_arcade)
+        sh_dx = shadow_d * 0.72
+        sh_dy = shadow_d * 0.96
+        if sticker_w > 0.2:
+            rim_diam = (outline_w * 2.0) + (sticker_w * 2.0)
+            _stroke_round_path(p, united, stk_col, rim_diam)
+            if shadow_d > 0.2:
+                sh_united = united.translated(sh_dx, sh_dy)
+                _stroke_round_path(p, sh_united, stk_col, rim_diam)
+                p.fillPath(sh_united, stk_col)
+            p.fillPath(united, stk_col)
+
+        if shadow_d > 0.2:
+            steps = max(2, min(14, int(round(shadow_d))))
+            for step in range(steps, 0, -1):
+                frac = step / float(steps)
+                tr_p = united.translated(sh_dx * frac, sh_dy * frac)
+                _stroke_round_path(p, tr_p, sh_col, (outline_w * 2.0) + 1.5)
+                p.fillPath(tr_p, sh_col)
+
+        if outline_w > 0.2:
+            _stroke_round_path(p, united, out_col, outline_w * 2.0)
+
+        use_two_tone = style == "viral_two_tone" and len(positioned) > 1
+        for idx, (shifted, sbr) in enumerate(positioned):
+            base_c = sec_col if (use_two_tone and idx == 0) else txt_col
+            grad = QLinearGradient(QPointF(0.0, sbr.top()), QPointF(0.0, sbr.bottom()))
+            grad.setColorAt(0.0, base_c.lighter(116))
+            grad.setColorAt(1.0, base_c)
+            p.fillPath(shifted, QBrush(grad))
+
+    p.end()
+    target_x = max(0, (canvas_w - img_w) // 2)
+    target_y = max(12, int(hook.pos_y) - img_h // 2)
+    return img, target_x, target_y
+
+
+def render_hook_style_thumbnail_qimage(
+    style_id: str,
+    width: int = 216,
+    height: int = 86,
+    sample_text: str = "KETIKA RADITYA\nIKUT KESEL!",
+) -> QImage:
+    """Render a crisp live miniature card showing how a curated Hook Design Preset looks."""
+    from atro.core.presets import HOOK_STYLE_RECIPES
+
+    ensure_qt_gui_app()
+    recipe = HOOK_STYLE_RECIPES.get(style_id, HOOK_STYLE_RECIPES["viral_sticker"])
+    hb = HookBannerConfig(enabled=True, text=sample_text)
+    for k, v in recipe.items():
+        if k not in ("label", "description") and hasattr(hb, k):
+            setattr(hb, k, v)
+    if hb.design_style == "dark_card":
+        hb.font_size = 56
+    else:
+        hb.font_size = 76
+
+    thumb = QImage(width, height, QImage.Format.Format_RGBA8888)
+    thumb.fill(Qt.GlobalColor.transparent)
+    p = QPainter(thumb)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+
+    bg_grad = QLinearGradient(0, 0, width, height)
+    bg_grad.setColorAt(0.0, QColor("#18181B"))
+    bg_grad.setColorAt(1.0, QColor("#27272A"))
+    p.setPen(QPen(QColor("#3F3F46"), 1.5))
+    p.setBrush(QBrush(bg_grad))
+    p.drawRoundedRect(QRectF(1.0, 1.0, width - 2.0, height - 2.0), 10.0, 10.0)
+
+    rendered = render_hook_banner_card_image(hb, canvas_w=1080)
+    if rendered is not None:
+        card_img, _, _ = rendered
+        avail_w = float(width - 14)
+        avail_h = float(height - 12)
+        sc = min(avail_w / max(1, card_img.width()), avail_h / max(1, card_img.height()))
+        dw = card_img.width() * sc
+        dh = card_img.height() * sc
+        dx = (width - dw) * 0.5
+        dy = (height - dh) * 0.5
+        p.drawImage(QRectF(dx, dy, dw, dh), card_img)
+    p.end()
+    return thumb
+
+
 def render_hook_banner_card_image(
     hook: HookBannerConfig,
     canvas_w: int = 1080,
 ) -> Optional[tuple[QImage, int, int]]:
-    """Render tight RGBA card QImage for Podcast Hook Banner and return `(image, target_x, target_y)`."""
+    """Render tight RGBA card QImage for Opening Hook Banner and return `(image, target_x, target_y)`."""
     ensure_qt_gui_app()
     if not hook.enabled or not (hook.text or "").strip():
         return None
+    if getattr(hook, "design_style", "viral_sticker") != "dark_card":
+        return _render_stylized_hook_image(hook, canvas_w=canvas_w)
     card_w, card_h, lines, font = _hook_card_dimensions(hook, canvas_w)
     if not lines:
         return None
@@ -547,10 +968,16 @@ def draw_hook_banner_on_painter(
     hook: HookBannerConfig,
     canvas_w: int,
     canvas_h: int,
-    rel_t: float,
+    rel_time_sec: float,
+    intro_shift: float = 0.0,
 ) -> None:
-    """Draw animated Hook Banner onto active QPainter at `rel_t`."""
-    if not hook.enabled or rel_t < 0.0 or rel_t > hook.duration_sec:
+    """Draw animated Opening Hook Banner onto active QPainter at `rel_time_sec`."""
+    eff_dur = (
+        float(intro_shift)
+        if (intro_shift > 0.0 and getattr(hook, "match_opening_tts_duration", True))
+        else float(hook.duration_sec)
+    )
+    if not hook.enabled or rel_time_sec < 0.0 or rel_time_sec > eff_dur:
         return
     card_data = render_hook_banner_card_image(hook, canvas_w=canvas_w)
     if card_data is None:
@@ -558,7 +985,7 @@ def draw_hook_banner_on_painter(
     img, target_x, target_y = card_data
     target_y = min(canvas_h - img.height() - 12, target_y)
 
-    dur = max(0.3, float(hook.duration_sec))
+    dur = max(0.3, eff_dur)
     in_dur = min(0.22, dur * 0.35)
     out_dur = min(0.22, dur * 0.35)
 
@@ -567,20 +994,20 @@ def draw_hook_banner_on_painter(
     dy = 0.0
     scale = 1.0
 
-    if rel_t < in_dur:
-        prog = max(0.0, min(1.0, rel_t / max(0.01, in_dur)))
+    if rel_time_sec < in_dur:
+        prog = max(0.0, min(1.0, rel_time_sec / max(0.01, in_dur)))
         if hook.transition_in == "fade":
             alpha = prog
         elif hook.transition_in == "slide":
             alpha = prog
             dy = -(1.0 - prog) * 180.0
         elif hook.transition_in == "zoom":
-            alpha = prog
-            scale = 0.72 + 0.28 * prog
+            alpha = 0.85 + 0.15 * prog
+            scale = 0.84 + 0.16 * prog
         elif hook.transition_in == "whip":
             dx = -(1.0 - prog) * float(canvas_w)
-    elif rel_t > dur - out_dur:
-        prog = max(0.0, min(1.0, (dur - rel_t) / max(0.01, out_dur)))
+    elif rel_time_sec > dur - out_dur:
+        prog = max(0.0, min(1.0, (dur - rel_time_sec) / max(0.01, out_dur)))
         if hook.transition_out == "fade":
             alpha = prog
         elif hook.transition_out == "slide":
@@ -1993,9 +2420,20 @@ def compile_composer_ffmpeg_plan(
 
     cur_lbl = "framed"
 
-    # Optional frozen blurred intro for opening TTS
+    # Optional frozen intro for opening TTS
     if intro_shift > 0.0:
         fps_safe = max(10.0, min(120.0, float(fps or 30.0)))
+        intro_mode = getattr(config.overlays.hook_banner, "opening_intro_mode", "freeze_clear")
+        if intro_mode == "freeze_blur":
+            intro_fx = f"boxblur=10:2,eq=brightness=-0.16,setsar=1"
+        elif intro_mode == "freeze_zoom":
+            intro_fx = (
+                f"scale=w='trunc(iw*(1+0.07*min(1,t/{intro_shift:.3f}))/2)*2':"
+                f"h='trunc(ih*(1+0.07*min(1,t/{intro_shift:.3f}))/2)*2':eval=frame,"
+                f"crop={cw}:{ch}:(iw-{cw})/2:(ih-{ch})/2,setsar=1"
+            )
+        else:
+            intro_fx = "setsar=1"
         lines.extend(
             [
                 f"[{cur_lbl}]fps={fps_safe:.3f},split=2[{prefix}_intro_src][{prefix}_main_src]",
@@ -2003,7 +2441,7 @@ def compile_composer_ffmpeg_plan(
                     f"[{prefix}_intro_src]trim=start_frame=0:end_frame=1,"
                     f"tpad=stop_mode=clone:stop_duration={intro_shift:.3f},"
                     f"trim=0:{intro_shift:.3f},setpts=PTS-STARTPTS,"
-                    f"boxblur=10:2,eq=brightness=-0.16,setsar=1[{prefix}_v_intro]"
+                    f"{intro_fx}[{prefix}_v_intro]"
                 ),
                 f"[{prefix}_main_src]setpts=PTS-STARTPTS[{prefix}_v_main]",
                 f"[{prefix}_v_intro][{prefix}_v_main]concat=n=2:v=1:a=0,setsar=1[{prefix}_with_intro]",
@@ -2064,7 +2502,12 @@ def compile_composer_ffmpeg_plan(
         temp_assets.append(hook_png)
         h_idx = next_idx
         next_idx += 1
-        h_dur = min(total_dur, max(0.3, float(hook.duration_sec)))
+        base_hook_dur = (
+            intro_shift
+            if (intro_shift > 0.0 and getattr(hook, "match_opening_tts_duration", True))
+            else max(0.3, float(hook.duration_sec))
+        )
+        h_dur = min(total_dur, max(0.3, float(base_hook_dur)))
         use_loop = hook.transition_in in ("fade", "slide", "zoom") or hook.transition_out == "fade"
         extra_inputs.append((hook_png, use_loop))
 
@@ -2072,12 +2515,13 @@ def compile_composer_ffmpeg_plan(
         if use_loop:
             fade_d = min(0.22, h_dur * 0.35)
             fade_out_st = max(0.0, round(h_dur - fade_d, 3))
+            fade_filters: list[str] = ["format=rgba"]
+            if hook.transition_in in ("fade", "slide"):
+                fade_filters.append(f"fade=t=in:st=0:d={fade_d:.3f}:alpha=1")
+            if hook.transition_out == "fade":
+                fade_filters.append(f"fade=t=out:st={fade_out_st:.3f}:d={fade_d:.3f}:alpha=1")
             h_faded = f"{prefix}_hook_a"
-            lines.append(
-                f"{h_stream}format=rgba,"
-                f"fade=t=in:st=0:d={fade_d:.3f}:alpha=1,"
-                f"fade=t=out:st={fade_out_st:.3f}:d={fade_d:.3f}:alpha=1[{h_faded}]"
-            )
+            lines.append(f"{h_stream}{','.join(fade_filters)}[{h_faded}]")
             h_stream = f"[{h_faded}]"
 
         x_expr = f"{hx}"

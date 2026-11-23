@@ -176,6 +176,19 @@ def apply_initial_style_overrides(
     if "hook_enabled" in overrides and overrides["hook_enabled"] is not None:
         cfg.overlays.hook_banner.enabled = bool(overrides["hook_enabled"])
 
+    if overrides.get("hook_design_style"):
+        from atro.core.presets import HOOK_STYLE_RECIPES, apply_hook_style_recipe
+
+        h_sid = str(overrides["hook_design_style"]).strip()
+        if h_sid in HOOK_STYLE_RECIPES:
+            apply_hook_style_recipe(cfg, h_sid)
+
+    if overrides.get("opening_intro_mode") in ("freeze_clear", "freeze_zoom", "freeze_blur"):
+        cfg.overlays.hook_banner.opening_intro_mode = overrides["opening_intro_mode"]
+
+    if "opening_tts_enabled" in overrides and overrides["opening_tts_enabled"] is not None:
+        cfg.timing.opening_tts_enabled = bool(overrides["opening_tts_enabled"])
+
     if "hook_bg_hex" in overrides and overrides["hook_bg_hex"]:
         cfg.overlays.hook_banner.bg_color_hex = str(overrides["hook_bg_hex"])
 
@@ -1159,8 +1172,13 @@ class CutterService:
             if config.timing.opening_tts_enabled:
                 tts_voice = settings.tts_voice if settings is not None else "id-ID-GadisNeural"
                 tts_rate = settings.tts_rate if settings is not None else "+8%"
+                tts_source_text = (
+                    (config.overlays.hook_banner.text or "").strip()
+                    if config.overlays.hook_banner.enabled and (config.overlays.hook_banner.text or "").strip()
+                    else config.clip_title
+                )
                 tts_path, intro_dur = await synthesize_opening_voiceover(
-                    text=config.clip_title,
+                    text=tts_source_text,
                     output_audio_path=temp_tts_base,
                     voice=tts_voice,
                     rate=tts_rate,
