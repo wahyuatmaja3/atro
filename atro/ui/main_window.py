@@ -38,6 +38,7 @@ from atro.config import AppSettings, load_settings, save_settings
 from atro.core.error_messages import humanize_error
 from atro.core.presets import (
     CAPTION_RECIPES,
+    HOOK_STYLE_RECIPES,
     READY_TEMPLATES,
     build_ready_template_config,
     normalize_ready_template_id,
@@ -716,6 +717,18 @@ class MainWindow(QMainWindow):
         self.init_topic_hdr_edit.setPlaceholderText("Contoh: CARA CEPAT CUAN")
         self.init_topic_hdr_edit.textChanged.connect(lambda _t: self._refresh_step2_preview())
 
+        self.init_hook_design_combo = QComboBox()
+        self.init_hook_design_combo.addItem("Otomatis Sesuai Template", "")
+        for h_sid, h_meta in HOOK_STYLE_RECIPES.items():
+            self.init_hook_design_combo.addItem(h_meta["label"], h_sid)
+        self.init_hook_design_combo.currentIndexChanged.connect(lambda _i: self._refresh_step2_preview())
+
+        self.init_intro_mode_combo = QComboBox()
+        self.init_intro_mode_combo.addItem("Frame Awal Jernih (Tanpa Blur)", "freeze_clear")
+        self.init_intro_mode_combo.addItem("Frame Awal + Zoom Halus", "freeze_zoom")
+        self.init_intro_mode_combo.addItem("Frame Awal Blur Gelap", "freeze_blur")
+        self.init_intro_mode_combo.currentIndexChanged.connect(lambda _i: self._refresh_step2_preview())
+
         self.adv_options_btn = QPushButton("Opsi Lanjutan...")
         self.adv_options_btn.setObjectName("SmallAction")
         self.adv_options_btn.setCheckable(True)
@@ -727,16 +740,28 @@ class MainWindow(QMainWindow):
         effects_row.addWidget(self.init_topic_hdr_edit, 1)
         pro_l.addLayout(effects_row)
 
+        hook_init_row = QHBoxLayout()
+        hook_init_row.setSpacing(10)
+        hl_des = QLabel("Desain Caption Awal:")
+        hl_des.setObjectName("FieldLabel")
+        hl_intro = QLabel("Latar Intro:")
+        hl_intro.setObjectName("FieldLabel")
+        hook_init_row.addWidget(hl_des)
+        hook_init_row.addWidget(self.init_hook_design_combo, 1)
+        hook_init_row.addWidget(hl_intro)
+        hook_init_row.addWidget(self.init_intro_mode_combo)
+        pro_l.addLayout(hook_init_row)
+
         # Feature Toggles Row + Progressive Disclosure button
         feat_row = QHBoxLayout()
         feat_row.setSpacing(10)
         self.subtitles_chk = QCheckBox("Subtitle Otomatis")
         self.subtitles_chk.setChecked(True)
         self.subtitles_chk.toggled.connect(lambda _v: self._refresh_step2_preview())
-        self.hook_title_chk = QCheckBox("Banner Judul Hook")
+        self.hook_title_chk = QCheckBox("Caption Awal Video")
         self.hook_title_chk.setChecked(True)
         self.hook_title_chk.toggled.connect(lambda _v: self._refresh_step2_preview())
-        self.opening_tts_chk = QCheckBox("Suara Narator Opening")
+        self.opening_tts_chk = QCheckBox("Suara Baca Caption Awal (Sebelum Klip)")
         self.opening_tts_chk.setChecked(True)
         self.backsound_chk = QCheckBox("Musik Latar")
         self.backsound_chk.setChecked(True)
@@ -1176,6 +1201,15 @@ class MainWindow(QMainWindow):
         self.init_vignette_chk.setChecked(cfg.overlays.climax_effects.vignette_enabled)
         self.init_topic_hdr_chk.setChecked(cfg.overlays.climax_effects.topic_header_enabled)
         self.init_topic_hdr_edit.setText(cfg.overlays.climax_effects.topic_header_text)
+        self.hook_title_chk.setChecked(bool(cfg.overlays.hook_banner.enabled))
+        if hasattr(self, "init_hook_design_combo"):
+            hd_idx = self.init_hook_design_combo.findData(cfg.overlays.hook_banner.design_style)
+            self.init_hook_design_combo.setCurrentIndex(max(0, hd_idx))
+        if hasattr(self, "init_intro_mode_combo"):
+            im_idx = self.init_intro_mode_combo.findData(cfg.overlays.hook_banner.opening_intro_mode)
+            self.init_intro_mode_combo.setCurrentIndex(max(0, im_idx))
+        if meta.get("opening_tts_enabled") is not None:
+            self.opening_tts_chk.setChecked(bool(meta["opening_tts_enabled"]))
 
         self.init_sub_pos_combo.setCurrentIndex(
             max(0, self.init_sub_pos_combo.findData(cfg.subtitles.placement_preset))
@@ -1258,6 +1292,7 @@ class MainWindow(QMainWindow):
         if aspect == "16:9":
             cfg.canvas_width, cfg.canvas_height = 1920, 1080
         cfg.subtitles.enabled = self.subtitles_chk.isChecked()
+        cfg.timing.opening_tts_enabled = self.opening_tts_chk.isChecked()
         cfg.overlays.hook_banner.enabled = self.hook_title_chk.isChecked()
         cfg.overlays.climax_effects.progress_bar_enabled = self.viral_polish_chk.isChecked()
         cfg.overlays.climax_effects.contrast_boost_enabled = self.viral_polish_chk.isChecked()
@@ -1280,7 +1315,7 @@ class MainWindow(QMainWindow):
         self.step2_preview_canvas.render_state(
             source_frame_bgr=self._step2_sample_frame,
             config=cfg,
-            rel_time_sec=1.6,
+            rel_time_sec=1.2,
             segments=self._step2_sample_segments,
             clip_start_sec=0.0,
             clip_end_sec=12.0,
@@ -1470,6 +1505,13 @@ class MainWindow(QMainWindow):
         effective_lm = custom_lm or tpl_layout
         if effective_lm in ("split_screen", "multi_speaker_split"):
             overrides["split_ratio_top"] = round(self.init_split_spin.value() / 100.0, 2)
+        custom_hd = str(self.init_hook_design_combo.currentData() or "") if hasattr(self, "init_hook_design_combo") else ""
+        if custom_hd:
+            overrides["hook_design_style"] = custom_hd
+        overrides["hook_enabled"] = self.hook_title_chk.isChecked()
+        if hasattr(self, "init_intro_mode_combo"):
+            overrides["opening_intro_mode"] = str(self.init_intro_mode_combo.currentData() or "freeze_clear")
+        overrides["opening_tts_enabled"] = self.opening_tts_chk.isChecked()
         tr_sel = str(self.init_transition_combo.currentData() or "auto")
         if tr_sel == "auto":
             overrides["transition_mode"] = "auto"

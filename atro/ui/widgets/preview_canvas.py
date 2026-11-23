@@ -458,9 +458,9 @@ class LivePreviewCanvas9x16(QWidget):
                 self.setCursor(Qt.CursorShape.ClosedHandCursor)
                 return
 
-        # Hit-test hook banner
+        # Hit-test hook banner (generous hit band for multi-line headline stickers)
         hb = self._config.overlays.hook_banner
-        if hb.enabled and abs(lp.y() - hb.pos_y) < 100:
+        if hb.enabled and abs(lp.y() - hb.pos_y) < 165:
             self._drag_overlay = "hook_banner"
             self._drag_orig_pos = (540, hb.pos_y)
             self.setCursor(Qt.CursorShape.ClosedHandCursor)

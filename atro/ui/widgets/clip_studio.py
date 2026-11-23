@@ -6,8 +6,8 @@ import threading
 from pathlib import Path
 from typing import Callable, Optional
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QFontDatabase, QImage, QMouseEvent, QPixmap
+from PyQt6.QtCore import QSize, Qt, QTimer, QUrl, pyqtSignal
+from PyQt6.QtGui import QColor, QFontDatabase, QIcon, QImage, QMouseEvent, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -50,8 +50,10 @@ from atro.core.composer_schema import (
 )
 from atro.core.presets import (
     CAPTION_RECIPES,
+    HOOK_STYLE_RECIPES,
     READY_TEMPLATES,
     apply_caption_recipe,
+    apply_hook_style_recipe,
     build_preset_config,
     build_ready_template_config,
     export_template_package,
@@ -76,7 +78,11 @@ from atro.core.schemas import (
     TranscriptSegment,
 )
 from atro.modules.cutter.backsound import scan_backsound_tracks
-from atro.modules.cutter.composer_renderer import detect_composer_shot_crops_sync
+from atro.modules.cutter.composer_renderer import (
+    detect_composer_shot_crops_sync,
+    render_hook_style_thumbnail_qimage,
+)
+from atro.modules.cutter.opening_narrator import clean_title_for_speech, synthesize_opening_voiceover
 from atro.modules.cutter.service import apply_initial_style_overrides, apply_style_template_from_config
 from atro.modules.cutter.transitions import TRANSITION_CHOICES, active_transition_window_at
 from atro.ui.widgets.preview_canvas import (
@@ -410,6 +416,7 @@ class ClipStudioWidget(QWidget):
     standalone_render_requested = pyqtSignal(str, object)  # (local_video_path, ClipComposerConfig)
     style_applied_to_all = pyqtSignal(int)
     _auto_detect_done = pyqtSignal(int, str, object)  # (request_id, source_path_str, list[ShotCropSegment])
+    _tts_audition_ready = pyqtSignal(str, float, str)  # (audio_path_str, duration_sec, error_msg)
 
     def __init__(
         self,
@@ -439,6 +446,10 @@ class ClipStudioWidget(QWidget):
         self._play_timer.setInterval(33)  # ~30 FPS live preview playback
         self._play_timer.timeout.connect(self._on_playback_tick)
         self._auto_detect_done.connect(self._on_auto_detect_finished)
+        self._tts_audition_ready.connect(self._on_tts_audition_ready)
+        self._tts_player = None
+        self._tts_audio_output = None
+        self._tts_tmp_audio: Optional[Path] = None
 
         self._build_ui()
         self._load_config_into_ui(self._config)
@@ -1254,62 +1265,226 @@ class ClipStudioWidget(QWidget):
         vbox = QVBoxLayout(w)
         vbox.setSpacing(10)
 
-        # 1. Podcast Hook Banner
-        hook_grp = QGroupBox("Podcast Hook Banner (Intro)")
+        # 1. Opening Caption / Hook Title & Opening Voiceover
+        hook_grp = QGroupBox("Caption & Judul Awal Video (Sebelum Klip)")
         hf = QFormLayout(hook_grp)
-        self.hook_enabled_chk = QCheckBox("Tampilkan Hook Banner")
-        self.hook_enabled_chk.toggled.connect(self._on_ui_mutated)
+        hf.setSpacing(8)
+        self.hook_enabled_chk = QCheckBox("Tampilkan Caption / Judul di Awal Video")
+        self.hook_enabled_chk.toggled.connect(self._on_hook_visual_mutated)
         hf.addRow(self.hook_enabled_chk)
 
+        self.hook_tts_mode_combo = QComboBox()
+        self.hook_tts_mode_combo.addItem(
+            "Pakai Suara Pembaca Caption (Di Awal Sebelum Klip Mulai)",
+            True,
+        )
+        self.hook_tts_mode_combo.addItem(
+            "Tanpa Suara (Teks Caption Awal Saja)",
+            False,
+        )
+        self.hook_tts_mode_combo.currentIndexChanged.connect(self._on_hook_tts_mode_changed)
+        hf.addRow("Suara Pembaca Awal", self.hook_tts_mode_combo)
+
+        self.hook_intro_mode_combo = QComboBox()
+        self.hook_intro_mode_combo.addItem("Bekukan Frame Awal Jernih (Tanpa Blur)", "freeze_clear")
+        self.hook_intro_mode_combo.addItem("Bekukan Frame Awal + Zoom Halus", "freeze_zoom")
+        self.hook_intro_mode_combo.addItem("Bekukan Frame Awal Blur + Gelap", "freeze_blur")
+        self.hook_intro_mode_combo.currentIndexChanged.connect(self._on_ui_mutated)
+        hf.addRow("Tampilan Latar Intro", self.hook_intro_mode_combo)
+
+        self.hook_intro_info_lbl = QLabel("")
+        self.hook_intro_info_lbl.setObjectName("MutedText")
+        self.hook_intro_info_lbl.setWordWrap(True)
+        hf.addRow("", self.hook_intro_info_lbl)
+
+        self.hook_design_combo = QComboBox()
+        for sid, smeta in HOOK_STYLE_RECIPES.items():
+            self.hook_design_combo.addItem(smeta["label"], sid)
+        self.hook_design_combo.currentIndexChanged.connect(self._on_hook_design_combo_changed)
+        hf.addRow("Desain Caption Awal", self.hook_design_combo)
+
+        # Visual Miniature Gallery of all 13 Hook Caption Designs
+        gallery_scroll = QScrollArea()
+        gallery_scroll.setWidgetResizable(True)
+        gallery_scroll.setFixedHeight(210)
+        gallery_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        gal_host = QWidget()
+        gal_grid = QGridLayout(gal_host)
+        gal_grid.setContentsMargins(2, 2, 2, 2)
+        gal_grid.setSpacing(6)
+        self._hook_design_cards: dict[str, QPushButton] = {}
+        for idx_s, (sid, smeta) in enumerate(HOOK_STYLE_RECIPES.items()):
+            card_btn = QPushButton()
+            card_btn.setCheckable(True)
+            card_btn.setToolTip(f"{smeta['label']}\n{smeta['description']}")
+            card_btn.setFixedHeight(86)
+            card_btn.setStyleSheet(
+                "QPushButton { text-align: center; border: 1.5px solid #3F3F46; border-radius: 10px; padding: 3px; background: #18181B; }"
+                "QPushButton:checked { border: 2.5px solid #FACC15; background: #27272A; }"
+                "QPushButton:hover { border-color: #F97316; }"
+            )
+            try:
+                qimg = render_hook_style_thumbnail_qimage(sid, width=190, height=74)
+                card_btn.setIcon(QIcon(QPixmap.fromImage(qimg)))
+                card_btn.setIconSize(QSize(176, 70))
+            except Exception:
+                card_btn.setText(smeta["label"][:18])
+            card_btn.clicked.connect(lambda _c=False, s=sid: self._select_hook_design(s))
+            self._hook_design_cards[sid] = card_btn
+            gal_grid.addWidget(card_btn, idx_s // 2, idx_s % 2)
+        gallery_scroll.setWidget(gal_host)
+        hf.addRow("Galeri Gaya Awal", gallery_scroll)
+
         self.hook_text_edit = HookTextEdit()
-        self.hook_text_edit.textChanged.connect(self._on_ui_mutated)
-        hf.addRow("Teks Hook", self.hook_text_edit)
+        self.hook_text_edit.textChanged.connect(self._on_hook_visual_mutated)
+        hf.addRow("Teks Caption Awal", self.hook_text_edit)
+
+        hook_tools_row = QHBoxLayout()
+        hook_from_title_btn = QPushButton("Ambil Judul Klip")
+        hook_from_title_btn.setObjectName("SmallAction")
+        hook_from_title_btn.clicked.connect(self._fill_hook_from_clip_title)
+        hook_wrap_btn = QPushButton("Rapikan 2-3 Baris")
+        hook_wrap_btn.setObjectName("SmallAction")
+        hook_wrap_btn.clicked.connect(self._auto_wrap_hook_lines)
+        self.hook_test_tts_btn = QPushButton("Dengar Suara Caption")
+        self.hook_test_tts_btn.setObjectName("SmallAction")
+        self.hook_test_tts_btn.clicked.connect(self._preview_hook_tts_audio)
+        hook_tools_row.addWidget(hook_from_title_btn)
+        hook_tools_row.addWidget(hook_wrap_btn)
+        hook_tools_row.addWidget(self.hook_test_tts_btn)
+        hook_tools_row.addStretch()
+        hf.addRow("Aksi Cepat", hook_tools_row)
+
+        h_typo_row = QHBoxLayout()
+        self.hook_font_combo = QComboBox()
+        self.hook_font_combo.setEditable(True)
+        for fname in (
+            "Impact",
+            "Arial Black",
+            "Segoe UI Black",
+            "Bahnschrift",
+            "Georgia",
+            "Corbel",
+            "Segoe UI",
+        ):
+            self.hook_font_combo.addItem(fname)
+        self.hook_font_combo.currentTextChanged.connect(self._on_hook_visual_mutated)
+        self.hook_italic_chk = QCheckBox("Miring")
+        self.hook_italic_chk.toggled.connect(self._on_hook_visual_mutated)
+        self.hook_upper_chk = QCheckBox("KAPITAL")
+        self.hook_upper_chk.toggled.connect(self._on_hook_visual_mutated)
+        h_typo_row.addWidget(self.hook_font_combo, 1)
+        h_typo_row.addWidget(self.hook_italic_chk)
+        h_typo_row.addWidget(self.hook_upper_chk)
+        hf.addRow("Font & Gaya", h_typo_row)
 
         h_time_row = QHBoxLayout()
         self.hook_size_spin = QSpinBox()
-        self.hook_size_spin.setRange(14, 100)
+        self.hook_size_spin.setRange(14, 160)
         self.hook_size_spin.setSuffix(" pt")
-        self.hook_size_spin.valueChanged.connect(self._on_ui_mutated)
+        self.hook_size_spin.valueChanged.connect(self._on_hook_visual_mutated)
+        self.hook_y_spin = QSpinBox()
+        self.hook_y_spin.setRange(60, 1750)
+        self.hook_y_spin.valueChanged.connect(self._on_hook_visual_mutated)
+        h_pos_atas_btn = QPushButton("Atas")
+        h_pos_atas_btn.setObjectName("SmallAction")
+        h_pos_atas_btn.clicked.connect(lambda: self._set_hook_pos_y(300))
+        h_pos_tengah_btn = QPushButton("Tengah")
+        h_pos_tengah_btn.setObjectName("SmallAction")
+        h_pos_tengah_btn.clicked.connect(lambda: self._set_hook_pos_y(920))
+        h_pos_bawah_btn = QPushButton("Bawah")
+        h_pos_bawah_btn.setObjectName("SmallAction")
+        h_pos_bawah_btn.clicked.connect(lambda: self._set_hook_pos_y(1420))
+        h_time_row.addWidget(QLabel("Ukuran"))
+        h_time_row.addWidget(self.hook_size_spin)
+        h_time_row.addWidget(QLabel("Y"))
+        h_time_row.addWidget(self.hook_y_spin)
+        h_time_row.addWidget(h_pos_atas_btn)
+        h_time_row.addWidget(h_pos_tengah_btn)
+        h_time_row.addWidget(h_pos_bawah_btn)
+        hf.addRow("Ukuran & Posisi", h_time_row)
+
+        h_col_row = QHBoxLayout()
+        self.hook_txt_btn = ColorSwatchButton("#FFE600")
+        self.hook_txt_btn.color_changed.connect(lambda _c: self._on_hook_visual_mutated())
+        self.hook_sec_txt_btn = ColorSwatchButton("#FFFFFF")
+        self.hook_sec_txt_btn.color_changed.connect(lambda _c: self._on_hook_visual_mutated())
+        self.hook_acc_btn = ColorSwatchButton("#FACC15")
+        self.hook_acc_btn.color_changed.connect(lambda _c: self._on_hook_visual_mutated())
+        self.hook_bg_btn = ColorSwatchButton("#E617110F")
+        self.hook_bg_btn.color_changed.connect(lambda _c: self._on_hook_visual_mutated())
+        h_col_row.addWidget(QLabel("Isi"))
+        h_col_row.addWidget(self.hook_txt_btn)
+        h_col_row.addWidget(QLabel("Baris 1"))
+        h_col_row.addWidget(self.hook_sec_txt_btn)
+        h_col_row.addWidget(QLabel("Aksen"))
+        h_col_row.addWidget(self.hook_acc_btn)
+        h_col_row.addWidget(QLabel("Latar"))
+        h_col_row.addWidget(self.hook_bg_btn)
+        hf.addRow("Warna Teks/Latar", h_col_row)
+
+        h_fx_row = QHBoxLayout()
+        self.hook_outline_btn = ColorSwatchButton("#000000")
+        self.hook_outline_btn.color_changed.connect(lambda _c: self._on_hook_visual_mutated())
+        self.hook_outline_w_spin = QDoubleSpinBox()
+        self.hook_outline_w_spin.setRange(0.0, 28.0)
+        self.hook_outline_w_spin.setSingleStep(0.5)
+        self.hook_outline_w_spin.setDecimals(1)
+        self.hook_outline_w_spin.valueChanged.connect(self._on_hook_visual_mutated)
+        self.hook_shadow_btn = ColorSwatchButton("#5B21B6")
+        self.hook_shadow_btn.color_changed.connect(lambda _c: self._on_hook_visual_mutated())
+        self.hook_shadow_depth_spin = QDoubleSpinBox()
+        self.hook_shadow_depth_spin.setRange(0.0, 32.0)
+        self.hook_shadow_depth_spin.setSingleStep(0.5)
+        self.hook_shadow_depth_spin.setDecimals(1)
+        self.hook_shadow_depth_spin.valueChanged.connect(self._on_hook_visual_mutated)
+        h_fx_row.addWidget(QLabel("Outline"))
+        h_fx_row.addWidget(self.hook_outline_btn)
+        h_fx_row.addWidget(self.hook_outline_w_spin)
+        h_fx_row.addWidget(QLabel("3D/Glow"))
+        h_fx_row.addWidget(self.hook_shadow_btn)
+        h_fx_row.addWidget(self.hook_shadow_depth_spin)
+        hf.addRow("Outline & 3D", h_fx_row)
+
+        h_stk_row = QHBoxLayout()
+        self.hook_sticker_btn = ColorSwatchButton("#FFFFFF")
+        self.hook_sticker_btn.color_changed.connect(lambda _c: self._on_hook_visual_mutated())
+        self.hook_sticker_w_spin = QDoubleSpinBox()
+        self.hook_sticker_w_spin.setRange(0.0, 28.0)
+        self.hook_sticker_w_spin.setSingleStep(0.5)
+        self.hook_sticker_w_spin.setDecimals(1)
+        self.hook_sticker_w_spin.valueChanged.connect(self._on_hook_visual_mutated)
+        self.hook_eyebrow_edit = QLineEdit()
+        self.hook_eyebrow_edit.setPlaceholderText("HOT TOPIC (Breaking)")
+        self.hook_eyebrow_edit.textChanged.connect(lambda _t: self._on_hook_visual_mutated())
+        h_stk_row.addWidget(QLabel("Tepi Stiker"))
+        h_stk_row.addWidget(self.hook_sticker_btn)
+        h_stk_row.addWidget(self.hook_sticker_w_spin)
+        h_stk_row.addWidget(QLabel("Label"))
+        h_stk_row.addWidget(self.hook_eyebrow_edit, 1)
+        hf.addRow("Stiker & Badge", h_stk_row)
+
+        h_tr_row = QHBoxLayout()
+        self.hook_match_tts_chk = QCheckBox("Durasi ikuti suara")
+        self.hook_match_tts_chk.toggled.connect(self._on_ui_mutated)
         self.hook_dur_spin = QDoubleSpinBox()
         self.hook_dur_spin.setRange(0.5, 12.0)
         self.hook_dur_spin.setSingleStep(0.2)
         self.hook_dur_spin.setSuffix(" s")
-        self.hook_dur_spin.valueChanged.connect(self._on_ui_mutated)
-        self.hook_y_spin = QSpinBox()
-        self.hook_y_spin.setRange(60, 1750)
-        self.hook_y_spin.valueChanged.connect(self._on_ui_mutated)
-        h_time_row.addWidget(QLabel("Ukuran Font"))
-        h_time_row.addWidget(self.hook_size_spin)
-        h_time_row.addWidget(QLabel("Durasi"))
-        h_time_row.addWidget(self.hook_dur_spin)
-        h_time_row.addWidget(QLabel("Pos Y"))
-        h_time_row.addWidget(self.hook_y_spin)
-        hf.addRow("Font / Timing / Y", h_time_row)
-
-        h_col_row = QHBoxLayout()
-        self.hook_bg_btn = ColorSwatchButton("#E617110F")
-        self.hook_bg_btn.color_changed.connect(lambda _c: self._on_ui_mutated())
-        self.hook_txt_btn = ColorSwatchButton("#FFFFFF")
-        self.hook_txt_btn.color_changed.connect(lambda _c: self._on_ui_mutated())
-        self.hook_acc_btn = ColorSwatchButton("#FACC15")
-        self.hook_acc_btn.color_changed.connect(lambda _c: self._on_ui_mutated())
-        h_col_row.addWidget(self.hook_bg_btn)
-        h_col_row.addWidget(self.hook_txt_btn)
-        h_col_row.addWidget(self.hook_acc_btn)
-        hf.addRow("BG / Teks / Aksen", h_col_row)
-
-        h_tr_row = QHBoxLayout()
+        self.hook_dur_spin.valueChanged.connect(self._on_hook_visual_mutated)
         self.hook_tr_in_combo = QComboBox()
         self.hook_tr_in_combo.addItems(["fade", "slide", "zoom", "whip", "none"])
         self.hook_tr_in_combo.currentIndexChanged.connect(self._on_ui_mutated)
         self.hook_tr_out_combo = QComboBox()
         self.hook_tr_out_combo.addItems(["fade", "slide", "zoom", "whip", "none"])
         self.hook_tr_out_combo.currentIndexChanged.connect(self._on_ui_mutated)
+        h_tr_row.addWidget(self.hook_match_tts_chk)
+        h_tr_row.addWidget(self.hook_dur_spin)
         h_tr_row.addWidget(QLabel("Masuk"))
         h_tr_row.addWidget(self.hook_tr_in_combo)
         h_tr_row.addWidget(QLabel("Keluar"))
         h_tr_row.addWidget(self.hook_tr_out_combo)
-        hf.addRow("Transisi", h_tr_row)
+        hf.addRow("Durasi & Transisi", h_tr_row)
         vbox.addWidget(hook_grp)
 
         # 2. Viewer Comment Bubbles (Twitch/Stream)
@@ -1560,8 +1735,8 @@ class ClipStudioWidget(QWidget):
         self.vocal_loudnorm_chk.toggled.connect(self._on_ui_mutated)
         form.addRow(self.vocal_loudnorm_chk)
 
-        self.opening_tts_chk = QCheckBox("Suara Opening TTS di Awal Klip")
-        self.opening_tts_chk.toggled.connect(self._on_ui_mutated)
+        self.opening_tts_chk = QCheckBox("Suara Pembaca Caption Awal (Sebelum Klip Mulai)")
+        self.opening_tts_chk.toggled.connect(self._on_opening_tts_chk_toggled)
         form.addRow(self.opening_tts_chk)
 
         self.ctx_sfx_chk = QCheckBox("SFX Meme Kontekstual (Sesuai Bahasan Klip)")
@@ -2053,15 +2228,36 @@ class ClipStudioWidget(QWidget):
         # Overlays
         hb = cfg.overlays.hook_banner
         self.hook_enabled_chk.setChecked(hb.enabled)
+        tts_idx = self.hook_tts_mode_combo.findData(bool(cfg.timing.opening_tts_enabled))
+        self.hook_tts_mode_combo.setCurrentIndex(max(0, tts_idx))
+        im_idx = self.hook_intro_mode_combo.findData(getattr(hb, "opening_intro_mode", "freeze_clear"))
+        self.hook_intro_mode_combo.setCurrentIndex(max(0, im_idx))
+        hs_idx = self.hook_design_combo.findData(getattr(hb, "design_style", "viral_sticker"))
+        self.hook_design_combo.setCurrentIndex(max(0, hs_idx))
+        for sid, btn in getattr(self, "_hook_design_cards", {}).items():
+            btn.setChecked(sid == getattr(hb, "design_style", "viral_sticker"))
         self.hook_text_edit.setText(hb.text)
+        self.hook_font_combo.setCurrentText(getattr(hb, "font_family", "Impact") or "Impact")
+        self.hook_italic_chk.setChecked(bool(getattr(hb, "italic", True)))
+        self.hook_upper_chk.setChecked(bool(getattr(hb, "uppercase", True)))
         self.hook_size_spin.setValue(hb.font_size)
         self.hook_dur_spin.setValue(hb.duration_sec)
         self.hook_y_spin.setValue(hb.pos_y)
         self.hook_bg_btn.set_color_hex(hb.bg_color_hex)
         self.hook_txt_btn.set_color_hex(hb.text_color_hex)
+        self.hook_sec_txt_btn.set_color_hex(getattr(hb, "secondary_text_color_hex", "#FFFFFF"))
         self.hook_acc_btn.set_color_hex(hb.accent_color_hex)
+        self.hook_outline_btn.set_color_hex(getattr(hb, "outline_color_hex", "#000000"))
+        self.hook_outline_w_spin.setValue(float(getattr(hb, "outline_width", 7.0)))
+        self.hook_shadow_btn.set_color_hex(getattr(hb, "shadow_color_hex", "#5B21B6"))
+        self.hook_shadow_depth_spin.setValue(float(getattr(hb, "shadow_depth", 7.5)))
+        self.hook_sticker_btn.set_color_hex(getattr(hb, "sticker_border_color_hex", "#FFFFFF"))
+        self.hook_sticker_w_spin.setValue(float(getattr(hb, "sticker_border_width", 6.5)))
+        self.hook_eyebrow_edit.setText(getattr(hb, "eyebrow_text", "HOT TOPIC"))
+        self.hook_match_tts_chk.setChecked(bool(getattr(hb, "match_opening_tts_duration", True)))
         self.hook_tr_in_combo.setCurrentText(hb.transition_in)
         self.hook_tr_out_combo.setCurrentText(hb.transition_out)
+        self._update_hook_intro_info_label()
 
         self._reload_comment_bubble_list()
 
@@ -2263,15 +2459,34 @@ class ClipStudioWidget(QWidget):
         # Overlays
         hb = cfg.overlays.hook_banner
         hb.enabled = self.hook_enabled_chk.isChecked()
+        hb.design_style = self.hook_design_combo.currentData() or "viral_sticker"  # type: ignore[assignment]
+        hb.opening_intro_mode = self.hook_intro_mode_combo.currentData() or "freeze_clear"  # type: ignore[assignment]
         hb.text = self.hook_text_edit.text()
+        hb.font_family = self.hook_font_combo.currentText().strip() or "Impact"
+        hb.italic = self.hook_italic_chk.isChecked()
+        hb.uppercase = self.hook_upper_chk.isChecked()
         hb.font_size = self.hook_size_spin.value()
         hb.duration_sec = self.hook_dur_spin.value()
         hb.pos_y = self.hook_y_spin.value()
         hb.bg_color_hex = self.hook_bg_btn.color_hex()
         hb.text_color_hex = self.hook_txt_btn.color_hex()
+        hb.secondary_text_color_hex = self.hook_sec_txt_btn.color_hex()
         hb.accent_color_hex = self.hook_acc_btn.color_hex()
+        hb.outline_color_hex = self.hook_outline_btn.color_hex()
+        hb.outline_width = round(self.hook_outline_w_spin.value(), 1)
+        hb.shadow_color_hex = self.hook_shadow_btn.color_hex()
+        hb.shadow_depth = round(self.hook_shadow_depth_spin.value(), 1)
+        hb.sticker_border_color_hex = self.hook_sticker_btn.color_hex()
+        hb.sticker_border_width = round(self.hook_sticker_w_spin.value(), 1)
+        hb.eyebrow_text = self.hook_eyebrow_edit.text().strip() or "HOT TOPIC"
+        hb.match_opening_tts_duration = self.hook_match_tts_chk.isChecked()
         hb.transition_in = self.hook_tr_in_combo.currentText()  # type: ignore[assignment]
         hb.transition_out = self.hook_tr_out_combo.currentText()  # type: ignore[assignment]
+        for sid, btn in getattr(self, "_hook_design_cards", {}).items():
+            btn.blockSignals(True)
+            btn.setChecked(sid == hb.design_style)
+            btn.blockSignals(False)
+        self._update_hook_intro_info_label()
 
         wm = cfg.overlays.watermark
         wm.enabled = self.wm_enabled_chk.isChecked()
@@ -2304,7 +2519,180 @@ class ClipStudioWidget(QWidget):
         cfg.timing.opening_tts_enabled = self.opening_tts_chk.isChecked()
         au.contextual_sfx_enabled = self.ctx_sfx_chk.isChecked()
 
+        self._update_hook_intro_info_label()
         self._refresh_preview()
+
+    # --- Hook Design, Intro Voiceover & Live Preview Helpers ---
+    def _ensure_hook_visible_playhead(self) -> None:
+        if self._rel_time_sec > 1.2 or self._rel_time_sec <= 0.0:
+            self._rel_time_sec = 0.25
+
+    def _on_hook_visual_mutated(self) -> None:
+        if self._syncing_ui:
+            return
+        self._ensure_hook_visible_playhead()
+        self._on_ui_mutated()
+
+    def _select_hook_design(self, style_id: str) -> None:
+        sid = style_id if style_id in HOOK_STYLE_RECIPES else "viral_sticker"
+        self._syncing_ui = True
+        apply_hook_style_recipe(self._config, sid)
+        self._config.overlays.hook_banner.enabled = True
+        self._syncing_ui = False
+        self._ensure_hook_visible_playhead()
+        self._load_config_into_ui(self._config)
+
+    def _on_hook_design_combo_changed(self) -> None:
+        if self._syncing_ui:
+            return
+        sid = str(self.hook_design_combo.currentData() or "viral_sticker")
+        self._select_hook_design(sid)
+
+    def _on_hook_tts_mode_changed(self) -> None:
+        if self._syncing_ui:
+            return
+        enabled = bool(self.hook_tts_mode_combo.currentData())
+        self._syncing_ui = True
+        self.opening_tts_chk.setChecked(enabled)
+        self._syncing_ui = False
+        self._on_ui_mutated()
+
+    def _on_opening_tts_chk_toggled(self, checked: bool) -> None:
+        if self._syncing_ui:
+            return
+        self._syncing_ui = True
+        idx = self.hook_tts_mode_combo.findData(bool(checked))
+        if idx >= 0:
+            self.hook_tts_mode_combo.setCurrentIndex(idx)
+        self._syncing_ui = False
+        self._on_ui_mutated()
+
+    def _set_hook_pos_y(self, pos_y: int) -> None:
+        self.hook_y_spin.setValue(max(60, min(1750, int(pos_y))))
+
+    def _fill_hook_from_clip_title(self) -> None:
+        title = (self._config.clip_title or "").strip()
+        if title:
+            self.hook_text_edit.setPlainText(title)
+
+    def _auto_wrap_hook_lines(self) -> None:
+        raw = " ".join((self.hook_text_edit.text() or "").split())
+        if not raw:
+            return
+        words = raw.split()
+        if len(words) <= 2:
+            self.hook_text_edit.setPlainText(raw)
+            return
+        lines: list[str] = []
+        target_lines = 3 if len(words) >= 5 else 2
+        per_line = max(1, (len(words) + target_lines - 1) // target_lines)
+        for idx in range(0, len(words), per_line):
+            lines.append(" ".join(words[idx : idx + per_line]))
+        self.hook_text_edit.setPlainText("\n".join(lines[:4]))
+
+    def _update_hook_intro_info_label(self) -> None:
+        if not hasattr(self, "hook_intro_info_lbl"):
+            return
+        use_tts = self.opening_tts_chk.isChecked() if hasattr(self, "opening_tts_chk") else False
+        hb_on = self.hook_enabled_chk.isChecked() if hasattr(self, "hook_enabled_chk") else True
+        if use_tts:
+            raw_txt = (self.hook_text_edit.text() if hasattr(self, "hook_text_edit") else "") or self._config.clip_title
+            clean = clean_title_for_speech(raw_txt)
+            words = max(1, len(clean.split())) if clean else 3
+            est = round(max(1.2, min(4.5, words * 0.42 + 0.25)), 1)
+            self.hook_intro_info_lbl.setText(
+                f"Aktif: Narator membacakan '{clean[:48]}' (~{est:.1f}s) di atas frame awal sebelum klip dimulai."
+            )
+            self.hook_intro_mode_combo.setEnabled(True)
+        elif hb_on:
+            dur = self.hook_dur_spin.value() if hasattr(self, "hook_dur_spin") else 2.8
+            self.hook_intro_info_lbl.setText(
+                f"Tanpa suara: Klip langsung berjalan dan teks awal tampil selama {dur:.1f}s."
+            )
+            self.hook_intro_mode_combo.setEnabled(False)
+        else:
+            self.hook_intro_info_lbl.setText("Caption awal & suara pembuka nonaktif.")
+            self.hook_intro_mode_combo.setEnabled(False)
+
+    def _preview_hook_tts_audio(self) -> None:
+        raw_txt = (
+            (self.hook_text_edit.text() or "").strip()
+            if self.hook_enabled_chk.isChecked()
+            else ""
+        ) or self._config.clip_title
+        clean = clean_title_for_speech(raw_txt)
+        if not clean:
+            QMessageBox.information(self, "Teks Kosong", "Isi Teks Caption Awal terlebih dahulu untuk didengarkan.")
+            return
+
+        import asyncio
+        import tempfile
+        from atro.core.logging_utils import JobLogger
+
+        self.hook_test_tts_btn.setEnabled(False)
+        self.hook_test_tts_btn.setText("Membuat Suara...")
+        settings = self._settings_provider()
+        tmp_base = Path(tempfile.gettempdir()) / "atro_studio_tts_preview"
+        ffprobe_p = None
+        try:
+            from atro.core.preflight import resolve_binary
+
+            ffprobe_p = resolve_binary("ffprobe", settings.bin_dir)
+        except Exception:
+            ffprobe_p = None
+
+        def _worker() -> None:
+            try:
+                log_tmp = Path(tempfile.gettempdir()) / "atro_studio_tts.log"
+                logger = JobLogger("tts_preview", log_tmp)
+                audio_path, dur = asyncio.run(
+                    synthesize_opening_voiceover(
+                        text=raw_txt,
+                        output_audio_path=tmp_base,
+                        voice=settings.tts_voice,
+                        rate=settings.tts_rate,
+                        ffprobe_path=ffprobe_p,
+                        logger=logger,
+                    )
+                )
+                self._tts_audition_ready.emit(str(audio_path) if audio_path else "", float(dur), "")
+            except Exception as exc:
+                self._tts_audition_ready.emit("", 0.0, str(exc))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_tts_audition_ready(self, audio_path_str: str, dur: float, err_msg: str) -> None:
+        self.hook_test_tts_btn.setEnabled(True)
+        self.hook_test_tts_btn.setText("Dengar Suara Caption")
+        if err_msg or not audio_path_str or not Path(audio_path_str).is_file():
+            self.hook_intro_info_lbl.setText(
+                f"Gagal memutar suara preview: {err_msg or 'TTS tidak tersedia.'}"
+            )
+            return
+        self._tts_tmp_audio = Path(audio_path_str)
+        self.hook_intro_info_lbl.setText(f"Memutar suara pembuka ({dur:.1f}s)...")
+        try:
+            from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
+
+            if self._tts_player is None:
+                self._tts_audio_output = QAudioOutput(self)
+                self._tts_audio_output.setVolume(0.95)
+                self._tts_player = QMediaPlayer(self)
+                self._tts_player.setAudioOutput(self._tts_audio_output)
+            self._tts_player.stop()
+            self._tts_player.setSource(QUrl.fromLocalFile(str(self._tts_tmp_audio.resolve())))
+            self._tts_player.play()
+        except Exception:
+            if self._tts_tmp_audio.suffix.lower() == ".wav":
+                try:
+                    import winsound
+
+                    winsound.PlaySound(
+                        str(self._tts_tmp_audio),
+                        winsound.SND_FILENAME | winsound.SND_ASYNC,
+                    )
+                except Exception:
+                    pass
 
     # --- Contextual SFX Cue CRUD ---
     def _reload_sfx_cues_table(self) -> None:
