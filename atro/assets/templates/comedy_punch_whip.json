@@ -10,6 +10,7 @@
   "caption_recipe": "streamer_kinetic",
   "placement_preset": "bottom_safe",
   "hook_enabled": true,
+  "hook_design_style": "viral_sticker",
   "hook_transition_in": "whip",
   "vignette_enabled": false,
   "topic_header_enabled": true,

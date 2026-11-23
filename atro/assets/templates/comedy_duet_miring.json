@@ -14,6 +14,7 @@
   "caption_recipe": "mrbeast_pill",
   "placement_preset": "split_line_center",
   "hook_enabled": true,
+  "hook_design_style": "viral_white_red",
   "hook_transition_in": "whip",
   "vignette_enabled": false,
   "topic_header_enabled": true,

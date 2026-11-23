@@ -14,6 +14,7 @@
   "caption_recipe": "podcast_editorial",
   "placement_preset": "bottom_safe",
   "hook_enabled": true,
+  "hook_design_style": "gold_cinema",
   "hook_transition_in": "fade",
   "vignette_enabled": true,
   "topic_header_enabled": true,

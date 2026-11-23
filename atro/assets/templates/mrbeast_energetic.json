@@ -10,6 +10,7 @@
   "caption_recipe": "mrbeast_pill",
   "placement_preset": "bottom_safe",
   "hook_enabled": true,
+  "hook_design_style": "slanted_pill",
   "hook_transition_in": "zoom",
   "vignette_enabled": true,
   "topic_header_enabled": true,

@@ -14,6 +14,7 @@
   "caption_recipe": "podcast_editorial",
   "placement_preset": "bottom_safe",
   "hook_enabled": true,
+  "hook_design_style": "breaking_bar",
   "hook_transition_in": "slide",
   "hook_accent_hex": "#DC2626",
   "vignette_enabled": true,

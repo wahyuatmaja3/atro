@@ -33,6 +33,22 @@ SubtitleStyleMode = Literal["karaoke_highlight", "kinetic_1_2", "podcast_3_4", "
 SubtitlePlacementPreset = Literal["bottom_safe", "split_line_center", "top_safe", "above_speaker", "custom"]
 SubtitleAnimationMode = Literal["pop", "scale", "karaoke", "none"]
 HookTransitionMode = Literal["fade", "slide", "zoom", "whip", "none"]
+HookDesignStyle = Literal[
+    "viral_sticker",
+    "viral_two_tone",
+    "viral_white_red",
+    "toxic_lime",
+    "cyan_arcade",
+    "neon_poster",
+    "floating_outline",
+    "gold_cinema",
+    "slanted_pill",
+    "magenta_pop",
+    "breaking_bar",
+    "paper_label",
+    "dark_card",
+]
+OpeningIntroMode = Literal["freeze_clear", "freeze_zoom", "freeze_blur"]
 WatermarkPosition = Literal[
     "top_left",
     "top_right",
@@ -373,20 +389,43 @@ class SubtitleLayerConfig(BaseModel):
 
 
 class HookBannerConfig(BaseModel):
-    """Opening hook title card displayed at the start of the clip."""
+    """Opening hook title card or viral sticker headline displayed at the start of the clip."""
 
     enabled: bool = True
     text: str = ""
+    design_style: HookDesignStyle = "viral_sticker"
+    font_family: str = "Impact"
+    italic: bool = True
+    uppercase: bool = True
     duration_sec: float = Field(default=2.8, ge=0.5, le=12.0)
     bg_color_hex: str = "#E617110F"
     accent_color_hex: str = "#FACC15"
-    text_color_hex: str = "#FFFFFF"
-    font_size: int = Field(default=32, ge=14, le=100)
-    pos_y: int = Field(default=220, ge=60, le=1750)
-    transition_in: HookTransitionMode = "fade"
+    text_color_hex: str = "#FFE600"
+    secondary_text_color_hex: str = "#FFFFFF"
+    outline_color_hex: str = "#000000"
+    outline_width: float = Field(default=7.0, ge=0.0, le=28.0)
+    shadow_color_hex: str = "#5B21B6"
+    shadow_depth: float = Field(default=7.5, ge=0.0, le=32.0)
+    sticker_border_color_hex: str = "#FFFFFF"
+    sticker_border_width: float = Field(default=6.5, ge=0.0, le=28.0)
+    eyebrow_text: str = "HOT TOPIC"
+    font_size: int = Field(default=74, ge=14, le=160)
+    pos_y: int = Field(default=920, ge=60, le=1750)
+    transition_in: HookTransitionMode = "zoom"
     transition_out: HookTransitionMode = "fade"
+    match_opening_tts_duration: bool = True
+    opening_intro_mode: OpeningIntroMode = "freeze_clear"
 
-    @field_validator("bg_color_hex", "accent_color_hex", "text_color_hex", mode="before")
+    @field_validator(
+        "bg_color_hex",
+        "accent_color_hex",
+        "text_color_hex",
+        "secondary_text_color_hex",
+        "outline_color_hex",
+        "shadow_color_hex",
+        "sticker_border_color_hex",
+        mode="before",
+    )
     @classmethod
     def _norm_hex(cls, v: str) -> str:
         return _normalize_hex_color(v, "#FFFFFF")

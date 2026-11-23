@@ -42,7 +42,8 @@ _SEED_TEMPLATE_SPECS: list[dict[str, Any]] = [
         "caption_recipe": "hormozi_viral",
         "placement_preset": "bottom_safe",
         "hook_enabled": True,
-        "hook_transition_in": "fade",
+        "hook_design_style": "viral_two_tone",
+        "hook_transition_in": "zoom",
         "vignette_enabled": True,
         "topic_header_enabled": False,
         "zoom_punch_enabled": False,
@@ -60,6 +61,7 @@ _SEED_TEMPLATE_SPECS: list[dict[str, Any]] = [
         "caption_recipe": "mrbeast_pill",
         "placement_preset": "bottom_safe",
         "hook_enabled": True,
+        "hook_design_style": "slanted_pill",
         "hook_transition_in": "zoom",
         "vignette_enabled": True,
         "topic_header_enabled": True,
@@ -85,6 +87,7 @@ _SEED_TEMPLATE_SPECS: list[dict[str, Any]] = [
         "caption_recipe": "mageran_glass",
         "placement_preset": "bottom_safe",
         "hook_enabled": True,
+        "hook_design_style": "floating_outline",
         "hook_transition_in": "fade",
         "vignette_enabled": True,
         "topic_header_enabled": True,
@@ -131,6 +134,7 @@ _SEED_TEMPLATE_SPECS: list[dict[str, Any]] = [
         "caption_recipe": "abdaal_minimal",
         "placement_preset": "bottom_safe",
         "hook_enabled": True,
+        "hook_design_style": "floating_outline",
         "hook_transition_in": "fade",
         "vignette_enabled": True,
         "topic_header_enabled": True,
@@ -207,6 +211,7 @@ _SEED_TEMPLATE_SPECS: list[dict[str, Any]] = [
         "caption_recipe": "podcast_editorial",
         "placement_preset": "bottom_safe",
         "hook_enabled": True,
+        "hook_design_style": "gold_cinema",
         "hook_transition_in": "fade",
         "vignette_enabled": True,
         "topic_header_enabled": True,
@@ -284,6 +289,7 @@ _SEED_TEMPLATE_SPECS: list[dict[str, Any]] = [
         "caption_recipe": "mageran_glass",
         "placement_preset": "bottom_safe",
         "hook_enabled": True,
+        "hook_design_style": "floating_outline",
         "hook_transition_in": "fade",
         "vignette_enabled": True,
         "topic_header_enabled": True,
@@ -332,6 +338,7 @@ _SEED_TEMPLATE_SPECS: list[dict[str, Any]] = [
         "caption_recipe": "podcast_editorial",
         "placement_preset": "bottom_safe",
         "hook_enabled": True,
+        "hook_design_style": "neon_poster",
         "hook_transition_in": "fade",
         "vignette_enabled": True,
         "topic_header_enabled": False,
@@ -382,6 +389,7 @@ _SEED_TEMPLATE_SPECS: list[dict[str, Any]] = [
         "caption_recipe": "streamer_kinetic",
         "placement_preset": "bottom_safe",
         "hook_enabled": True,
+        "hook_design_style": "viral_sticker",
         "hook_transition_in": "whip",
         "vignette_enabled": False,
         "topic_header_enabled": True,
@@ -409,6 +417,7 @@ _SEED_TEMPLATE_SPECS: list[dict[str, Any]] = [
         "caption_recipe": "mrbeast_pill",
         "placement_preset": "split_line_center",
         "hook_enabled": True,
+        "hook_design_style": "viral_white_red",
         "hook_transition_in": "whip",
         "vignette_enabled": False,
         "topic_header_enabled": True,
@@ -495,7 +504,10 @@ _SEED_TEMPLATE_SPECS: list[dict[str, Any]] = [
         "dual_keyword_enabled": False,
         "placement_preset": "above_speaker",
         "hook_enabled": True,
+        "hook_design_style": "viral_sticker",
         "hook_transition_in": "zoom",
+        "opening_tts_enabled": True,
+        "opening_intro_mode": "freeze_clear",
         "vignette_enabled": True,
         "topic_header_enabled": False,
         "zoom_punch_enabled": True,
@@ -638,6 +650,7 @@ _SEED_TEMPLATE_SPECS: list[dict[str, Any]] = [
         "caption_recipe": "podcast_editorial",
         "placement_preset": "bottom_safe",
         "hook_enabled": True,
+        "hook_design_style": "breaking_bar",
         "hook_transition_in": "slide",
         "hook_accent_hex": "#DC2626",
         "vignette_enabled": True,
@@ -758,8 +771,13 @@ class TemplatePackEntry(BaseModel):
     dual_keyword_enabled: Optional[bool] = None
     placement_preset: str = "bottom_safe"
     hook_enabled: bool = True
+    hook_design_style: Optional[str] = None
+    hook_font_size: Optional[int] = None
+    hook_pos_y: Optional[int] = None
     hook_transition_in: Optional[str] = None
     hook_accent_hex: Optional[str] = None
+    opening_tts_enabled: Optional[bool] = None
+    opening_intro_mode: Optional[str] = None
     vignette_enabled: bool = True
     topic_header_enabled: bool = False
     zoom_punch_enabled: bool = False
@@ -910,6 +928,13 @@ def export_template_package(
         caption_recipe=snap.subtitles.caption_recipe,
         placement_preset=snap.subtitles.placement_preset,
         hook_enabled=snap.overlays.hook_banner.enabled,
+        hook_design_style=snap.overlays.hook_banner.design_style,
+        hook_font_size=snap.overlays.hook_banner.font_size,
+        hook_pos_y=snap.overlays.hook_banner.pos_y,
+        hook_transition_in=snap.overlays.hook_banner.transition_in,
+        hook_accent_hex=snap.overlays.hook_banner.accent_color_hex,
+        opening_tts_enabled=snap.timing.opening_tts_enabled,
+        opening_intro_mode=snap.overlays.hook_banner.opening_intro_mode,
         vignette_enabled=snap.overlays.climax_effects.vignette_enabled,
         topic_header_enabled=snap.overlays.climax_effects.topic_header_enabled,
         zoom_punch_enabled=snap.overlays.climax_effects.zoom_punch_enabled,
