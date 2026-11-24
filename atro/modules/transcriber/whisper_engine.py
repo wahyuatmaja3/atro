@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from atro.core.logging_utils import JobLogger
 from atro.core.schemas import TranscriptSegment, TranscriptWord
@@ -92,6 +93,8 @@ async def extract_audio_wav(
         "-i",
         str(source_video),
         "-vn",
+        "-af",
+        "highpass=f=65,lowpass=f=7600,dynaudnorm=f=150:g=15:p=0.92",
         "-ac",
         "1",
         "-ar",
@@ -116,6 +119,9 @@ def _run_faster_whisper_sync(
     loop: asyncio.AbstractEventLoop,
     on_progress: Optional[Callable[[float], Awaitable[None] | None]],
     cancel_event: Optional[asyncio.Event],
+    language_hint: Optional[str] = None,
+    initial_prompt: Optional[str] = None,
+    hotwords: Optional[str] = None,
 ) -> tuple[list[TranscriptSegment], Optional[str], str]:
     from faster_whisper import WhisperModel
 
@@ -129,20 +135,34 @@ def _run_faster_whisper_sync(
     def _transcribe_with_device(device: str, compute_type: str) -> tuple[list[TranscriptSegment], Optional[str]]:
         logger.info(
             "transcriber",
-            f"Memuat faster-whisper model='{model_name}', device='{device}', compute_type='{compute_type}'...",
+            f"Memuat faster-whisper model='{model_name}', device='{device}', compute_type='{compute_type}', lang='{language_hint or 'auto'}'...",
         )
         model = WhisperModel(model_name, device=device, compute_type=compute_type)
-        segments_iter, info = model.transcribe(
-            str(audio_path),
-            vad_filter=True,
-            vad_parameters=dict(
-                min_silence_duration_ms=300,
-                speech_pad_ms=80,
-            ),
-            word_timestamps=True,
-            condition_on_previous_text=False,
-            beam_size=5,
-        )
+        supported_params = set(inspect.signature(model.transcribe).parameters.keys())
+        tx_kwargs: dict[str, Any] = {
+            "vad_filter": True,
+            "vad_parameters": {
+                "min_silence_duration_ms": 260,
+                "speech_pad_ms": 160,
+            },
+            "word_timestamps": True,
+            "condition_on_previous_text": False,
+            "beam_size": 5,
+        }
+        if language_hint and "language" in supported_params:
+            tx_kwargs["language"] = language_hint
+        if initial_prompt and "initial_prompt" in supported_params:
+            tx_kwargs["initial_prompt"] = initial_prompt
+        if hotwords and "hotwords" in supported_params:
+            tx_kwargs["hotwords"] = hotwords
+        if "repetition_penalty" in supported_params:
+            tx_kwargs["repetition_penalty"] = 1.08
+        if "no_repeat_ngram_size" in supported_params:
+            tx_kwargs["no_repeat_ngram_size"] = 3
+        if "hallucination_silence_threshold" in supported_params:
+            tx_kwargs["hallucination_silence_threshold"] = 1.5
+
+        segments_iter, info = model.transcribe(str(audio_path), **tx_kwargs)
 
         results: list[TranscriptSegment] = []
         last_pct = -1.0
@@ -200,6 +220,9 @@ async def transcribe_with_faster_whisper(
     logger: JobLogger,
     on_progress: Optional[Callable[[float], Awaitable[None] | None]] = None,
     cancel_event: Optional[asyncio.Event] = None,
+    language_hint: Optional[str] = None,
+    initial_prompt: Optional[str] = None,
+    hotwords: Optional[str] = None,
 ) -> tuple[list[TranscriptSegment], Optional[str], str]:
     """Run local faster-whisper transcription off the event loop with safe CUDA->CPU fallback."""
     loop = asyncio.get_running_loop()
@@ -213,4 +236,7 @@ async def transcribe_with_faster_whisper(
         loop,
         on_progress,
         cancel_event,
+        language_hint,
+        initial_prompt,
+        hotwords,
     )

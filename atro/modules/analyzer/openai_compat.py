@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Literal
+from typing import Any, Literal, Optional, TypeVar
 
 import requests
+from pydantic import BaseModel
 
 from atro.core.schemas import GeminiClipSelectionSchema
 from atro.modules.analyzer.prompts import build_json_schema_reminder
+
+TModel = TypeVar("TModel", bound=BaseModel)
 
 ResponseFormatMode = Literal["json_schema", "json_object", "none"]
 
@@ -90,15 +93,19 @@ def build_openai_payload(
     system_instruction: str,
     user_prompt: str,
     response_format_mode: ResponseFormatMode = "json_schema",
+    schema_name: str = "clip_selection",
+    json_schema: Optional[dict[str, Any]] = None,
+    schema_reminder: Optional[str] = None,
 ) -> dict[str, Any]:
     """Build OpenAI Chat Completions payload without extra sampling overrides."""
     effective_system = system_instruction
+    reminder = schema_reminder if schema_reminder is not None else build_json_schema_reminder()
     if response_format_mode == "json_object":
-        effective_system = system_instruction + build_json_schema_reminder()
+        effective_system = system_instruction + reminder
     elif response_format_mode == "none":
         effective_system = (
             system_instruction
-            + build_json_schema_reminder()
+            + reminder
             + "\nPENTING: Jawab HANYA dengan JSON valid sesuai struktur di atas."
         )
 
@@ -114,9 +121,9 @@ def build_openai_payload(
         payload["response_format"] = {
             "type": "json_schema",
             "json_schema": {
-                "name": "clip_selection",
+                "name": schema_name,
                 "strict": True,
-                "schema": OPENAI_CLIP_JSON_SCHEMA,
+                "schema": json_schema if json_schema is not None else OPENAI_CLIP_JSON_SCHEMA,
             },
         }
     elif response_format_mode == "json_object":
@@ -149,14 +156,18 @@ def _should_fallback_response_format(status_code: int, body_text: str) -> bool:
     return any(hint in lowered for hint in _FORMAT_UNSUPPORTED_HINTS)
 
 
-def call_openai_compatible_sync(
+def call_openai_structured_json_sync(
     base_url: str,
     api_key: str,
     model_name: str,
     system_instruction: str,
     user_prompt: str,
+    schema_model: type[TModel],
+    schema_name: str,
+    json_schema: dict[str, Any],
+    schema_reminder: str,
     timeout: float = 180.0,
-) -> GeminiClipSelectionSchema:
+) -> TModel:
     """Call an OpenAI-compatible `/chat/completions` API with 3-tier JSON format fallback."""
     endpoint = normalize_chat_completions_url(base_url)
     headers: dict[str, str] = {"Content-Type": "application/json"}
@@ -174,6 +185,9 @@ def call_openai_compatible_sync(
             system_instruction=system_instruction,
             user_prompt=user_prompt,
             response_format_mode=mode,
+            schema_name=schema_name,
+            json_schema=json_schema,
+            schema_reminder=schema_reminder,
         )
         try:
             resp = requests.post(endpoint, headers=headers, json=payload, timeout=timeout)
@@ -190,10 +204,10 @@ def call_openai_compatible_sync(
             if not cleaned_json:
                 raise RuntimeError("Respons OpenAI-Compatible kosong dan tidak berisi JSON.")
             try:
-                return GeminiClipSelectionSchema.model_validate_json(cleaned_json)
+                return schema_model.model_validate_json(cleaned_json)
             except Exception as exc:
                 raise RuntimeError(
-                    f"Output model tidak sesuai schema JSON klip: {exc}. Cuplikan: {cleaned_json[:300]}"
+                    f"Output model tidak sesuai schema JSON: {exc}. Cuplikan: {cleaned_json[:300]}"
                 ) from exc
 
         snippet = (resp.text or "").strip()[:400]
@@ -204,3 +218,26 @@ def call_openai_compatible_sync(
         raise RuntimeError(f"Error dari endpoint OpenAI-Compatible ({last_error_detail})")
 
     raise RuntimeError(f"Error dari endpoint OpenAI-Compatible ({last_error_detail})")
+
+
+def call_openai_compatible_sync(
+    base_url: str,
+    api_key: str,
+    model_name: str,
+    system_instruction: str,
+    user_prompt: str,
+    timeout: float = 180.0,
+) -> GeminiClipSelectionSchema:
+    """Call an OpenAI-compatible `/chat/completions` API for viral clip curation."""
+    return call_openai_structured_json_sync(
+        base_url=base_url,
+        api_key=api_key,
+        model_name=model_name,
+        system_instruction=system_instruction,
+        user_prompt=user_prompt,
+        schema_model=GeminiClipSelectionSchema,
+        schema_name="clip_selection",
+        json_schema=OPENAI_CLIP_JSON_SCHEMA,
+        schema_reminder=build_json_schema_reminder(),
+        timeout=timeout,
+    )

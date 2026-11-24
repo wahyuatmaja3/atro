@@ -16,6 +16,13 @@ from atro.core.schemas import (
     TranscriptResult,
     TranscriptSource,
 )
+from atro.modules.transcriber.proofreader import (
+    build_whisper_hotwords,
+    build_whisper_initial_prompt,
+    clean_transcript_segments_offline,
+    infer_language_hint,
+    proofread_transcript_segments_with_llm,
+)
 from atro.modules.transcriber.subtitle_parser import evaluate_subtitle_quality, parse_subtitle_file
 from atro.modules.transcriber.whisper_engine import extract_audio_wav, transcribe_with_faster_whisper
 
@@ -88,6 +95,18 @@ class TranscriberService:
                         "yt_dlp_auto_sub" if cand.is_auto_generated else "yt_dlp_manual_sub"
                     )
                     logger.info("transcriber", f"Memakai subtitle bawaan ({sub_path.name}): {notes}")
+                    segments = clean_transcript_segments_offline(
+                        segments,
+                        title=download.title,
+                        channel=download.channel,
+                    )
+                    if cand.is_auto_generated:
+                        segments = await proofread_transcript_segments_with_llm(
+                            segments,
+                            download=download,
+                            settings=settings,
+                            logger=logger,
+                        )
                     if on_progress:
                         res = on_progress(100.0)
                         if asyncio.iscoroutine(res):
@@ -139,6 +158,19 @@ class TranscriberService:
                 if asyncio.iscoroutine(res):
                     await res
 
+        lang_hint = infer_language_hint(
+            download.language,
+            title=download.title,
+            channel=download.channel,
+            explicit_pref=getattr(settings, "whisper_language", "auto"),
+        )
+        initial_prompt = build_whisper_initial_prompt(
+            title=download.title,
+            channel=download.channel,
+            language=lang_hint,
+        )
+        hotwords = build_whisper_hotwords(title=download.title, channel=download.channel)
+
         segments, detected_lang, model_used = await transcribe_with_faster_whisper(
             audio_path=audio_path,
             video_duration_sec=download.duration_sec,
@@ -147,9 +179,24 @@ class TranscriberService:
             logger=logger,
             on_progress=_whisper_progress,
             cancel_event=cancel_event,
+            language_hint=lang_hint,
+            initial_prompt=initial_prompt,
+            hotwords=hotwords,
         )
         if not segments:
             raise RuntimeError("faster-whisper tidak menghasilkan segmen transkrip apa pun.")
+
+        segments = clean_transcript_segments_offline(
+            segments,
+            title=download.title,
+            channel=download.channel,
+        )
+        segments = await proofread_transcript_segments_with_llm(
+            segments,
+            download=download,
+            settings=settings,
+            logger=logger,
+        )
 
         result = TranscriptResult(
             job_id=job_id,
