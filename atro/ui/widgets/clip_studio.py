@@ -6,8 +6,8 @@ import threading
 from pathlib import Path
 from typing import Callable, Optional
 
-from PyQt6.QtCore import QSize, Qt, QTimer, QUrl, pyqtSignal
-from PyQt6.QtGui import QColor, QFontDatabase, QIcon, QImage, QMouseEvent, QPixmap
+from PyQt6.QtCore import QRectF, QSize, Qt, QTimer, QUrl, pyqtSignal
+from PyQt6.QtGui import QColor, QFontDatabase, QIcon, QImage, QMouseEvent, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -26,6 +26,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
@@ -85,12 +86,169 @@ from atro.modules.cutter.composer_renderer import (
 from atro.modules.cutter.opening_narrator import clean_title_for_speech, synthesize_opening_voiceover
 from atro.modules.cutter.service import apply_initial_style_overrides, apply_style_template_from_config
 from atro.modules.cutter.transitions import TRANSITION_CHOICES, active_transition_window_at
+from atro.ui.components import create_vector_icon
 from atro.ui.widgets.preview_canvas import (
     FaceLaneTimelineWidget,
     FrameExtractorCache,
     LivePreviewCanvas9x16,
     SourceCropSelectorWidget,
 )
+from atro.ui.widgets.timeline_editor import MultiTrackTimelineWidget
+from atro.ui.widgets.transcript_panel import InteractiveTranscriptPanel
+
+
+class _LayoutDiagramIcon(QWidget):
+    """Crisp miniature wireframe schematic showing how each framing layout splits the canvas."""
+
+    def __init__(self, card_key: str, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._key = card_key
+        self.setFixedSize(36, 46)
+
+    def paintEvent(self, _event) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        is_sq = self._key == "square_1_1"
+        r = QRectF(4, 10, 28, 28) if is_sq else QRectF(7, 4, 22, 38)
+        p.setPen(QPen(QColor("#373E54"), 1.2))
+        p.setBrush(QColor("#0D0F16"))
+        p.drawRoundedRect(r, 4.0, 4.0)
+
+        p.setPen(Qt.PenStyle.NoPen)
+        if self._key in ("auto_face", "square_1_1"):
+            p.setBrush(QColor("#7C3AED"))
+            p.drawEllipse(QRectF(r.center().x() - 5, r.center().y() - 7, 10, 10))
+            p.setBrush(QColor("#06B6D4"))
+            p.drawRoundedRect(QRectF(r.left() + 4, r.center().y() + 5, r.width() - 8, 5), 2, 2)
+        elif self._key == "gaming_split":
+            p.setBrush(QColor("#7C3AED"))
+            p.drawRoundedRect(r.adjusted(2, 2, -2, -r.height() * 0.56), 2, 2)
+            p.setBrush(QColor("#06B6D4"))
+            p.drawRoundedRect(r.adjusted(2, r.height() * 0.48, -2, -2), 2, 2)
+        elif self._key == "multi_split":
+            p.setBrush(QColor("#7C3AED"))
+            p.drawRoundedRect(r.adjusted(2, 2, -2, -r.height() * 0.52), 2, 2)
+            p.setBrush(QColor("#10B981"))
+            p.drawRoundedRect(r.adjusted(2, r.height() * 0.52, -2, -2), 2, 2)
+        elif self._key == "blurred_frame":
+            p.setBrush(QColor("#1F2332"))
+            p.drawRoundedRect(r.adjusted(1, 1, -1, -1), 3, 3)
+            p.setBrush(QColor("#06B6D4"))
+            p.drawRoundedRect(r.adjusted(2, r.height() * 0.30, -2, -r.height() * 0.30), 2, 2)
+        elif self._key == "pip_facecam":
+            p.setBrush(QColor("#06B6D4"))
+            p.drawRoundedRect(r.adjusted(2, 2, -2, -2), 2, 2)
+            p.setBrush(QColor("#7C3AED"))
+            p.drawEllipse(QRectF(r.right() - 10, r.top() + 3, 8, 8))
+        p.end()
+
+
+class _LayoutIconCard(QFrame):
+    """Interactive card with miniature wireframe diagram for 1-click Layout Mode selection."""
+
+    clicked = pyqtSignal(str, str, str)  # (card_key, layout_mode, aspect_ratio)
+
+    def __init__(
+        self,
+        card_key: str,
+        title: str,
+        layout_mode: str,
+        aspect_ratio: str = "9:16",
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self.card_key = card_key
+        self.layout_mode = layout_mode
+        self.aspect_ratio = aspect_ratio
+        self.setObjectName("VisualChoiceCard")
+        self.setProperty("selected", "false")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(6, 8, 6, 8)
+        lay.setSpacing(4)
+        lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(_LayoutDiagramIcon(card_key, self), 0, Qt.AlignmentFlag.AlignCenter)
+        lbl = QLabel(title)
+        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl.setWordWrap(True)
+        lbl.setStyleSheet("font-size: 11px; font-weight: 700;")
+        lay.addWidget(lbl)
+
+    def set_selected(self, selected: bool) -> None:
+        self.setProperty("selected", "true" if selected else "false")
+        self.style().unpolish(self)
+        self.style().polish(self)
+
+    def mousePressEvent(self, event: Optional[QMouseEvent]) -> None:
+        if event is not None and event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit(self.card_key, self.layout_mode, self.aspect_ratio)
+        super().mousePressEvent(event)
+
+
+class _SubtitlePresetCard(QFrame):
+    """Visual typography preview card for subtitle styles (Sorot, Pop, Tumpuk, Minimal, etc.)."""
+
+    clicked = pyqtSignal(str)
+
+    def __init__(
+        self,
+        recipe_id: str,
+        short_title: str,
+        meta: dict,
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self.recipe_id = recipe_id
+        self.setObjectName("VisualChoiceCard")
+        self.setProperty("selected", "false")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip(f"{meta.get('label', short_title)}\n{meta.get('description', '')}")
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setSpacing(4)
+
+        sample_wrap = QFrame()
+        sample_wrap.setStyleSheet("background-color: #090A0F; border-radius: 6px; padding: 4px;")
+        sample_lay = QHBoxLayout(sample_wrap)
+        sample_lay.setContentsMargins(6, 6, 6, 6)
+        sample_lay.setSpacing(4)
+        sample_lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        p_col = str(meta.get("primary_color_hex", "#FFFFFF"))[:7]
+        h_col = str(meta.get("highlight_color_hex", "#FACC15"))[:7]
+        bg_hex = str(meta.get("active_word_bg_hex", "#7C3AED"))
+        bg_mode = str(meta.get("caption_bg_mode", "none"))
+
+        w1 = QLabel("KATA" if meta.get("uppercase", True) else "Kata")
+        w1.setStyleSheet(f"color: {p_col}; font-weight: 800; font-size: 11px;")
+        w2 = QLabel("VIRAL" if meta.get("uppercase", True) else "Viral")
+        if bg_mode in ("active_word_pill", "line_pill"):
+            w2.setStyleSheet(
+                f"color: {h_col}; background-color: {bg_hex[:7]}; font-weight: 900; font-size: 11px; "
+                "padding: 1px 5px; border-radius: 4px;"
+            )
+        else:
+            w2.setStyleSheet(f"color: {h_col}; font-weight: 900; font-size: 11px;")
+        sample_lay.addWidget(w1)
+        sample_lay.addWidget(w2)
+        lay.addWidget(sample_wrap)
+
+        name_lbl = QLabel(short_title)
+        name_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        name_lbl.setStyleSheet("font-size: 11px; font-weight: 700; color: #F3F4F6;")
+        lay.addWidget(name_lbl)
+
+    def set_selected(self, selected: bool) -> None:
+        self.setProperty("selected", "true" if selected else "false")
+        self.style().unpolish(self)
+        self.style().polish(self)
+
+    def mousePressEvent(self, event: Optional[QMouseEvent]) -> None:
+        if event is not None and event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit(self.recipe_id)
+        super().mousePressEvent(event)
 
 
 class ColorSwatchButton(QPushButton):
@@ -143,8 +301,18 @@ class ColorSwatchButton(QPushButton):
 
 
 def _wrap_scroll(widget: QWidget) -> QScrollArea:
+    for cb in widget.findChildren(QComboBox):
+        cb.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        cb.setMinimumContentsLength(8)
+        cb.setMinimumWidth(75)
+    for le in widget.findChildren(QLineEdit):
+        le.setMinimumWidth(75)
+    for fl in widget.findChildren(QFormLayout):
+        fl.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+    widget.setMinimumWidth(220)
     scroll = QScrollArea()
     scroll.setWidgetResizable(True)
+    scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
     scroll.setWidget(widget)
     return scroll
 
@@ -409,12 +577,13 @@ class BatchClipRenderDialog(QDialog):
 
 
 class ClipStudioWidget(QWidget):
-    """Full Interactive Template Composer, Customization Panel, and 9:16 Live Preview."""
+    """Full-Viewport 3-Panel Creator Studio + Multi-Track Timeline & 9:16 Live Preview."""
 
     render_requested = pyqtSignal(str, object)  # (job_id, ClipComposerConfig)
     batch_render_requested = pyqtSignal(str, object, object, bool)  # (job_id, indices, style_cfg, redetect)
     standalone_render_requested = pyqtSignal(str, object)  # (local_video_path, ClipComposerConfig)
     style_applied_to_all = pyqtSignal(int)
+    back_requested = pyqtSignal()
     _auto_detect_done = pyqtSignal(int, str, object)  # (request_id, source_path_str, list[ShotCropSegment])
     _tts_audition_ready = pyqtSignal(str, float, str)  # (audio_path_str, duration_sec, error_msg)
 
@@ -456,59 +625,73 @@ class ClipStudioWidget(QWidget):
         self.set_advanced_mode(bool(self._settings_provider().ui_advanced_mode))
 
     def _build_ui(self) -> None:
-        root = QVBoxLayout(self)
-        root.setContentsMargins(4, 4, 4, 4)
-        root.setSpacing(10)
+        self.preset_buttons: dict[str, QPushButton] = {}
+        self.template_cards: dict[str, object] = {}
 
-        # 1. Top Toolbar: Source / Clip selector + 4 Template Presets + Save/Load + Export
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # ---- 1. Top Bar: Back, Inline Editable Title, Template Save/Load, Export CTA ----
         toolbar = QFrame()
-        toolbar.setObjectName("Card")
+        toolbar.setObjectName("StudioTopBar")
+        toolbar.setFixedHeight(54)
         tb_layout = QHBoxLayout(toolbar)
-        tb_layout.setContentsMargins(12, 8, 12, 8)
+        tb_layout.setContentsMargins(14, 6, 14, 6)
         tb_layout.setSpacing(8)
 
-        tb_layout.addWidget(QLabel("Klip:"))
+        self.back_btn = QPushButton("Kembali")
+        self.back_btn.setObjectName("GhostButton")
+        self.back_btn.setIcon(create_vector_icon("back", "#D1D5DB", 15))
+        self.back_btn.setToolTip("Kembali ke daftar klip / antrean")
+        self.back_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.back_btn.clicked.connect(self.back_requested.emit)
+        tb_layout.addWidget(self.back_btn)
+
+        self.studio_title_edit = QLineEdit("Klip Studio")
+        self.studio_title_edit.setObjectName("TitleEditable")
+        self.studio_title_edit.setMinimumWidth(135)
+        self.studio_title_edit.setMaximumWidth(320)
+        self.studio_title_edit.setToolTip("Klik untuk mengedit judul klip / proyek secara langsung")
+        self.studio_title_edit.editingFinished.connect(self._on_title_inline_edited)
+        tb_layout.addWidget(self.studio_title_edit, 1)
+
         self.clip_selector_combo = QComboBox()
-        self.clip_selector_combo.setMinimumWidth(170)
+        self.clip_selector_combo.setMinimumWidth(115)
+        self.clip_selector_combo.setMaximumWidth(160)
+        self.clip_selector_combo.setToolTip("Berpindah antar klip dalam proyek")
         self.clip_selector_combo.currentIndexChanged.connect(self._on_clip_selected)
         tb_layout.addWidget(self.clip_selector_combo)
 
-        self.load_local_btn = QPushButton("Muat Video...")
+        self.load_local_btn = QPushButton("Muat...")
         self.load_local_btn.setObjectName("SmallAction")
+        self.load_local_btn.setToolTip("Muat video lokal langsung untuk diedit di Studio")
         self.load_local_btn.clicked.connect(self._browse_standalone_video)
         tb_layout.addWidget(self.load_local_btn)
 
-        tb_layout.addSpacing(6)
-        preset_lbl = QLabel("Gaya Cepat:")
-        preset_lbl.setObjectName("FieldLabel")
-        tb_layout.addWidget(preset_lbl)
+        self.save_tpl_menu_btn = QPushButton("Template ▾")
+        self.save_tpl_menu_btn.setObjectName("SmallAction")
+        self.save_tpl_menu_btn.setToolTip("Simpan, muat, atau ekspor paket template (.json / .atrotpl)")
+        tpl_menu = QMenu(self.save_tpl_menu_btn)
+        tpl_menu.addAction("Simpan Preset Gaya (.json)...").triggered.connect(self._save_preset_dialog)
+        tpl_menu.addAction("Muat Preset Gaya (.json)...").triggered.connect(self._load_preset_dialog)
+        tpl_menu.addSeparator()
+        tpl_menu.addAction("Ekspor Template Package (.atrotpl)...").triggered.connect(self._export_atrotpl_dialog)
+        tpl_menu.addAction("Impor Template Package (.atrotpl)...").triggered.connect(self._import_atrotpl_dialog)
+        self.save_tpl_menu_btn.setMenu(tpl_menu)
+        tb_layout.addWidget(self.save_tpl_menu_btn)
 
-        self.preset_buttons: dict[str, QPushButton] = {}
-        for pid, label in (
-            ("podcast", "Podcast"),
-            ("gaming_split", "Gaming Split"),
-            ("twitch_comment", "Komentar Stream"),
-            ("subathon", "Subathon"),
-        ):
-            btn = QPushButton(label)
-            btn.setObjectName("ModeSwitch")
-            btn.setCheckable(True)
-            btn.clicked.connect(lambda _c=False, p=pid: self.apply_preset(p))
-            self.preset_buttons[pid] = btn
-            tb_layout.addWidget(btn)
-
+        # Compatibility buttons kept compact/menu-backed
         self.save_preset_btn = QPushButton("Simpan Preset")
         self.save_preset_btn.setObjectName("SmallAction")
         self.save_preset_btn.clicked.connect(self._save_preset_dialog)
+        self.save_preset_btn.setVisible(False)
         self.load_preset_btn = QPushButton("Muat Preset")
         self.load_preset_btn.setObjectName("SmallAction")
         self.load_preset_btn.clicked.connect(self._load_preset_dialog)
-        tb_layout.addWidget(self.save_preset_btn)
-        tb_layout.addWidget(self.load_preset_btn)
+        self.load_preset_btn.setVisible(False)
 
-        tb_layout.addStretch()
-
-        self.apply_style_all_btn = QPushButton("Terapkan Gaya ke Semua")
+        self.apply_style_all_btn = QPushButton("Apply All")
         self.apply_style_all_btn.setObjectName("SmallAction")
         self.apply_style_all_btn.setToolTip(
             "Salin gaya template, subtitle, warna, overlay & audio klip ini ke seluruh klip dalam job"
@@ -516,80 +699,109 @@ class ClipStudioWidget(QWidget):
         self.apply_style_all_btn.clicked.connect(self._on_apply_style_all_clicked)
         tb_layout.addWidget(self.apply_style_all_btn)
 
-        self.batch_export_btn = QPushButton("Edit & Render Beberapa/Semua...")
+        self.batch_export_btn = QPushButton("Batch...")
         self.batch_export_btn.setObjectName("SmallAction")
-        self.batch_export_btn.setToolTip(
-            "Pilih beberapa atau semua klip yang sudah ada untuk dirender ulang sekaligus tanpa transcribe ulang"
-        )
+        self.batch_export_btn.setToolTip("Pilih beberapa atau semua klip untuk dirender ulang sekaligus")
         self.batch_export_btn.clicked.connect(lambda: self.open_batch_render_dialog())
         tb_layout.addWidget(self.batch_export_btn)
 
-        self.export_btn = QPushButton("Simpan & Render Klip Ini")
+        self.export_btn = QPushButton("Export Video")
         self.export_btn.setObjectName("PrimaryButton")
+        self.export_btn.setIcon(create_vector_icon("download", "#FFFFFF", 15))
+        self.export_btn.setToolTip("Render & ekspor klip MP4 dengan seluruh perubahan di Studio")
+        self.export_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.export_btn.clicked.connect(self._on_export_clicked)
         tb_layout.addWidget(self.export_btn)
         root.addWidget(toolbar)
 
-        # 2. Main 2-Column Studio Splitter (Left: Spacious Visual Preview + Timeline | Right: Easy Controls)
-        main_splitter = QSplitter(Qt.Orientation.Horizontal)
-        main_splitter.setHandleWidth(8)
+        # ---- 2. Center 3-Panel Studio Splitter + Bottom Timeline ----
+        studio_vert = QSplitter(Qt.Orientation.Vertical)
+        studio_vert.setHandleWidth(3)
 
-        # Left Column: View Mode Switch + Preview + Crop + Timeline
+        panels_splitter = QSplitter(Qt.Orientation.Horizontal)
+        panels_splitter.setHandleWidth(3)
+
+        # ---- Left Panel: Interactive Word Transcript & Clips Switcher ----
+        left_wrap = QWidget()
+        left_wrap.setMinimumWidth(215)
+        left_wrap.setMaximumWidth(350)
+        left_lay = QVBoxLayout(left_wrap)
+        left_lay.setContentsMargins(6, 6, 4, 6)
+        left_lay.setSpacing(6)
+
+        self.transcript_panel = InteractiveTranscriptPanel(left_wrap)
+        self.transcript_panel.word_seek_requested.connect(self._on_lane_seek)
+        self.transcript_panel.transcript_edited.connect(self._on_interactive_transcript_edited)
+        self.transcript_panel.clip_selected.connect(self._on_left_clip_clicked)
+        self.transcript_panel.reset_transcript_requested.connect(self._reset_interactive_transcript)
+        left_lay.addWidget(self.transcript_panel, 1)
+
+        # Compact expandable detail table drawer (keeps tr_table live & synced)
+        self.tr_drawer_btn = QPushButton("Edit Tabel && Label Pembicara ▾")
+        self.tr_drawer_btn.setObjectName("GhostButton")
+        self.tr_drawer_btn.setCheckable(True)
+        self.tr_drawer_box = self._build_transcript_tab()
+        self.tr_drawer_box.setVisible(False)
+        self.tr_drawer_box.setMaximumHeight(190)
+        self.tr_drawer_btn.toggled.connect(self.tr_drawer_box.setVisible)
+        left_lay.addWidget(self.tr_drawer_btn)
+        left_lay.addWidget(self.tr_drawer_box)
+
+        # ---- Center Stage: Live 9:16 Preview + Crop + Minimalist Player Bar ----
         visual_panel = QFrame()
-        visual_panel.setObjectName("Card")
+        visual_panel.setObjectName("StudioStage")
         vis_layout = QVBoxLayout(visual_panel)
-        vis_layout.setContentsMargins(12, 10, 12, 10)
+        vis_layout.setContentsMargins(10, 8, 10, 8)
         vis_layout.setSpacing(8)
 
-        # View Mode Switcher Row
         view_bar = QHBoxLayout()
         view_bar.setSpacing(6)
-        view_lbl = QLabel("Tampilan:")
-        view_lbl.setObjectName("FieldLabel")
-        view_bar.addWidget(view_lbl)
 
-        self.view_both_btn = QPushButton("Lihat Keduanya")
-        self.view_both_btn.setObjectName("ModeSwitch")
-        self.view_both_btn.setCheckable(True)
-        self.view_both_btn.setChecked(True)
-        self.view_both_btn.clicked.connect(lambda: self._set_preview_view_mode("both"))
-
-        self.view_preview_btn = QPushButton("Fokus Preview (9:16 Besar)")
+        self.view_preview_btn = QPushButton("9:16 Stage")
         self.view_preview_btn.setObjectName("ModeSwitch")
         self.view_preview_btn.setCheckable(True)
+        self.view_preview_btn.setChecked(True)
+        self.view_preview_btn.setToolTip("Fokus penuh ke canvas preview vertikal 9:16")
         self.view_preview_btn.clicked.connect(lambda: self._set_preview_view_mode("preview"))
 
-        self.view_crop_btn = QPushButton("Fokus Atur Kamera (16:9)")
+        self.view_crop_btn = QPushButton("Crop 16:9")
         self.view_crop_btn.setObjectName("ModeSwitch")
         self.view_crop_btn.setCheckable(True)
+        self.view_crop_btn.setToolTip("Atur kotak crop subjek/gameplay pada sumber video 16:9")
         self.view_crop_btn.clicked.connect(lambda: self._set_preview_view_mode("crop"))
 
-        self.auto_detect_btn = QPushButton("Deteksi Wajah Otomatis")
+        self.view_both_btn = QPushButton("Split")
+        self.view_both_btn.setObjectName("ModeSwitch")
+        self.view_both_btn.setCheckable(True)
+        self.view_both_btn.setToolTip("Tampilkan crop sumber 16:9 berdampingan dengan preview 9:16")
+        self.view_both_btn.clicked.connect(lambda: self._set_preview_view_mode("both"))
+
+        self.auto_detect_btn = QPushButton("Deteksi Wajah")
         self.auto_detect_btn.setObjectName("SmallAction")
+        self.auto_detect_btn.setIcon(create_vector_icon("face", "#06B6D4", 14))
+        self.auto_detect_btn.setToolTip("Deteksi wajah & multi-angle otomatis di seluruh durasi klip")
         self.auto_detect_btn.clicked.connect(self._run_auto_detect_crops)
 
         self.preview_info_lbl = QLabel("1080×1920")
         self.preview_info_lbl.setObjectName("VersionPill")
 
-        view_bar.addWidget(self.view_both_btn)
         view_bar.addWidget(self.view_preview_btn)
         view_bar.addWidget(self.view_crop_btn)
+        view_bar.addWidget(self.view_both_btn)
         view_bar.addStretch()
         view_bar.addWidget(self.auto_detect_btn)
         view_bar.addWidget(self.preview_info_lbl)
         vis_layout.addLayout(view_bar)
 
-        # Dual Canvas Area (Crop Selector + Live 9:16 Preview)
         self.canvas_splitter = QSplitter(Qt.Orientation.Horizontal)
-        self.canvas_splitter.setHandleWidth(6)
+        self.canvas_splitter.setHandleWidth(4)
 
         self.crop_wrap = QWidget()
         crop_wrap_layout = QVBoxLayout(self.crop_wrap)
         crop_wrap_layout.setContentsMargins(0, 0, 0, 0)
         crop_wrap_layout.setSpacing(4)
-        crop_hint = QLabel("Geser kotak Orange (Wajah/Atas) & Cyan (Layar/Bawah) langsung di video:")
+        crop_hint = QLabel("Geser kotak Ungu (Wajah/Atas) & Cyan (Layar/Bawah):")
         crop_hint.setObjectName("MutedText")
-        crop_hint.setWordWrap(True)
         self.crop_selector = SourceCropSelectorWidget()
         self.crop_selector.crop_changed.connect(self._on_crop_dragged)
         crop_wrap_layout.addWidget(crop_hint)
@@ -598,109 +810,138 @@ class ClipStudioWidget(QWidget):
         self.preview_wrap = QWidget()
         prev_wrap_layout = QVBoxLayout(self.preview_wrap)
         prev_wrap_layout.setContentsMargins(0, 0, 0, 0)
-        prev_wrap_layout.setSpacing(4)
-        prev_hint = QLabel("Hasil Preview (geser langsung subtitle / hook / komentar di layar):")
-        prev_hint.setObjectName("MutedText")
-        prev_hint.setWordWrap(True)
+        prev_wrap_layout.setSpacing(2)
         self.preview_canvas = LivePreviewCanvas9x16()
         self.preview_canvas.overlay_moved.connect(self._on_preview_overlay_dragged)
-        prev_wrap_layout.addWidget(prev_hint)
+        self.preview_canvas.overlay_selected.connect(self._on_canvas_overlay_selected)
         prev_wrap_layout.addWidget(self.preview_canvas, 1)
 
         self.canvas_splitter.addWidget(self.crop_wrap)
         self.canvas_splitter.addWidget(self.preview_wrap)
         self.canvas_splitter.setStretchFactor(0, 4)
         self.canvas_splitter.setStretchFactor(1, 6)
+        self.crop_wrap.setVisible(False)
         vis_layout.addWidget(self.canvas_splitter, 1)
 
-        # Transport & Timeline Scrubber
-        transport = QHBoxLayout()
-        transport.setSpacing(10)
-        self.play_btn = QPushButton("Putar Preview")
+        # Minimalist Player Control Bar
+        player_bar = QFrame()
+        player_bar.setObjectName("StudioPlayerBar")
+        transport = QHBoxLayout(player_bar)
+        transport.setContentsMargins(10, 6, 10, 6)
+        transport.setSpacing(8)
+
+        self.play_btn = QPushButton("Play")
         self.play_btn.setObjectName("PrimaryButton")
-        self.play_btn.setMinimumWidth(120)
+        self.play_btn.setIcon(create_vector_icon("play", "#FFFFFF", 13))
+        self.play_btn.setMinimumWidth(68)
+        self.play_btn.setToolTip("Putar / Jeda live preview")
         self.play_btn.clicked.connect(self._toggle_playback)
+
+        self.time_readout_lbl = QLabel("00.0s / 30.0s")
+        self.time_readout_lbl.setObjectName("StatusPill")
 
         self.timeline_slider = QSlider(Qt.Orientation.Horizontal)
         self.timeline_slider.setRange(0, 1000)
+        self.timeline_slider.setMinimumWidth(80)
         self.timeline_slider.valueChanged.connect(self._on_slider_scrubbed)
 
-        self.time_readout_lbl = QLabel("00.00s / 30.00s")
-        self.time_readout_lbl.setObjectName("VersionPill")
+        self.zoom_combo = QComboBox()
+        self.zoom_combo.setToolTip("Zoom canvas stage preview")
+        self.zoom_combo.addItem("Fit", 1.0)
+        self.zoom_combo.addItem("75%", 0.75)
+        self.zoom_combo.addItem("100%", 1.0)
+        self.zoom_combo.addItem("125%", 1.25)
+        self.zoom_combo.currentIndexChanged.connect(self._on_zoom_changed)
+
+        self.safe_zone_btn = QPushButton("Safe")
+        self.safe_zone_btn.setObjectName("CyanButton")
+        self.safe_zone_btn.setIcon(create_vector_icon("safe_zone", "#06B6D4", 14))
+        self.safe_zone_btn.setCheckable(True)
+        self.safe_zone_btn.setToolTip("Tampilkan panduan area aman UI TikTok / Instagram Reels / Shorts")
+        self.safe_zone_btn.toggled.connect(self._on_safe_zone_toggled)
+
         transport.addWidget(self.play_btn)
-        transport.addWidget(self.timeline_slider, 1)
         transport.addWidget(self.time_readout_lbl)
-        vis_layout.addLayout(transport)
+        transport.addWidget(self.timeline_slider, 1)
+        transport.addWidget(self.zoom_combo)
+        transport.addWidget(self.safe_zone_btn)
+        vis_layout.addWidget(player_bar)
 
-        self.face_lane = FaceLaneTimelineWidget()
-        self.face_lane.time_clicked.connect(self._on_lane_seek)
-        self.face_lane.split_requested.connect(self._on_lane_split)
-        self.face_lane.speaker_assigned.connect(self._on_lane_speaker_assigned)
-        self.face_lane.pin_speaker_requested.connect(self._on_lane_pin_speaker)
-        self.face_lane.apply_manual_crop_requested.connect(self._on_lane_apply_crop)
-        self.face_lane.redetect_from_requested.connect(self._on_lane_redetect_from)
-        vis_layout.addWidget(self.face_lane)
-
+        # Compact Trim Bar tucked cleanly under Player Bar
         trim_row = QHBoxLayout()
-        trim_row.setSpacing(10)
+        trim_row.setContentsMargins(4, 0, 4, 0)
+        trim_row.setSpacing(8)
         self.trim_start_spin = QDoubleSpinBox()
         self.trim_start_spin.setRange(0.0, 36000.0)
         self.trim_start_spin.setDecimals(2)
         self.trim_start_spin.setSingleStep(0.25)
-        self.trim_start_spin.setSuffix(" dtk")
+        self.trim_start_spin.setSuffix("s")
         self.trim_start_spin.valueChanged.connect(self._on_trim_changed)
 
         self.trim_end_spin = QDoubleSpinBox()
         self.trim_end_spin.setRange(0.5, 36000.0)
         self.trim_end_spin.setDecimals(2)
         self.trim_end_spin.setSingleStep(0.25)
-        self.trim_end_spin.setSuffix(" dtk")
+        self.trim_end_spin.setSuffix("s")
         self.trim_end_spin.valueChanged.connect(self._on_trim_changed)
 
         self.trim_pad_spin = QDoubleSpinBox()
         self.trim_pad_spin.setRange(0.0, 2.0)
         self.trim_pad_spin.setDecimals(2)
         self.trim_pad_spin.setSingleStep(0.05)
-        self.trim_pad_spin.setSuffix(" dtk")
+        self.trim_pad_spin.setSuffix("s")
         self.trim_pad_spin.valueChanged.connect(self._on_trim_changed)
 
-        for lbl_txt, w in (
-            ("Mulai Detik:", self.trim_start_spin),
-            ("Selesai Detik:", self.trim_end_spin),
-            ("Jeda Halus (Pad):", self.trim_pad_spin),
+        for lbl_txt, w_spin in (
+            ("Mulai:", self.trim_start_spin),
+            ("Selesai:", self.trim_end_spin),
+            ("Pad:", self.trim_pad_spin),
         ):
             lbl = QLabel(lbl_txt)
-            lbl.setObjectName("FieldLabel")
+            lbl.setObjectName("MutedText")
             trim_row.addWidget(lbl)
-            trim_row.addWidget(w)
+            trim_row.addWidget(w_spin)
         trim_row.addStretch()
         vis_layout.addLayout(trim_row)
 
-        # Right Column: Clear, Beginner-Friendly 5-Tab Settings Panel
+        # ---- Right Panel: 4-Tab Scrollable Inspector ----
         controls_panel = QFrame()
-        controls_panel.setObjectName("Card")
+        controls_panel.setObjectName("InspectorPanel")
+        controls_panel.setMinimumWidth(310)
         ctrl_layout = QVBoxLayout(controls_panel)
-        ctrl_layout.setContentsMargins(10, 10, 10, 10)
-        ctrl_layout.setSpacing(6)
-
-        ctrl_hdr = QLabel("Pengaturan Tampilan & Audio Klip")
-        ctrl_hdr.setObjectName("SectionTitle")
-        ctrl_layout.addWidget(ctrl_hdr)
+        ctrl_layout.setContentsMargins(8, 8, 8, 8)
+        ctrl_layout.setSpacing(4)
 
         self.ctrl_tabs = QTabWidget()
-        self.ctrl_tabs.addTab(_wrap_scroll(self._build_template_tab()), "1. Template")
-        self.ctrl_tabs.addTab(_wrap_scroll(self._build_layout_tab()), "2. Tata Letak")
-        self.ctrl_tabs.addTab(_wrap_scroll(self._build_subtitle_tab()), "3. Teks Subtitle")
-        self.ctrl_tabs.addTab(_wrap_scroll(self._build_overlay_tab()), "4. Judul & Komentar")
-        self.ctrl_tabs.addTab(_wrap_scroll(self._build_audio_tab()), "5. Musik & Suara")
-        self.ctrl_tabs.addTab(self._build_transcript_tab(), "6. Edit Kata")
+        self.ctrl_tabs.addTab(_wrap_scroll(self._build_layout_tab()), "Layout")
+        self.ctrl_tabs.addTab(_wrap_scroll(self._build_subtitle_tab()), "Subtitle")
+        self.ctrl_tabs.addTab(_wrap_scroll(self._build_overlay_tab()), "Overlay")
+        self.ctrl_tabs.addTab(_wrap_scroll(self._build_audio_tab()), "Audio")
         ctrl_layout.addWidget(self.ctrl_tabs, 1)
 
-        main_splitter.addWidget(visual_panel)
-        main_splitter.addWidget(controls_panel)
-        main_splitter.setStretchFactor(0, 56)
-        main_splitter.setStretchFactor(1, 44)
-        root.addWidget(main_splitter, 1)
+        panels_splitter.addWidget(left_wrap)
+        panels_splitter.addWidget(visual_panel)
+        panels_splitter.addWidget(controls_panel)
+        panels_splitter.setStretchFactor(0, 23)
+        panels_splitter.setStretchFactor(1, 45)
+        panels_splitter.setStretchFactor(2, 32)
+
+        # ---- Bottom Panel: 4-Track MultiTrackTimelineWidget ----
+        self.face_lane = MultiTrackTimelineWidget()
+        self.face_lane.time_clicked.connect(self._on_lane_seek)
+        self.face_lane.split_requested.connect(self._on_lane_split)
+        self.face_lane.speaker_assigned.connect(self._on_lane_speaker_assigned)
+        self.face_lane.pin_speaker_requested.connect(self._on_lane_pin_speaker)
+        self.face_lane.apply_manual_crop_requested.connect(self._on_lane_apply_crop)
+        self.face_lane.redetect_from_requested.connect(self._on_lane_redetect_from)
+        self.face_lane.timeline_mutated.connect(self._on_timeline_track_mutated)
+        self.face_lane.trim_changed.connect(self._on_timeline_trim_dragged)
+
+        studio_vert.addWidget(panels_splitter)
+        studio_vert.addWidget(self.face_lane)
+        studio_vert.setStretchFactor(0, 1)
+        studio_vert.setStretchFactor(1, 0)
+        root.addWidget(studio_vert, 1)
 
     def _set_preview_view_mode(self, mode: str) -> None:
         self.view_both_btn.setChecked(mode == "both")
@@ -778,11 +1019,36 @@ class ClipStudioWidget(QWidget):
         vbox = QVBoxLayout(w)
         vbox.setSpacing(10)
 
-        mode_grp = QGroupBox("Model Tampilan Layar")
+        cards_grp = QGroupBox("Pilih Layout Cepat")
+        cg_lay = QGridLayout(cards_grp)
+        cg_lay.setContentsMargins(8, 12, 8, 8)
+        cg_lay.setHorizontalSpacing(8)
+        cg_lay.setVerticalSpacing(8)
+
+        self._layout_icon_cards: dict[str, _LayoutIconCard] = {}
+        layout_card_defs = [
+            ("auto_face", "Auto Face-Track", "single_focus", "9:16"),
+            ("gaming_split", "Gaming Split", "split_screen", "9:16"),
+            ("multi_split", "Split 2 Grid", "multi_speaker_split", "9:16"),
+            ("blurred_frame", "Blurred Frame", "blurred_frame", "4:5"),
+            ("pip_facecam", "PiP Facecam", "pip_facecam", "9:16"),
+            ("square_1_1", "Square 1:1", "blurred_frame", "1:1"),
+        ]
+        for idx, (ckey, ctitle, lmode, baspect) in enumerate(layout_card_defs):
+            card = _LayoutIconCard(ckey, ctitle, lmode, baspect, parent=cards_grp)
+            card.clicked.connect(self._on_layout_card_clicked)
+            self._layout_icon_cards[ckey] = card
+            cg_lay.addWidget(card, idx // 2, idx % 2)
+        vbox.addWidget(cards_grp)
+
+        mode_grp = QGroupBox("Model && Rasio Split Layar")
         mf = QFormLayout(mode_grp)
         mf.setSpacing(8)
+        mf.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
 
         self.layout_mode_combo = QComboBox()
+        self.layout_mode_combo.setMinimumWidth(140)
+        self.layout_mode_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.layout_mode_combo.addItem("Fokus 1 Orang Penuh (Podcast)", "single_focus")
         self.layout_mode_combo.addItem("Bagi Atas-Bawah (Gaming / Reaksi)", "split_screen")
         self.layout_mode_combo.addItem("Wajah Mengambang / PiP Facecam (Gameplay Penuh)", "pip_facecam")
@@ -858,7 +1124,7 @@ class ClipStudioWidget(QWidget):
         tf.addRow("Volume SFX Transisi", tr_vol_row)
         vbox.addWidget(tr_grp)
 
-        spk_grp = QGroupBox("Fokus Pembicara & Podcast AI")
+        spk_grp = QGroupBox("Fokus Pembicara && Podcast AI")
         sf = QFormLayout(spk_grp)
         sf.setSpacing(8)
         self.focus_strategy_combo = QComboBox()
@@ -902,7 +1168,7 @@ class ClipStudioWidget(QWidget):
         sf.addRow("Pin & Nama Pembicara", pin_row)
         vbox.addWidget(spk_grp)
 
-        jc_grp = QGroupBox("Jump-Cut & Ritme Cepat (Saat Export)")
+        jc_grp = QGroupBox("Jump-Cut && Ritme Cepat (Saat Export)")
         jcf = QFormLayout(jc_grp)
         jcf.setSpacing(6)
         jc_row = QHBoxLayout()
@@ -973,7 +1239,7 @@ class ClipStudioWidget(QWidget):
         bf.addRow("Tingkat Blur Belakang", blur_row)
         vbox.addWidget(self._blur_grp)
 
-        self._pip_grp = QGroupBox("Bingkai Sudut, Neon & PiP Facecam")
+        self._pip_grp = QGroupBox("Bingkai Sudut, Neon && PiP Facecam")
         pf = QFormLayout(self._pip_grp)
         pf.setSpacing(8)
         pip_shape_row = QHBoxLayout()
@@ -1060,7 +1326,42 @@ class ClipStudioWidget(QWidget):
         vbox = QVBoxLayout(w)
         vbox.setSpacing(10)
 
-        basic_grp = QGroupBox("Teks & Sinkronisasi Subtitle")
+        gallery_grp = QGroupBox("Galeri Preset Gaya Subtitle")
+        gg_lay = QGridLayout(gallery_grp)
+        gg_lay.setContentsMargins(8, 12, 8, 8)
+        gg_lay.setHorizontalSpacing(8)
+        gg_lay.setVerticalSpacing(8)
+
+        self._subtitle_preset_cards: dict[str, _SubtitlePresetCard] = {}
+        card_short_names = {
+            "mrbeast_pill": "Sorot",
+            "streamer_kinetic": "Pop",
+            "hormozi_viral": "Tumpuk",
+            "abdaal_minimal": "Minimal",
+            "lokaclip_neon": "Neon",
+            "mageran_glass": "Glass",
+            "gamer_split": "Esports",
+            "podcast_editorial": "Editorial",
+        }
+        ordered_recipes = [
+            "mrbeast_pill",
+            "streamer_kinetic",
+            "hormozi_viral",
+            "abdaal_minimal",
+            *[k for k in CAPTION_RECIPES if k not in ("mrbeast_pill", "streamer_kinetic", "hormozi_viral", "abdaal_minimal")],
+        ]
+        for idx, rid in enumerate(ordered_recipes):
+            meta = CAPTION_RECIPES.get(rid)
+            if meta is None:
+                continue
+            short_title = card_short_names.get(rid, meta.get("label", rid).split("(")[0].strip())
+            card = _SubtitlePresetCard(rid, short_title, meta, parent=gallery_grp)
+            card.clicked.connect(self._on_subtitle_card_clicked)
+            self._subtitle_preset_cards[rid] = card
+            gg_lay.addWidget(card, idx // 2, idx % 2)
+        vbox.addWidget(gallery_grp)
+
+        basic_grp = QGroupBox("Teks && Sinkronisasi Subtitle")
         form = QFormLayout(basic_grp)
         form.setSpacing(8)
 
@@ -1152,7 +1453,7 @@ class ClipStudioWidget(QWidget):
         form.addRow("Koordinat Teks", pos_row)
         vbox.addWidget(basic_grp)
 
-        style_grp = QGroupBox("Warna, Garis Tepi & Animasi")
+        style_grp = QGroupBox("Warna, Garis Tepi && Animasi")
         sf = QFormLayout(style_grp)
         sf.setSpacing(8)
 
@@ -1266,7 +1567,7 @@ class ClipStudioWidget(QWidget):
         vbox.setSpacing(10)
 
         # 1. Opening Caption / Hook Title & Opening Voiceover
-        hook_grp = QGroupBox("Caption & Judul Awal Video (Sebelum Klip)")
+        hook_grp = QGroupBox("Caption && Judul Awal Video (Sebelum Klip)")
         hf = QFormLayout(hook_grp)
         hf.setSpacing(8)
         self.hook_enabled_chk = QCheckBox("Tampilkan Caption / Judul di Awal Video")
@@ -1600,7 +1901,7 @@ class ClipStudioWidget(QWidget):
         vbox.addWidget(wm_grp)
 
         # 4. Climax Effects
-        cl_grp = QGroupBox("Efek Klimaks & Warna")
+        cl_grp = QGroupBox("Efek Klimaks && Warna")
         clf = QFormLayout(cl_grp)
         cl_chk_row = QHBoxLayout()
         self.climax_contrast_chk = QCheckBox("Subtle Contrast Boost")
@@ -1659,7 +1960,7 @@ class ClipStudioWidget(QWidget):
         vbox.addWidget(cl_grp)
 
         # 5. Auto Social Copywriting & Viral Hashtags
-        social_grp = QGroupBox("Auto Caption & Hashtag Viral (TikTok / Reels / Shorts)")
+        social_grp = QGroupBox("Auto Caption && Hashtag Viral (TikTok / Reels / Shorts)")
         sl = QVBoxLayout(social_grp)
         sl.setSpacing(6)
         self.social_caption_edit = QPlainTextEdit()
@@ -1670,7 +1971,7 @@ class ClipStudioWidget(QWidget):
         self.regen_social_btn = QPushButton("Buat Ulang Caption")
         self.regen_social_btn.setObjectName("SmallAction")
         self.regen_social_btn.clicked.connect(self._refresh_social_copywriting)
-        self.copy_social_btn = QPushButton("Salin Caption & Hashtag")
+        self.copy_social_btn = QPushButton("Salin Caption && Hashtag")
         self.copy_social_btn.setObjectName("SmallAction")
         self.copy_social_btn.clicked.connect(self._copy_social_caption)
         social_btns.addWidget(self.regen_social_btn)
@@ -1868,10 +2169,17 @@ class ClipStudioWidget(QWidget):
                 self.clip_selector_combo.addItem(f"#{idx:02d} — {clip.title}", idx)
                 if select_clip_index is not None and idx == select_clip_index:
                     target_row = idx - 1
+            if hasattr(self, "transcript_panel"):
+                self.transcript_panel.set_clips(
+                    self._analysis.clips,
+                    active_clip_index=select_clip_index or 1,
+                )
             self.clip_selector_combo.setCurrentIndex(target_row)
             self._syncing_ui = False
             self._on_clip_selected(target_row)
         else:
+            if hasattr(self, "transcript_panel"):
+                self.transcript_panel.set_clips([], active_clip_index=None)
             self._syncing_ui = False
             self._refresh_preview()
 
@@ -2119,11 +2427,20 @@ class ClipStudioWidget(QWidget):
                 card.set_selected(tid == active_tid)
 
         self.preview_info_lbl.setText(f"{cfg.canvas_width}×{cfg.canvas_height}")
+        if hasattr(self, "studio_title_edit"):
+            self.studio_title_edit.setText(cfg.clip_title or "Klip Studio")
         if hasattr(self, "auto_detect_btn"):
             n_angles = len(cfg.layout.shot_crops)
             self.auto_detect_btn.setText(
-                f"Deteksi Wajah ({n_angles} Angle)" if n_angles > 1 else "Deteksi Wajah Otomatis"
+                f"Deteksi Wajah ({n_angles} Angle)" if n_angles > 1 else "Deteksi Wajah"
             )
+        if hasattr(self, "_layout_icon_cards"):
+            is_sq = cfg.layout.mode == "blurred_frame" and cfg.layout.blurred_frame_aspect == "1:1"
+            for ckey, lcard in self._layout_icon_cards.items():
+                if is_sq:
+                    lcard.set_selected(ckey == "square_1_1")
+                else:
+                    lcard.set_selected(ckey != "square_1_1" and lcard.layout_mode == cfg.layout.mode)
 
         # Timing
         self.trim_start_spin.setValue(cfg.timing.start_time)
@@ -2189,6 +2506,9 @@ class ClipStudioWidget(QWidget):
         self.sub_enabled_chk.setChecked(subs.enabled)
         rec_idx = self.recipe_combo.findData(subs.caption_recipe)
         self.recipe_combo.setCurrentIndex(max(0, rec_idx))
+        if hasattr(self, "_subtitle_preset_cards"):
+            for rid, scard in self._subtitle_preset_cards.items():
+                scard.set_selected(rid == subs.caption_recipe)
         sm_idx = self.sub_style_combo.findData(subs.style_mode)
         self.sub_style_combo.setCurrentIndex(max(0, sm_idx))
         self.sub_offset_spin.setValue(subs.timing_offset_sec)
@@ -2298,8 +2618,22 @@ class ClipStudioWidget(QWidget):
         self.ctx_sfx_chk.setChecked(au.contextual_sfx_enabled)
         self._reload_sfx_cues_table()
 
-        # Transcript Table
+        # Transcript Table + Interactive Word Panel
         self._reload_transcript_table()
+        if hasattr(self, "transcript_panel"):
+            p_start = max(0.0, cfg.timing.start_time - cfg.timing.padding_sec)
+            p_end = max(p_start + 1.0, cfg.timing.end_time + cfg.timing.padding_sec)
+            ov_map = {str(ov.index): ov.text for ov in cfg.transcript_overrides}
+            self.transcript_panel.load_segments(
+                self._transcript_segments,
+                clip_start_sec=p_start,
+                clip_end_sec=p_end,
+                overrides=ov_map,
+            )
+            if self._analysis and self._analysis.clips:
+                self.transcript_panel.set_clips(
+                    self._analysis.clips, active_clip_index=cfg.clip_index
+                )
 
         self._syncing_ui = False
         self._refresh_preview()
@@ -2375,6 +2709,14 @@ class ClipStudioWidget(QWidget):
         cfg = self._config
         # Layout
         cfg.layout.mode = self.layout_mode_combo.currentData() or "single_focus"
+        cfg.layout.blurred_frame_aspect = self.blur_aspect_combo.currentText()  # type: ignore[assignment]
+        if hasattr(self, "_layout_icon_cards"):
+            is_sq = cfg.layout.mode == "blurred_frame" and cfg.layout.blurred_frame_aspect == "1:1"
+            for ckey, lcard in self._layout_icon_cards.items():
+                if is_sq:
+                    lcard.set_selected(ckey == "square_1_1")
+                else:
+                    lcard.set_selected(ckey != "square_1_1" and lcard.layout_mode == cfg.layout.mode)
         pct = self.split_ratio_slider.value()
         cfg.layout.split_ratio_top = pct / 100.0
         self.split_ratio_lbl.setText(f"{pct}:{100 - pct}")
@@ -2946,7 +3288,7 @@ class ClipStudioWidget(QWidget):
         self._config.layout.top_crop.auto_detect = True
         self._config.layout.bottom_crop.auto_detect = True
         self.auto_detect_btn.setEnabled(False)
-        self.auto_detect_btn.setText("Mendeteksi Pembicara & Angle...")
+        self.auto_detect_btn.setText("Mendeteksi Pembicara && Angle...")
 
         def _worker() -> None:
             try:
@@ -3241,13 +3583,15 @@ class ClipStudioWidget(QWidget):
             self._pause_playback()
         else:
             self._is_playing = True
-            self.play_btn.setText("Jeda Preview")
+            self.play_btn.setText("Pause")
+            self.play_btn.setIcon(create_vector_icon("pause", "#FFFFFF", 13))
             self._play_timer.start()
 
     def _pause_playback(self) -> None:
         self._is_playing = False
         self._play_timer.stop()
-        self.play_btn.setText("Putar Preview")
+        self.play_btn.setText("Play")
+        self.play_btn.setIcon(create_vector_icon("play", "#FFFFFF", 13))
 
     def _on_playback_tick(self) -> None:
         p_start, p_end = self._effective_window()
@@ -3292,6 +3636,8 @@ class ClipStudioWidget(QWidget):
                 prev_frame_bgr = self._frame_cache.get_frame(self._source_path, prev_ts)
 
         self.crop_selector.set_state(self._config, frame_bgr, rel_time_sec=self._rel_time_sec)
+        if hasattr(self.face_lane, "set_composer_data"):
+            self.face_lane.set_composer_data(self._config, self._transcript_segments, p_start)
         self.face_lane.set_state(
             shots=self._config.layout.shot_crops,
             duration_sec=dur,
@@ -3299,6 +3645,8 @@ class ClipStudioWidget(QWidget):
             aliases=self._config.layout.speaker_aliases,
             pinned_speaker_id=self._config.layout.pinned_speaker_id,
         )
+        if hasattr(self, "transcript_panel"):
+            self.transcript_panel.update_playhead(self._rel_time_sec)
         self._sync_crop_spins_from_config()
         self.preview_canvas.render_state(
             source_frame_bgr=frame_bgr,
@@ -3388,33 +3736,119 @@ class ClipStudioWidget(QWidget):
         self.style_applied_to_all.emit(count)
 
     def set_advanced_mode(self, enabled: bool) -> None:
-        """Toggle Studio progressive disclosure between Easy (4 clean tabs) and Pro (6 tabs)."""
+        """Toggle advanced Inspector sub-panels cleanly within the 4 Creator Studio tabs."""
         is_pro = bool(enabled)
         self._advanced_mode = is_pro
-        self.ctrl_tabs.setTabVisible(3, is_pro)
-        self.ctrl_tabs.setTabVisible(5, is_pro)
-        if is_pro:
-            self.ctrl_tabs.setTabText(1, "2. Tata Letak")
-            self.ctrl_tabs.setTabText(2, "3. Teks Subtitle")
-            self.ctrl_tabs.setTabText(4, "5. Musik & Suara")
-        else:
-            self.ctrl_tabs.setTabText(1, "2. Tampilan")
-            self.ctrl_tabs.setTabText(2, "3. Teks")
-            self.ctrl_tabs.setTabText(4, "4. Audio")
-            if self.ctrl_tabs.currentIndex() in (3, 5):
-                self.ctrl_tabs.setCurrentIndex(0)
-
-        self.save_preset_btn.setVisible(is_pro)
-        self.load_preset_btn.setVisible(is_pro)
+        for idx in range(self.ctrl_tabs.count()):
+            self.ctrl_tabs.setTabVisible(idx, True)
         self._div_grp.setVisible(is_pro)
-        self._blur_grp.setVisible(is_pro)
-        self._pip_grp.setVisible(is_pro)
+        self._blur_grp.setVisible(is_pro or self._config.layout.mode == "blurred_frame")
+        self._pip_grp.setVisible(is_pro or self._config.layout.mode == "pip_facecam")
         self.manual_crop_coords_chk.setVisible(is_pro)
         if not is_pro:
             self.manual_crop_coords_chk.setChecked(False)
-            self._set_preview_view_mode("preview")
-        else:
-            self._set_preview_view_mode("both")
+
+    # --- Dark Creator Studio Panel Interactions ---
+    def _on_layout_card_clicked(self, card_key: str, layout_mode: str, blur_aspect: str) -> None:
+        self._syncing_ui = True
+        try:
+            lm_idx = self.layout_mode_combo.findData(layout_mode)
+            if lm_idx >= 0:
+                self.layout_mode_combo.setCurrentIndex(lm_idx)
+            if blur_aspect in ("1:1", "4:5", "16:9"):
+                self.blur_aspect_combo.setCurrentText(blur_aspect)
+        finally:
+            self._syncing_ui = False
+        self._on_ui_mutated()
+
+    def _on_subtitle_card_clicked(self, recipe_id: str) -> None:
+        idx = self.recipe_combo.findData(recipe_id)
+        if idx >= 0:
+            self.recipe_combo.setCurrentIndex(idx)
+        apply_caption_recipe(self._config, recipe_id)
+        self._load_config_into_ui(self._config)
+
+    def _on_title_inline_edited(self) -> None:
+        if self._syncing_ui:
+            return
+        new_title = self.studio_title_edit.text().strip()
+        if new_title:
+            self._config.clip_title = new_title
+
+    def _on_left_clip_clicked(self, clip_index: int) -> None:
+        idx = self.clip_selector_combo.findData(clip_index)
+        if idx >= 0 and idx != self.clip_selector_combo.currentIndex():
+            self.clip_selector_combo.setCurrentIndex(idx)
+
+    def _on_interactive_transcript_edited(self, seg_index: int, new_text: str) -> None:
+        if self._syncing_ui or not new_text.strip():
+            return
+        updated = False
+        for ov in self._config.transcript_overrides:
+            if ov.index == seg_index:
+                ov.text = new_text.strip()
+                ov.words = []
+                updated = True
+                break
+        if not updated and 0 <= seg_index < len(self._transcript_segments):
+            seg = self._transcript_segments[seg_index]
+            self._config.transcript_overrides.append(
+                TranscriptSegmentOverride(
+                    index=seg_index,
+                    start=seg.start,
+                    end=seg.end,
+                    text=new_text.strip(),
+                    speaker="SPEAKER_1",
+                    words=[],
+                )
+            )
+            self._config.transcript_overrides.sort(key=lambda o: o.start)
+        self._reload_transcript_table()
+        p_start, p_end = self._effective_window()
+        ov_map = {str(ov.index): ov.text for ov in self._config.transcript_overrides}
+        if hasattr(self, "transcript_panel"):
+            self.transcript_panel.load_segments(
+                self._transcript_segments,
+                clip_start_sec=p_start,
+                clip_end_sec=p_end,
+                overrides=ov_map,
+            )
+        self._refresh_preview()
+
+    def _reset_interactive_transcript(self) -> None:
+        p_start, p_end = self._effective_window()
+        self._config.transcript_overrides = extract_transcript_overrides(
+            self._transcript_segments, p_start, p_end
+        )
+        self._load_config_into_ui(self._config)
+
+    def _on_zoom_changed(self) -> None:
+        z = float(self.zoom_combo.currentData() or 1.0)
+        self.preview_canvas.set_zoom_factor(z)
+
+    def _on_safe_zone_toggled(self, checked: bool) -> None:
+        self.preview_canvas.set_safe_zone_enabled(checked)
+
+    def _on_canvas_overlay_selected(self, overlay_name: str) -> None:
+        if overlay_name == "subtitle":
+            self.ctrl_tabs.setCurrentIndex(1)
+        elif overlay_name in ("hook_banner", "comment_bubble", "watermark"):
+            self.ctrl_tabs.setCurrentIndex(2)
+
+    def _on_timeline_track_mutated(self) -> None:
+        self._syncing_ui = True
+        try:
+            self.hook_dur_spin.setValue(self._config.overlays.hook_banner.duration_sec)
+            self._reload_comment_bubble_list()
+            self._reload_sfx_cues_table()
+        finally:
+            self._syncing_ui = False
+        self._refresh_preview()
+
+    def _on_timeline_trim_dragged(self, rel_s: float, rel_e: float) -> None:
+        # Update preview scrub time cleanly during trim handle feedback
+        self._rel_time_sec = rel_s
+        self._refresh_preview()
 
     def open_batch_render_dialog(self, preselected_indices: Optional[list[int]] = None) -> None:
         if self._job_state is None or self._analysis is None or not self._analysis.clips:

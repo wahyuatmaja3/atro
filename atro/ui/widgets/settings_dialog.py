@@ -1,4 +1,4 @@
-"""Flat modern settings dialog for AI provider (Gemini / OpenAI-Compatible), Whisper, and workspace."""
+"""Settings view & dialog for AI provider, Whisper Anti-Typo, Audio, TTS, and workspace."""
 
 from __future__ import annotations
 
@@ -7,17 +7,19 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
-    QCheckBox,
     QComboBox,
     QDialog,
     QFileDialog,
     QFormLayout,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QStackedWidget,
     QVBoxLayout,
@@ -25,6 +27,7 @@ from PyQt6.QtWidgets import (
 )
 
 from atro.config import AppSettings
+from atro.ui.components import ToggleSwitch
 
 _OPENAI_PRESETS: dict[str, tuple[str, str]] = {
     "OpenAI": ("https://api.openai.com/v1", "gpt-4o-mini"),
@@ -36,48 +39,75 @@ _OPENAI_PRESETS: dict[str, tuple[str, str]] = {
 }
 
 
-class SettingsDialog(QDialog):
-    """Modal dialog for editing persistent ATRO configuration."""
+class SettingsWidget(QWidget):
+    """Embeddable Creator Studio settings page structured as sleek cards."""
 
-    def __init__(self, settings: AppSettings, parent: Optional[QWidget] = None) -> None:
+    settings_saved = pyqtSignal(object)
+    cancelled = pyqtSignal()
+
+    def __init__(
+        self,
+        settings: AppSettings,
+        embedded: bool = True,
+        parent: Optional[QWidget] = None,
+    ) -> None:
         super().__init__(parent)
         self._settings = settings.model_copy(deep=True)
+        self._embedded = embedded
         self._suppress_preset_fill = False
 
-        self.setWindowTitle("Pengaturan ATRO")
-        self.setMinimumWidth(520)
-        self.setModal(True)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(20 if embedded else 16, 16, 20 if embedded else 16, 14)
+        outer.setSpacing(12)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(14)
-
-        title = QLabel("Pengaturan Aplikasi")
-        title.setObjectName("SectionTitle")
+        # Page Header
+        hdr_row = QHBoxLayout()
+        hdr_col = QVBoxLayout()
+        hdr_col.setSpacing(2)
+        title = QLabel("Pengaturan Studio & Pipeline")
+        title.setObjectName("HeroTitle" if embedded else "SectionTitle")
         subtitle = QLabel(
-            "Pilih provider AI (Google Gemini atau OpenAI-Compatible), model Whisper lokal, dan lokasi workspace."
+            "Konfigurasi AI Provider (Gemini / OpenAI-Compatible), model Whisper anti-typo, backsound, TTS, dan workspace."
         )
         subtitle.setObjectName("MutedText")
         subtitle.setWordWrap(True)
-        layout.addWidget(title)
-        layout.addWidget(subtitle)
+        hdr_col.addWidget(title)
+        hdr_col.addWidget(subtitle)
+        hdr_row.addLayout(hdr_col, 1)
+        outer.addLayout(hdr_row)
 
-        # Provider selector
+        # Scrollable cards body
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll_body = QWidget()
+        body = QVBoxLayout(scroll_body)
+        body.setContentsMargins(0, 0, 6, 0)
+        body.setSpacing(14)
+
+        # ---- Card 1: AI Provider ----
+        ai_card = QFrame()
+        ai_card.setObjectName("Card")
+        ai_lay = QVBoxLayout(ai_card)
+        ai_lay.setContentsMargins(16, 14, 16, 14)
+        ai_lay.setSpacing(10)
+
+        ai_title = QLabel("1. AI Provider & Model Analisis")
+        ai_title.setObjectName("SectionTitle")
+        ai_lay.addWidget(ai_title)
+
         provider_form = QFormLayout()
         provider_form.setSpacing(10)
         self.provider_combo = QComboBox()
         self.provider_combo.addItem("Google Gemini", "gemini")
-        self.provider_combo.addItem("OpenAI-Compatible", "openai_compatible")
-        idx = self.provider_combo.findData(self._settings.llm_provider)
-        self.provider_combo.setCurrentIndex(max(0, idx))
+        self.provider_combo.addItem("OpenAI-Compatible (OpenAI / OpenRouter / Groq / Ollama)", "openai_compatible")
+        p_idx = self.provider_combo.findData(self._settings.llm_provider)
+        self.provider_combo.setCurrentIndex(max(0, p_idx))
         self.provider_combo.currentIndexChanged.connect(self._on_provider_changed)
         provider_form.addRow("Provider AI", self.provider_combo)
-        layout.addLayout(provider_form)
+        ai_lay.addLayout(provider_form)
 
-        # Provider-specific fields stack
         self.provider_stack = QStackedWidget()
 
-        # Page 0: Google Gemini
         gemini_page = QWidget()
         gemini_form = QFormLayout(gemini_page)
         gemini_form.setContentsMargins(0, 0, 0, 0)
@@ -102,7 +132,6 @@ class SettingsDialog(QDialog):
         self.gemini_model_combo.setCurrentText(self._settings.gemini_model or "gemini-4-neon")
         gemini_form.addRow("Gemini Model", self.gemini_model_combo)
 
-        # Page 1: OpenAI-Compatible
         openai_page = QWidget()
         openai_form = QFormLayout(openai_page)
         openai_form.setContentsMargins(0, 0, 0, 0)
@@ -122,9 +151,7 @@ class SettingsDialog(QDialog):
         o_key_row.setSpacing(8)
         self.openai_key_edit = QLineEdit()
         self.openai_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.openai_key_edit.setPlaceholderText(
-            "Masukkan API Key (opsional untuk Ollama/LM Studio lokal)"
-        )
+        self.openai_key_edit.setPlaceholderText("Masukkan API Key (opsional untuk Ollama/LM Studio lokal)")
         self.openai_key_edit.setText(self._settings.openai_api_key)
         self.toggle_openai_key_btn = QPushButton("Tampilkan")
         self.toggle_openai_key_btn.setCheckable(True)
@@ -142,21 +169,62 @@ class SettingsDialog(QDialog):
 
         self.provider_stack.addWidget(gemini_page)
         self.provider_stack.addWidget(openai_page)
-        layout.addWidget(self.provider_stack)
+        ai_lay.addWidget(self.provider_stack)
+        body.addWidget(ai_card)
 
-        # Common Whisper + Workspace fields
-        common_form = QFormLayout()
-        common_form.setSpacing(10)
+        # ---- Card 2: Whisper & Proofreading ----
+        tr_card = QFrame()
+        tr_card.setObjectName("Card")
+        tr_lay = QVBoxLayout(tr_card)
+        tr_lay.setContentsMargins(16, 14, 16, 14)
+        tr_lay.setSpacing(10)
 
+        tr_title = QLabel("2. Transkripsi Whisper & Koreksi Anti-Typo")
+        tr_title.setObjectName("SectionTitle")
+        tr_lay.addWidget(tr_title)
+
+        tr_form = QFormLayout()
+        tr_form.setSpacing(10)
         self.whisper_model_combo = QComboBox()
         self.whisper_model_combo.addItems(["tiny", "base", "small", "medium", "large-v3-turbo"])
         self.whisper_model_combo.setCurrentText(self._settings.whisper_model)
-        common_form.addRow("Whisper Model", self.whisper_model_combo)
+        tr_form.addRow("Whisper Model", self.whisper_model_combo)
 
         self.whisper_device_combo = QComboBox()
         self.whisper_device_combo.addItems(["auto", "cpu", "cuda"])
         self.whisper_device_combo.setCurrentText(self._settings.whisper_device)
-        common_form.addRow("Whisper Device", self.whisper_device_combo)
+        tr_form.addRow("Whisper Device", self.whisper_device_combo)
+
+        self.whisper_lang_combo = QComboBox()
+        self.whisper_lang_combo.addItem("Otomatis (Sesuai Judul & Audio)", "auto")
+        self.whisper_lang_combo.addItem("Bahasa Indonesia (id)", "id")
+        self.whisper_lang_combo.addItem("English (en)", "en")
+        wl_idx = self.whisper_lang_combo.findData(self._settings.whisper_language)
+        self.whisper_lang_combo.setCurrentIndex(max(0, wl_idx))
+        tr_form.addRow("Bahasa Transkrip", self.whisper_lang_combo)
+
+        self.proofread_chk = ToggleSwitch(
+            "Perbaiki typo & ejaan transkrip otomatis (kamus lokal + AI)",
+            checked=bool(self._settings.enable_transcript_proofread),
+            accent_color="#7C3AED",
+        )
+        tr_form.addRow("Koreksi Typo", self.proofread_chk)
+        tr_lay.addLayout(tr_form)
+        body.addWidget(tr_card)
+
+        # ---- Card 3: Workspace, Backsound & TTS ----
+        media_card = QFrame()
+        media_card.setObjectName("Card")
+        media_lay = QVBoxLayout(media_card)
+        media_lay.setContentsMargins(16, 14, 16, 14)
+        media_lay.setSpacing(10)
+
+        media_title = QLabel("3. Workspace, Backsound & Suara Opening (TTS)")
+        media_title.setObjectName("SectionTitle")
+        media_lay.addWidget(media_title)
+
+        media_form = QFormLayout()
+        media_form.setSpacing(10)
 
         ws_row = QHBoxLayout()
         ws_row.setSpacing(8)
@@ -165,9 +233,8 @@ class SettingsDialog(QDialog):
         browse_btn.clicked.connect(self._browse_workspace)
         ws_row.addWidget(self.workspace_edit, 1)
         ws_row.addWidget(browse_btn)
-        common_form.addRow("Workspace Folder", ws_row)
+        media_form.addRow("Workspace Folder", ws_row)
 
-        # Backsound folder row
         bgm_row = QHBoxLayout()
         bgm_row.setSpacing(8)
         self.backsound_edit = QLineEdit(str(self._settings.backsound_dir))
@@ -178,9 +245,8 @@ class SettingsDialog(QDialog):
         bgm_row.addWidget(self.backsound_edit, 1)
         bgm_row.addWidget(browse_bgm_btn)
         bgm_row.addWidget(open_bgm_btn)
-        common_form.addRow("Folder Backsound", bgm_row)
+        media_form.addRow("Folder Backsound", bgm_row)
 
-        # Backsound volume + ducking row
         bgm_opts_row = QHBoxLayout()
         bgm_opts_row.setSpacing(12)
         self.bgm_volume_spin = QSpinBox()
@@ -188,12 +254,14 @@ class SettingsDialog(QDialog):
         self.bgm_volume_spin.setSuffix(" %")
         self.bgm_volume_spin.setValue(int(round(self._settings.backsound_volume * 100)))
 
-        self.bgm_ducking_chk = QCheckBox("Auto-Ducking (musik meredup saat ada percakapan)")
-        self.bgm_ducking_chk.setChecked(self._settings.enable_backsound_ducking)
-
+        self.bgm_ducking_chk = ToggleSwitch(
+            "Auto-Ducking (musik meredup saat ada percakapan)",
+            checked=bool(self._settings.enable_backsound_ducking),
+            accent_color="#06B6D4",
+        )
         bgm_opts_row.addWidget(self.bgm_volume_spin)
         bgm_opts_row.addWidget(self.bgm_ducking_chk, 1)
-        common_form.addRow("Volume Backsound", bgm_opts_row)
+        media_form.addRow("Volume Backsound", bgm_opts_row)
 
         self.tts_voice_combo = QComboBox()
         self.tts_voice_combo.addItem("Indonesia Cewek - Santai (Gadis)", "id-ID-GadisNeural")
@@ -202,24 +270,52 @@ class SettingsDialog(QDialog):
         self.tts_voice_combo.addItem("English Male (Guy)", "en-US-GuyNeural")
         tts_idx = self.tts_voice_combo.findData(self._settings.tts_voice)
         self.tts_voice_combo.setCurrentIndex(max(0, tts_idx))
-        common_form.addRow("Suara Opening (TTS)", self.tts_voice_combo)
+        media_form.addRow("Suara Opening (TTS)", self.tts_voice_combo)
 
-        layout.addLayout(common_form)
+        media_lay.addLayout(media_form)
+        body.addWidget(media_card)
+        body.addStretch(1)
 
-        # Sync initial stack page and compact height
-        self._on_provider_changed()
+        scroll.setWidget(scroll_body)
+        outer.addWidget(scroll, 1)
 
-        # Footer buttons
+        # Sticky Save Bar
         btn_row = QHBoxLayout()
         btn_row.addStretch()
-        cancel_btn = QPushButton("Batal")
-        cancel_btn.clicked.connect(self.reject)
-        save_btn = QPushButton("Simpan Pengaturan")
-        save_btn.setObjectName("PrimaryButton")
-        save_btn.clicked.connect(self._on_save)
-        btn_row.addWidget(cancel_btn)
-        btn_row.addWidget(save_btn)
-        layout.addLayout(btn_row)
+        if not embedded:
+            cancel_btn = QPushButton("Batal")
+            cancel_btn.clicked.connect(self.cancelled.emit)
+            btn_row.addWidget(cancel_btn)
+        self.save_btn = QPushButton("Simpan Pengaturan")
+        self.save_btn.setObjectName("PrimaryButton")
+        self.save_btn.clicked.connect(self._on_save)
+        btn_row.addWidget(self.save_btn)
+        outer.addLayout(btn_row)
+
+        self._on_provider_changed()
+
+    def load_settings(self, settings: AppSettings) -> None:
+        self._settings = settings.model_copy(deep=True)
+        p_idx = self.provider_combo.findData(self._settings.llm_provider)
+        self.provider_combo.setCurrentIndex(max(0, p_idx))
+        self.api_key_edit.setText(self._settings.gemini_api_key)
+        self.gemini_model_combo.setCurrentText(self._settings.gemini_model or "gemini-4-neon")
+        self.openai_url_edit.setText(self._settings.openai_base_url)
+        self.openai_key_edit.setText(self._settings.openai_api_key)
+        self.openai_model_edit.setText(self._settings.openai_model)
+        self._select_matching_preset(self._settings.openai_base_url)
+        self.whisper_model_combo.setCurrentText(self._settings.whisper_model)
+        self.whisper_device_combo.setCurrentText(self._settings.whisper_device)
+        wl_idx = self.whisper_lang_combo.findData(self._settings.whisper_language)
+        self.whisper_lang_combo.setCurrentIndex(max(0, wl_idx))
+        self.proofread_chk.setChecked(bool(self._settings.enable_transcript_proofread))
+        self.workspace_edit.setText(str(self._settings.workspace_dir))
+        self.backsound_edit.setText(str(self._settings.backsound_dir))
+        self.bgm_volume_spin.setValue(int(round(self._settings.backsound_volume * 100)))
+        self.bgm_ducking_chk.setChecked(bool(self._settings.enable_backsound_ducking))
+        tts_idx = self.tts_voice_combo.findData(self._settings.tts_voice)
+        self.tts_voice_combo.setCurrentIndex(max(0, tts_idx))
+        self._on_provider_changed()
 
     def _select_matching_preset(self, base_url: str) -> None:
         normalized = base_url.strip().rstrip("/").lower()
@@ -244,13 +340,13 @@ class SettingsDialog(QDialog):
         self.openai_model_edit.setText(sample_model)
 
     def _on_provider_changed(self) -> None:
-        provider = self.provider_combo.currentData()
-        page_idx = 1 if provider == "openai_compatible" else 0
-        self.provider_stack.setCurrentIndex(page_idx)
-        current = self.provider_stack.currentWidget()
-        if current is not None:
-            self.provider_stack.setFixedHeight(max(70, current.sizeHint().height()))
-        self.adjustSize()
+        provider = self.provider_combo.currentData() or "gemini"
+        is_openai = provider == "openai_compatible"
+        self.provider_stack.setCurrentIndex(1 if is_openai else 0)
+        for idx in range(self.provider_stack.count()):
+            page = self.provider_stack.widget(idx)
+            if page is not None:
+                page.setVisible(idx == (1 if is_openai else 0))
 
     def _toggle_gemini_key_visibility(self, checked: bool) -> None:
         self.api_key_edit.setEchoMode(
@@ -265,33 +361,28 @@ class SettingsDialog(QDialog):
         self.toggle_openai_key_btn.setText("Sembunyikan" if checked else "Tampilkan")
 
     def _browse_workspace(self) -> None:
-        chosen = QFileDialog.getExistingDirectory(
-            self,
-            "Pilih Folder Workspace",
-            self.workspace_edit.text() or str(self._settings.workspace_dir),
+        selected = QFileDialog.getExistingDirectory(
+            self, "Pilih Workspace Folder", self.workspace_edit.text() or str(Path.cwd())
         )
-        if chosen:
-            self.workspace_edit.setText(chosen)
+        if selected:
+            self.workspace_edit.setText(selected)
 
     def _browse_backsound_dir(self) -> None:
-        chosen = QFileDialog.getExistingDirectory(
-            self,
-            "Pilih Folder Backsound",
-            self.backsound_edit.text() or str(self._settings.backsound_dir),
+        selected = QFileDialog.getExistingDirectory(
+            self, "Pilih Folder Backsound", self.backsound_edit.text() or str(Path.cwd())
         )
-        if chosen:
-            self.backsound_edit.setText(chosen)
+        if selected:
+            self.backsound_edit.setText(selected)
 
     def _open_backsound_dir(self) -> None:
-        raw = self.backsound_edit.text().strip()
-        target = Path(raw) if raw else self._settings.backsound_dir
-        target.mkdir(parents=True, exist_ok=True)
+        folder = Path(self.backsound_edit.text().strip() or str(self._settings.backsound_dir))
+        folder.mkdir(parents=True, exist_ok=True)
         if os.name == "nt":
-            os.startfile(str(target))  # type: ignore[attr-defined]
+            os.startfile(str(folder))  # type: ignore[attr-defined]
         else:
-            subprocess.Popen(["xdg-open", str(target)])
+            subprocess.Popen(["xdg-open", str(folder)])
 
-    def _on_save(self) -> None:
+    def collect_settings(self) -> Optional[AppSettings]:
         provider = self.provider_combo.currentData() or "gemini"
         gemini_model = self.gemini_model_combo.currentText().strip() or "gemini-4-neon"
         openai_url = self.openai_url_edit.text().strip()
@@ -304,14 +395,14 @@ class SettingsDialog(QDialog):
                     "Base URL Tidak Valid",
                     "Base URL OpenAI-Compatible harus diawali http:// atau https://.",
                 )
-                return
+                return None
             if not openai_model:
                 QMessageBox.warning(
                     self,
                     "Model Name Kosong",
                     "Masukkan nama model untuk provider OpenAI-Compatible (mis. gpt-4o-mini).",
                 )
-                return
+                return None
 
         self._settings.llm_provider = provider  # type: ignore[assignment]
         self._settings.gemini_api_key = self.api_key_edit.text().strip()
@@ -321,6 +412,8 @@ class SettingsDialog(QDialog):
         self._settings.openai_model = openai_model or self._settings.openai_model
         self._settings.whisper_model = self.whisper_model_combo.currentText()  # type: ignore[assignment]
         self._settings.whisper_device = self.whisper_device_combo.currentText()  # type: ignore[assignment]
+        self._settings.whisper_language = self.whisper_lang_combo.currentData() or "auto"  # type: ignore[assignment]
+        self._settings.enable_transcript_proofread = self.proofread_chk.isChecked()
         ws_text = self.workspace_edit.text().strip()
         if ws_text:
             self._settings.workspace_dir = Path(ws_text)
@@ -330,7 +423,36 @@ class SettingsDialog(QDialog):
         self._settings.backsound_volume = round(self.bgm_volume_spin.value() / 100.0, 2)
         self._settings.enable_backsound_ducking = self.bgm_ducking_chk.isChecked()
         self._settings.tts_voice = self.tts_voice_combo.currentData() or "id-ID-GadisNeural"
-        self.accept()
+        return self._settings
+
+    def _on_save(self) -> None:
+        updated = self.collect_settings()
+        if updated is not None:
+            self.settings_saved.emit(updated)
 
     def updated_settings(self) -> AppSettings:
         return self._settings
+
+
+class SettingsDialog(QDialog):
+    """Modal compatibility wrapper around SettingsWidget."""
+
+    def __init__(self, settings: AppSettings, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Pengaturan ATRO Creator Studio")
+        self.setMinimumSize(640, 620)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        self.widget = SettingsWidget(settings, embedded=False, parent=self)
+        self.widget.settings_saved.connect(self._on_widget_saved)
+        self.widget.cancelled.connect(self.reject)
+        root.addWidget(self.widget)
+
+    def _on_widget_saved(self, _updated: AppSettings) -> None:
+        self.accept()
+
+    def updated_settings(self) -> AppSettings:
+        return self.widget.updated_settings()
+
+    def __getattr__(self, name: str):
+        return getattr(self.widget, name)

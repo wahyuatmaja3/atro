@@ -189,7 +189,7 @@ class SourceCropSelectorWidget(QWidget):
         layout = self._config.layout
         top_crop, bot_crop = layout.resolve_crops_at_time(self._rel_time_sec)
         boxes: list[tuple[str, CropBoxConfig, QColor, str]] = [
-            ("top", top_crop, QColor("#F97316"), top_crop.label or "Panel Atas / Wajah"),
+            ("top", top_crop, QColor("#7C3AED"), top_crop.label or "Panel Atas / Wajah"),
         ]
         if layout.mode in ("split_screen", "multi_speaker_split", "blurred_frame", "pip_facecam"):
             boxes.append(
@@ -207,22 +207,22 @@ class SourceCropSelectorWidget(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
 
-        p.fillRect(self.rect(), QColor("#12100E"))
+        p.fillRect(self.rect(), QColor("#090A0F"))
         frame_rect = self._compute_display_rect()
         self._frame_rect = frame_rect
 
         if self._frame_qimg is not None and not self._frame_qimg.isNull():
             p.drawImage(frame_rect, self._frame_qimg)
         else:
-            p.fillRect(frame_rect, QColor("#1C1714"))
-            p.setPen(QColor("#A8A29E"))
+            p.fillRect(frame_rect, QColor("#12141C"))
+            p.setPen(QColor("#9CA3AF"))
             p.drawText(
                 frame_rect,
                 Qt.AlignmentFlag.AlignCenter,
                 "Area Sumber Video (16:9)\nPilih Job/Klip atau klik 'Muat Video...' di atas",
             )
 
-        p.setPen(QPen(QColor("#3D2F24"), 1.5))
+        p.setPen(QPen(QColor("#242836"), 1.5))
         p.drawRect(frame_rect)
 
         label_font = QFont("Segoe UI", 9)
@@ -357,22 +357,40 @@ class SourceCropSelectorWidget(QWidget):
 
 
 class LivePreviewCanvas9x16(QWidget):
-    """Real-time 1:1 WYSIWYG 9:16 (or 16:9) Preview Player supporting overlay drag positioning."""
+    """Real-time 1:1 WYSIWYG 9:16 (or 16:9) Preview Player supporting overlay drag, zoom & safe-zone."""
 
     overlay_moved = pyqtSignal()
+    overlay_selected = pyqtSignal(str)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
-        self.setMinimumSize(270, 480)
+        self.setMinimumSize(250, 420)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setMouseTracking(True)
         self._config: Optional[ClipComposerConfig] = None
         self._rendered_qimg: Optional[QImage] = None
         self._canvas_rect = QRectF()
+        self._zoom_factor: float = 1.0
+        self._safe_zone_enabled: bool = False
+        self._selected_overlay: Optional[str] = None
+        self._hovered_overlay: Optional[str] = None
 
         self._drag_overlay: Optional[str] = None
         self._drag_bubble_idx: int = -1
         self._drag_start_canvas_pt = QPointF()
         self._drag_orig_pos: tuple[int, int] = (540, 1520)
+
+    def set_zoom_factor(self, factor: float) -> None:
+        self._zoom_factor = max(0.5, min(1.5, float(factor)))
+        self.update()
+
+    def set_safe_zone_enabled(self, enabled: bool) -> None:
+        self._safe_zone_enabled = bool(enabled)
+        self.update()
+
+    def set_selected_overlay(self, overlay_name: Optional[str]) -> None:
+        self._selected_overlay = overlay_name
+        self.update()
 
     def render_state(
         self,
@@ -407,6 +425,8 @@ class LivePreviewCanvas9x16(QWidget):
         else:
             dw = avail.width()
             dh = dw / aspect
+        dw *= self._zoom_factor
+        dh *= self._zoom_factor
         return QRectF(
             avail.x() + (avail.width() - dw) * 0.5,
             avail.y() + (avail.height() - dh) * 0.5,
@@ -424,58 +444,235 @@ class LivePreviewCanvas9x16(QWidget):
         ly = ((pos.y() - r.y()) / r.height()) * ch
         return QPointF(lx, ly)
 
+    def _logical_to_widget_rect(self, lx: float, ly: float, lw: float, lh: float) -> QRectF:
+        cw = float(self._config.canvas_width if self._config else 1080)
+        ch = float(self._config.canvas_height if self._config else 1920)
+        r = self._canvas_rect
+        if r.width() <= 1 or r.height() <= 1:
+            return QRectF()
+        return QRectF(
+            r.x() + (lx / cw) * r.width(),
+            r.y() + (ly / ch) * r.height(),
+            (lw / cw) * r.width(),
+            (lh / ch) * r.height(),
+        )
+
+    def _resolve_wm_logical_pos(self) -> tuple[int, int]:
+        assert self._config is not None
+        wm = self._config.overlays.watermark
+        cw, ch = self._config.canvas_width, self._config.canvas_height
+        if wm.position == "custom":
+            return int(wm.pos_x), int(wm.pos_y)
+        mapping = {
+            "top_left": (130, 90),
+            "top_right": (cw - 130, 90),
+            "bottom_left": (130, ch - 110),
+            "bottom_right": (cw - 130, ch - 110),
+            "center_split": (cw // 2, int(ch * 0.42)),
+        }
+        return mapping.get(wm.position, (cw - 130, 90))
+
+    def _overlay_logical_boxes(self) -> list[tuple[str, int, QRectF, str, QColor]]:
+        if self._config is None:
+            return []
+        cw = float(self._config.canvas_width)
+        out: list[tuple[str, int, QRectF, str, QColor]] = []
+        for idx, b in enumerate(self._config.overlays.comment_bubbles):
+            if b.enabled:
+                out.append((
+                    "comment_bubble",
+                    idx,
+                    QRectF(b.pos_x - 320.0, b.pos_y - 95.0, 640.0, 190.0),
+                    f"Comment #{idx + 1}",
+                    QColor("#F59E0B"),
+                ))
+        hb = self._config.overlays.hook_banner
+        if hb.enabled:
+            out.append((
+                "hook_banner",
+                -1,
+                QRectF(cw * 0.08, hb.pos_y - 125.0, cw * 0.84, 250.0),
+                "Hook Banner",
+                QColor("#7C3AED"),
+            ))
+        wm = self._config.overlays.watermark
+        if wm.enabled:
+            wx, wy = self._resolve_wm_logical_pos()
+            out.append((
+                "watermark",
+                -1,
+                QRectF(wx - 110.0, wy - 48.0, 220.0, 96.0),
+                "Watermark",
+                QColor("#EC4899"),
+            ))
+        subs = self._config.subtitles
+        if subs.enabled:
+            out.append((
+                "subtitle",
+                -1,
+                QRectF(subs.pos_x - 380.0, subs.pos_y - 95.0, 760.0, 190.0),
+                "Subtitle",
+                QColor("#06B6D4"),
+            ))
+        return out
+
+    def _draw_safe_zone_guides(self, p: QPainter, r: QRectF) -> None:
+        if r.width() <= 10 or r.height() <= 10:
+            return
+        top_zone = QRectF(r.x(), r.y(), r.width(), r.height() * 0.13)
+        bot_zone = QRectF(r.x(), r.y() + r.height() * 0.77, r.width(), r.height() * 0.23)
+        right_zone = QRectF(
+            r.x() + r.width() * 0.84,
+            r.y() + r.height() * 0.42,
+            r.width() * 0.16,
+            r.height() * 0.35,
+        )
+        danger_fill = QColor(239, 68, 68, 32)
+        for z in (top_zone, bot_zone, right_zone):
+            p.fillRect(z, danger_fill)
+
+        p.setPen(QPen(QColor("#06B6D4"), 1.2, Qt.PenStyle.DashLine))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        safe_inner = QRectF(
+            r.x() + r.width() * 0.05,
+            r.y() + r.height() * 0.13,
+            r.width() * 0.79,
+            r.height() * 0.64,
+        )
+        p.drawRect(safe_inner)
+
+        lbl_font = QFont("Segoe UI", 8)
+        lbl_font.setBold(True)
+        p.setFont(lbl_font)
+        p.setPen(QColor("#38BDF8"))
+        p.drawText(
+            QRectF(safe_inner.x() + 4, safe_inner.y() + 2, safe_inner.width() - 8, 18),
+            Qt.AlignmentFlag.AlignLeft,
+            "SAFE ZONE (TikTok / Reels / Shorts)",
+        )
+
     def paintEvent(self, _event) -> None:
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
 
-        p.fillRect(self.rect(), QColor("#12100E"))
+        p.fillRect(self.rect(), QColor("#090A0F"))
         self._canvas_rect = self._compute_canvas_rect()
 
         if self._rendered_qimg is not None and not self._rendered_qimg.isNull():
             p.drawImage(self._canvas_rect, self._rendered_qimg)
         else:
-            p.fillRect(self._canvas_rect, QColor("#1C1714"))
+            p.fillRect(self._canvas_rect, QColor("#12141C"))
+            p.setPen(QColor("#9CA3AF"))
+            p.drawText(
+                self._canvas_rect,
+                Qt.AlignmentFlag.AlignCenter,
+                "Stage 9:16\nPilih klip untuk live preview",
+            )
 
-        p.setPen(QPen(QColor("#F97316"), 1.5))
+        p.setPen(QPen(QColor("#242836"), 1.5))
         p.drawRect(self._canvas_rect)
+
+        if self._safe_zone_enabled:
+            self._draw_safe_zone_guides(p, self._canvas_rect)
+
+        target = self._drag_overlay or self._selected_overlay or self._hovered_overlay
+        if target:
+            for name, idx, lbox, tag, color in self._overlay_logical_boxes():
+                if name != target:
+                    continue
+                if name == "comment_bubble" and self._drag_overlay == "comment_bubble" and idx != self._drag_bubble_idx:
+                    continue
+                wr = self._logical_to_widget_rect(lbox.x(), lbox.y(), lbox.width(), lbox.height())
+                if not wr.isValid():
+                    continue
+                pen_style = Qt.PenStyle.DashLine if self._hovered_overlay == name else Qt.PenStyle.SolidLine
+                p.setPen(QPen(color, 1.6, pen_style))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawRoundedRect(wr, 4.0, 4.0)
+
+                tag_rect = QRectF(wr.left(), max(self._canvas_rect.top() + 2, wr.top() - 18.0), 86.0, 16.0)
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(color)
+                p.drawRoundedRect(tag_rect, 4.0, 4.0)
+                tag_font = QFont("Segoe UI", 8)
+                tag_font.setBold(True)
+                p.setFont(tag_font)
+                p.setPen(QColor("#FFFFFF"))
+                p.drawText(tag_rect, Qt.AlignmentFlag.AlignCenter, tag)
+
+                hs = 6.5
+                p.setBrush(QColor("#FFFFFF"))
+                p.setPen(QPen(color, 1.3))
+                for hx, hy in (
+                    (wr.left(), wr.top()),
+                    (wr.right(), wr.top()),
+                    (wr.left(), wr.bottom()),
+                    (wr.right(), wr.bottom()),
+                ):
+                    p.drawRect(QRectF(hx - hs * 0.5, hy - hs * 0.5, hs, hs))
+                break
+
         p.end()
+
+    def _hit_test_overlay(self, lp: QPointF) -> tuple[Optional[str], int]:
+        if self._config is None:
+            return None, -1
+        for name, idx, lbox, _tag, _col in self._overlay_logical_boxes():
+            if lbox.contains(lp):
+                return name, idx
+        return None, -1
 
     def mousePressEvent(self, event: Optional[QMouseEvent]) -> None:
         if event is None or self._config is None or event.button() != Qt.MouseButton.LeftButton:
             return
         if not self._canvas_rect.contains(event.position()):
+            self._selected_overlay = None
+            self.update()
             return
         lp = self._widget_to_logical(event.position())
         self._drag_start_canvas_pt = lp
-
-        # Hit-test comment bubbles first
-        for idx, b in enumerate(self._config.overlays.comment_bubbles):
-            if b.enabled and abs(lp.x() - b.pos_x) < 340 and abs(lp.y() - b.pos_y) < 110:
-                self._drag_overlay = "comment_bubble"
-                self._drag_bubble_idx = idx
-                self._drag_orig_pos = (b.pos_x, b.pos_y)
-                self.setCursor(Qt.CursorShape.ClosedHandCursor)
-                return
-
-        # Hit-test hook banner (generous hit band for multi-line headline stickers)
-        hb = self._config.overlays.hook_banner
-        if hb.enabled and abs(lp.y() - hb.pos_y) < 165:
+        name, idx = self._hit_test_overlay(lp)
+        self._selected_overlay = name
+        if name:
+            self.overlay_selected.emit(name)
+        if name == "comment_bubble" and idx >= 0:
+            b = self._config.overlays.comment_bubbles[idx]
+            self._drag_overlay = "comment_bubble"
+            self._drag_bubble_idx = idx
+            self._drag_orig_pos = (b.pos_x, b.pos_y)
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+        elif name == "hook_banner":
             self._drag_overlay = "hook_banner"
-            self._drag_orig_pos = (540, hb.pos_y)
+            self._drag_orig_pos = (540, self._config.overlays.hook_banner.pos_y)
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
-            return
-
-        # Hit-test subtitle anchor
-        subs = self._config.subtitles
-        if subs.enabled and abs(lp.y() - subs.pos_y) < 130:
+        elif name == "watermark":
+            self._drag_overlay = "watermark"
+            self._drag_orig_pos = self._resolve_wm_logical_pos()
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+        elif name == "subtitle":
             self._drag_overlay = "subtitle"
-            self._drag_orig_pos = (subs.pos_x, subs.pos_y)
+            self._drag_orig_pos = (self._config.subtitles.pos_x, self._config.subtitles.pos_y)
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
+        self.update()
 
     def mouseMoveEvent(self, event: Optional[QMouseEvent]) -> None:
-        if event is None or self._config is None or self._drag_overlay is None:
+        if event is None or self._config is None:
             return
+        if self._drag_overlay is None:
+            if self._canvas_rect.contains(event.position()):
+                name, _ = self._hit_test_overlay(self._widget_to_logical(event.position()))
+                if name != self._hovered_overlay:
+                    self._hovered_overlay = name
+                    self.update()
+                self.setCursor(Qt.CursorShape.OpenHandCursor if name else Qt.CursorShape.ArrowCursor)
+            else:
+                if self._hovered_overlay is not None:
+                    self._hovered_overlay = None
+                    self.update()
+                self.setCursor(Qt.CursorShape.ArrowCursor)
+            return
+
         lp = self._widget_to_logical(event.position())
         dx = lp.x() - self._drag_start_canvas_pt.x()
         dy = lp.y() - self._drag_start_canvas_pt.y()
@@ -494,11 +691,18 @@ class LivePreviewCanvas9x16(QWidget):
                 60, min(ch - 170, int(round(self._drag_orig_pos[1] + dy)))
             )
             self.overlay_moved.emit()
+        elif self._drag_overlay == "watermark":
+            wm = self._config.overlays.watermark
+            wm.position = "custom"
+            wm.pos_x = max(40, min(cw - 40, int(round(self._drag_orig_pos[0] + dx))))
+            wm.pos_y = max(40, min(ch - 40, int(round(self._drag_orig_pos[1] + dy))))
+            self.overlay_moved.emit()
         elif self._drag_overlay == "subtitle":
             self._config.subtitles.placement_preset = "custom"
             self._config.subtitles.pos_x = max(60, min(cw - 60, int(round(self._drag_orig_pos[0] + dx))))
             self._config.subtitles.pos_y = max(120, min(ch - 80, int(round(self._drag_orig_pos[1] + dy))))
             self.overlay_moved.emit()
+        self.update()
 
     def mouseReleaseEvent(self, _event: Optional[QMouseEvent]) -> None:
         self._drag_overlay = None
