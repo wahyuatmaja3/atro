@@ -1,23 +1,24 @@
-"""WinUI 3 Fluent Dark + Light QSS stylesheet powered by ATRO V2 Design Tokens."""
+"""Modern Dark Creator Studio QSS theme system for ATRO."""
 
 from __future__ import annotations
 
 from atro.ui.tokens import ThemeMode, ThemeTokens, get_theme_tokens
 
 PALETTE = {
-    "bg_base": "#0F0E0D",
-    "bg_nav": "#171514",
-    "bg_surface": "#1E1B19",
-    "bg_elevated": "#26221F",
-    "bg_hover": "#312B27",
-    "border": "#322C28",
-    "border_focus": "#F97316",
-    "text_primary": "#FFFBEB",
-    "text_secondary": "#E7E5E4",
-    "text_muted": "#A8A29E",
-    "accent": "#F97316",
-    "accent_hover": "#EA580C",
-    "accent_pressed": "#C2410C",
+    "bg_base": "#090A0F",
+    "bg_nav": "#12141C",
+    "bg_surface": "#181B26",
+    "bg_elevated": "#1F2332",
+    "bg_hover": "#262B3D",
+    "border": "#242836",
+    "border_focus": "#7C3AED",
+    "text_primary": "#F3F4F6",
+    "text_secondary": "#D1D5DB",
+    "text_muted": "#9CA3AF",
+    "accent": "#7C3AED",
+    "accent_hover": "#8B5CF6",
+    "accent_pressed": "#6D28D9",
+    "accent_secondary": "#06B6D4",
     "success": "#10B981",
     "warning": "#F59E0B",
     "error": "#EF4444",
@@ -25,32 +26,230 @@ PALETTE = {
 
 
 def build_stylesheet(mode: ThemeMode = "dark") -> str:
-    """Return clean Fluent QSS stylesheet for dark (default) or light theme."""
+    """Build cohesive Qt stylesheet for Dark Creator Studio / Light fallback."""
     t: ThemeTokens = get_theme_tokens(mode)
     return f"""
-    QWidget {{
-        background-color: {t.bg_base};
-        color: {t.text_primary};
-        font-family: "Segoe UI Variable Text", "Segoe UI", sans-serif;
-        font-size: 13px;
+    * {{
+        font-family: "Inter", "Plus Jakarta Sans", "Segoe UI", "Roboto", sans-serif;
+        outline: none;
     }}
 
     QMainWindow, QDialog {{
         background-color: {t.bg_base};
+        color: {t.text_primary};
     }}
 
-    /* WinUI 3 Surface Hierarchy */
-    QFrame#TopBar {{
+    QWidget {{
+        color: {t.text_primary};
+        font-size: 13px;
+    }}
+
+    QToolTip {{
+        background-color: {t.bg_elevated};
+        color: {t.text_primary};
+        border: 1px solid {t.border_hover};
+        border-radius: 6px;
+        padding: 5px 9px;
+        font-size: 12px;
+    }}
+
+    QMenu {{
+        background-color: {t.bg_surface};
+        color: {t.text_primary};
+        border: 1px solid {t.border_hover};
+        border-radius: 10px;
+        padding: 6px;
+    }}
+    QMenu::item {{
+        padding: 7px 14px;
+        border-radius: 6px;
+        margin: 1px 0;
+    }}
+    QMenu::item:selected {{
+        background-color: {t.accent};
+        color: {t.accent_text};
+    }}
+    QMenu::separator {{
+        height: 1px;
+        background: {t.border};
+        margin: 5px 8px;
+    }}
+
+    /* ---------------- Sidebar Navigation Rail ---------------- */
+    QFrame#Sidebar {{
         background-color: {t.bg_nav};
+        border-right: 1px solid {t.border};
+    }}
+    QFrame#TopBar, QFrame#StudioTopBar {{
+        background-color: {t.bg_nav};
+        border-bottom: 1px solid {t.border};
+    }}
+    QLabel#BrandTitle {{
+        font-size: 16px;
+        font-weight: 800;
+        color: {t.text_primary};
+        letter-spacing: -0.3px;
+    }}
+    QLabel#VersionPill {{
+        background-color: {t.bg_selected};
+        border: 1px solid {t.border_hero};
+        border-radius: 9px;
+        padding: 2px 8px;
+        font-size: 10px;
+        font-weight: 700;
+        color: {t.accent_hover};
+    }}
+    QLabel#SidebarSectionLabel {{
+        color: {t.text_muted};
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: 0.9px;
+        padding: 8px 10px 2px 10px;
+    }}
+    QPushButton#SidebarNavBtn {{
+        background-color: transparent;
+        border: 1px solid transparent;
+        border-radius: 10px;
+        padding: 10px 12px;
+        text-align: left;
+        color: {t.text_muted};
+        font-size: 13px;
+        font-weight: 600;
+    }}
+    QPushButton#SidebarNavBtn:hover {{
+        background-color: {t.bg_hover};
+        color: {t.text_primary};
+    }}
+    QPushButton#SidebarNavBtn[active="true"], QPushButton#SidebarNavBtn:checked {{
+        background-color: {t.bg_selected};
+        border: 1px solid {t.border_hero};
+        color: {t.text_primary};
+        font-weight: 700;
+    }}
+    QPushButton#SidebarCollapseBtn {{
+        background-color: {t.bg_surface};
         border: 1px solid {t.border};
-        border-bottom: 2px solid {t.accent};
-        border-radius: 12px;
+        border-radius: 8px;
+        padding: 5px;
+        color: {t.text_muted};
+    }}
+    QPushButton#SidebarCollapseBtn:hover {{
+        background-color: {t.bg_hover};
+        color: {t.text_primary};
+        border-color: {t.border_hover};
     }}
 
-    QFrame#Card, QFrame#WinUICard, QFrame#JobCard, QFrame#ClipCard {{
+    /* Legacy / Helper Badges */
+    QPushButton#StepperNode {{
+        background-color: transparent;
+        border: 1px solid transparent;
+        border-radius: 10px;
+        padding: 6px 12px;
+        color: {t.text_muted};
+        font-weight: 600;
+    }}
+    QPushButton#StepperNode[active="true"] {{
+        background-color: {t.bg_selected};
+        border: 1px solid {t.border_hero};
+        color: {t.text_primary};
+        font-weight: 700;
+    }}
+    QLabel#StepBadge {{
+        background-color: {t.bg_selected};
+        color: {t.accent_secondary};
+        border: 1px solid {t.accent_secondary_border};
+        border-radius: 8px;
+        padding: 3px 10px;
+        font-size: 11px;
+        font-weight: 700;
+    }}
+    QLabel#StageNode {{
         background-color: {t.bg_surface};
         border: 1px solid {t.border};
         border-radius: 10px;
+        padding: 4px 10px;
+        font-size: 11px;
+        font-weight: 600;
+        color: {t.text_muted};
+    }}
+    QLabel#StageNode[state="active"] {{
+        background-color: {t.bg_selected};
+        border-color: {t.accent};
+        color: {t.text_primary};
+    }}
+    QLabel#StageNode[state="done"] {{
+        background-color: {t.success_bg};
+        border-color: {t.success_border};
+        color: {t.success};
+    }}
+
+    /* ---------------- Cards & Panels ---------------- */
+    QFrame#Card, QFrame#WinUICard, QFrame#ProjectCard {{
+        background-color: {t.bg_surface};
+        border: 1px solid {t.border};
+        border-radius: 12px;
+    }}
+    QFrame#ProjectCard:hover {{
+        border-color: {t.border_hover};
+        background-color: {t.bg_elevated};
+    }}
+    QFrame#HeroCard, QFrame#HeroDropZone {{
+        background-color: {t.bg_hero};
+        border: 1px solid {t.border_hero};
+        border-radius: 16px;
+    }}
+    QFrame#HeroDropZone[dragActive="true"] {{
+        border: 2px dashed {t.accent_secondary};
+        background-color: {t.accent_secondary_bg};
+    }}
+    QFrame#JobCard, QFrame#ClipCard {{
+        background-color: {t.bg_surface};
+        border: 1px solid {t.border};
+        border-radius: 12px;
+    }}
+    QFrame#JobCard:hover, QFrame#ClipCard:hover {{
+        background-color: {t.bg_elevated};
+        border-color: {t.border_hover};
+    }}
+    QFrame#JobCard[selected="true"], QFrame#ClipCard[selected="true"] {{
+        background-color: {t.bg_selected};
+        border: 1px solid {t.accent};
+    }}
+    QFrame#StyleCard, QFrame#VisualChoiceCard {{
+        background-color: {t.bg_surface};
+        border: 1px solid {t.border};
+        border-radius: 10px;
+    }}
+    QFrame#StyleCard:hover, QFrame#VisualChoiceCard:hover {{
+        background-color: {t.bg_elevated};
+        border-color: {t.border_hover};
+    }}
+    QFrame#StyleCard[selected="true"], QFrame#VisualChoiceCard[selected="true"] {{
+        background-color: {t.bg_selected};
+        border: 2px solid {t.accent};
+    }}
+
+    QFrame#QuickToggleRow {{
+        background-color: {t.bg_nav};
+        border: 1px solid {t.border};
+        border-radius: 10px;
+    }}
+    QFrame#StudioStage {{
+        background-color: {t.bg_base};
+    }}
+    QFrame#StudioPlayerBar {{
+        background-color: {t.bg_nav};
+        border: 1px solid {t.border};
+        border-radius: 12px;
+    }}
+    QFrame#TranscriptPanel, QFrame#InspectorPanel {{
+        background-color: {t.bg_nav};
+        border: 1px solid {t.border};
+        border-radius: 12px;
+    }}
+    QFrame#TimelinePanel {{
+        background-color: {t.bg_input};
+        border-top: 1px solid {t.border};
     }}
 
     QFrame#FloatingBar {{
@@ -58,399 +257,348 @@ def build_stylesheet(mode: ThemeMode = "dark") -> str:
         border: 1px solid {t.border_hero};
         border-radius: 12px;
     }}
-
     QFrame#ToastBanner {{
         background-color: {t.bg_elevated};
-        border: 1px solid {t.border};
-        border-left: 4px solid {t.accent};
-        border-radius: 10px;
-    }}
-    QFrame#ToastBanner[tone="ok"] {{
-        border-left: 4px solid {t.success};
-    }}
-    QFrame#ToastBanner[tone="warn"] {{
-        border-left: 4px solid {t.warning};
-    }}
-    QFrame#ToastBanner[tone="error"] {{
-        border-left: 4px solid {t.error};
-    }}
-    QFrame#ToastBanner[tone="info"] {{
-        border-left: 4px solid {t.info};
-    }}
-    QFrame#ToastBanner QLabel {{
-        background: transparent;
-    }}
-
-    QFrame#HeroCard {{
-        background-color: {t.bg_hero};
-        border: 1px solid {t.border_hero};
-        border-left: 4px solid {t.accent};
+        border: 1px solid {t.border_hover};
         border-radius: 12px;
     }}
+    QFrame#ToastBanner[tone="ok"] {{ border-color: {t.success_border}; background-color: {t.success_bg}; }}
+    QFrame#ToastBanner[tone="warn"] {{ border-color: {t.warning_border}; background-color: {t.warning_bg}; }}
+    QFrame#ToastBanner[tone="err"] {{ border-color: {t.error_border}; background-color: {t.error_bg}; }}
+    QFrame#ToastBanner[tone="info"] {{ border-color: {t.info_border}; background-color: {t.info_bg}; }}
 
-    QFrame#StyleCard {{
-        background-color: {t.bg_surface};
-        border: 1px solid {t.border};
-        border-radius: 10px;
-    }}
-
-    QFrame#StyleCard:hover {{
-        background-color: {t.bg_hover};
-        border: 1px solid {t.border_hero};
-    }}
-
-    QFrame#StyleCard[selected="true"] {{
-        background-color: {t.bg_selected};
-        border: 2px solid {t.accent};
-    }}
-
-    QFrame#JobCard[selected="true"] {{
-        background-color: {t.bg_selected};
-        border: 2px solid {t.accent};
-    }}
-
-    QFrame#JobCard:hover {{
-        background-color: {t.bg_elevated};
-        border: 1px solid {t.border_hover};
-    }}
-
-    QFrame#JobCard[selected="true"]:hover {{
-        border: 2px solid {t.accent_hover};
-    }}
-
-    QFrame#AlertBanner[severity="error"] {{
-        background-color: {t.error_bg};
-        border: 1px solid {t.error_border};
-        border-radius: 10px;
-    }}
-
-    QFrame#AlertBanner[severity="warning"] {{
+    QFrame#AlertBanner {{
         background-color: {t.warning_bg};
         border: 1px solid {t.warning_border};
         border-radius: 10px;
+        padding: 8px 12px;
+    }}
+    QFrame#AlertBanner[tone="err"] {{
+        background-color: {t.error_bg};
+        border: 1px solid {t.error_border};
+    }}
+    QFrame#AlertBanner[tone="ok"] {{
+        background-color: {t.success_bg};
+        border: 1px solid {t.success_border};
     }}
 
-    QFrame#AlertBanner QLabel {{
-        background: transparent;
-    }}
-
-    /* Typography */
-    QLabel {{
-        background-color: transparent;
-    }}
-
-    QLabel#BrandTitle {{
-        font-size: 18px;
-        font-weight: 800;
-        letter-spacing: 1px;
-        color: {t.accent_text};
-        background-color: {t.accent};
-        border-radius: 8px;
-        padding: 4px 12px;
-    }}
-
+    /* ---------------- Typography ---------------- */
     QLabel#HeroTitle {{
-        font-size: 18px;
-        font-weight: 700;
+        font-size: 24px;
+        font-weight: 800;
         color: {t.text_primary};
+        letter-spacing: -0.4px;
     }}
-
     QLabel#SectionTitle {{
         font-size: 14px;
         font-weight: 700;
         color: {t.text_primary};
     }}
-
-    QLabel#StepBadge {{
-        background-color: {t.bg_selected};
-        color: {t.accent};
-        border: 1px solid {t.border_hero};
-        border-radius: 8px;
-        padding: 3px 10px;
-        font-size: 12px;
-        font-weight: 700;
-    }}
-
-    QLabel#MutedText {{
-        color: {t.text_muted};
-        font-size: 12px;
-    }}
-
     QLabel#FieldLabel {{
+        font-size: 12px;
+        font-weight: 600;
         color: {t.text_secondary};
+    }}
+    QLabel#MutedText {{
         font-size: 12px;
-        font-weight: 600;
-    }}
-
-    QLabel#VersionPill {{
-        background-color: {t.bg_elevated};
-        color: {t.accent};
-        border: 1px solid {t.border};
-        border-radius: 6px;
-        padding: 3px 8px;
-        font-size: 11px;
-        font-weight: 600;
-    }}
-
-    /* WinUI 3 Stepper Bar Nodes */
-    QPushButton#StepperNode {{
-        background-color: {t.bg_elevated};
         color: {t.text_muted};
-        border: 1px solid {t.border};
-        border-radius: 8px;
-        padding: 6px 11px;
-        font-size: 12px;
-        font-weight: 600;
     }}
-
-    QPushButton#StepperNode:hover {{
-        background-color: {t.bg_hover};
-        color: {t.text_primary};
-        border: 1px solid {t.border_hover};
-    }}
-
-    QPushButton#StepperNode[active="true"] {{
-        background-color: {t.accent};
-        color: {t.accent_text};
-        border: 1px solid {t.accent};
-        font-weight: 700;
-    }}
-
-    QPushButton#StepperNode[done="true"] {{
-        background-color: {t.bg_selected};
-        color: {t.accent};
-        border: 1px solid {t.border_hero};
-        font-weight: 600;
-    }}
-
-    /* Stage Progress Indicators */
-    QLabel#StageNode {{
-        border-radius: 7px;
-        padding: 5px 10px;
-        font-size: 12px;
-        font-weight: 600;
-        background-color: {t.bg_elevated};
-        color: {t.text_muted};
-        border: 1px solid {t.border};
-    }}
-
-    QLabel#StageNode[state="active"] {{
-        background-color: {t.bg_selected};
-        color: {t.accent};
-        border: 1px solid {t.accent};
-    }}
-
-    QLabel#StageNode[state="done"] {{
-        background-color: {t.success_bg};
-        color: {t.success};
-        border: 1px solid {t.success_border};
-    }}
-
-    /* Status & Preflight Pills */
     QLabel#StatusPill {{
-        border-radius: 7px;
-        padding: 4px 10px;
+        background-color: {t.bg_elevated};
+        border: 1px solid {t.border};
+        border-radius: 10px;
+        padding: 3px 10px;
         font-size: 11px;
         font-weight: 700;
+        color: {t.text_secondary};
     }}
-
     QLabel#StatusPill[tone="ok"] {{
         background-color: {t.success_bg};
+        border-color: {t.success_border};
         color: {t.success};
-        border: 1px solid {t.success_border};
     }}
-
     QLabel#StatusPill[tone="warn"] {{
         background-color: {t.warning_bg};
+        border-color: {t.warning_border};
         color: {t.warning};
-        border: 1px solid {t.warning_border};
     }}
-
-    QLabel#StatusPill[tone="error"] {{
+    QLabel#StatusPill[tone="err"] {{
         background-color: {t.error_bg};
+        border-color: {t.error_border};
         color: {t.error};
-        border: 1px solid {t.error_border};
     }}
-
-    QLabel#StatusPill[tone="info"] {{
-        background-color: {t.bg_selected};
-        color: {t.accent};
-        border: 1px solid {t.border_hero};
+    QLabel#StatusPill[tone="cyan"] {{
+        background-color: {t.accent_secondary_bg};
+        border-color: {t.accent_secondary_border};
+        color: {t.accent_secondary};
     }}
-
-    QLabel#StatusPill[tone="neutral"] {{
+    QLabel#ViralityBadge {{
+        background-color: {t.success_bg};
+        border: 1px solid {t.success_border};
+        border-radius: 10px;
+        padding: 4px 10px;
+        font-size: 12px;
+        font-weight: 800;
+        color: {t.success};
+    }}
+    QLabel#ViralityBadge[tier="mid"] {{
+        background-color: {t.warning_bg};
+        border-color: {t.warning_border};
+        color: {t.warning};
+    }}
+    QLabel#ViralityBadge[tier="low"] {{
         background-color: {t.bg_elevated};
+        border-color: {t.border_hover};
         color: {t.text_secondary};
-        border: 1px solid {t.border};
     }}
 
-    /* Inputs */
-    QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox, QPlainTextEdit {{
+    /* ---------------- Inputs ---------------- */
+    QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QTextEdit {{
         background-color: {t.bg_input};
-        color: {t.text_primary};
         border: 1px solid {t.border};
-        border-radius: 7px;
-        padding: 6px 10px;
-        min-height: 22px;
+        border-radius: 8px;
+        padding: 7px 11px;
+        color: {t.text_primary};
         selection-background-color: {t.accent};
+        min-height: 18px;
     }}
-
-    QLineEdit:hover, QSpinBox:hover, QDoubleSpinBox:hover, QComboBox:hover {{
-        background-color: {t.bg_elevated};
+    QLineEdit#HeroInput {{
+        background-color: {t.bg_base};
         border: 1px solid {t.border_hover};
+        border-radius: 12px;
+        padding: 11px 16px;
+        font-size: 14px;
+        min-height: 24px;
     }}
-
-    QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {{
-        border: 1px solid {t.border_hover};
-        border-bottom: 2px solid {t.accent};
+    QLineEdit#HeroInput:focus {{
+        border: 1.5px solid {t.accent};
     }}
-
+    QLineEdit#TitleEditable {{
+        background-color: transparent;
+        border: 1px solid transparent;
+        border-radius: 8px;
+        padding: 4px 8px;
+        font-size: 14px;
+        font-weight: 700;
+        color: {t.text_primary};
+    }}
+    QLineEdit#TitleEditable:hover {{
+        background-color: {t.bg_surface};
+        border-color: {t.border};
+    }}
+    QLineEdit#TitleEditable:focus {{
+        background-color: {t.bg_input};
+        border-color: {t.accent};
+    }}
+    QLineEdit:hover, QComboBox:hover, QSpinBox:hover, QDoubleSpinBox:hover, QTextEdit:hover {{
+        border-color: {t.border_hover};
+    }}
+    QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QTextEdit:focus {{
+        border: 1.5px solid {t.accent};
+    }}
     QComboBox::drop-down {{
         border: none;
-        width: 22px;
+        width: 24px;
     }}
-
     QComboBox QAbstractItemView {{
         background-color: {t.bg_surface};
-        color: {t.text_primary};
-        border: 1px solid {t.border};
+        border: 1px solid {t.border_hover};
+        border-radius: 8px;
+        padding: 4px;
         selection-background-color: {t.accent};
         selection-color: {t.accent_text};
-        outline: 0;
     }}
 
-    QSpinBox::up-button, QSpinBox::down-button,
-    QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{
-        width: 18px;
-        border: none;
-        background: transparent;
-    }}
-
-    /* Buttons */
+    /* ---------------- Buttons & Chips ---------------- */
     QPushButton {{
         background-color: {t.bg_elevated};
-        color: {t.text_primary};
         border: 1px solid {t.border};
-        border-radius: 7px;
+        border-radius: 8px;
         padding: 7px 14px;
+        color: {t.text_primary};
         font-weight: 600;
     }}
-
     QPushButton:hover {{
         background-color: {t.bg_hover};
-        border: 1px solid {t.border_hover};
+        border-color: {t.border_hover};
     }}
-
     QPushButton:pressed {{
         background-color: {t.bg_surface};
     }}
-
     QPushButton:disabled {{
-        background-color: {t.bg_base};
         color: {t.text_muted};
-        border: 1px solid {t.border};
+        background-color: {t.bg_nav};
+        border-color: {t.border};
     }}
 
     QPushButton#PrimaryButton, QPushButton#HeroButton {{
         background-color: {t.accent};
-        color: {t.accent_text};
         border: 1px solid {t.accent};
+        color: {t.accent_text};
         font-weight: 700;
-        font-size: 13px;
-        padding: 9px 18px;
-        border-radius: 8px;
     }}
-
     QPushButton#HeroButton {{
+        border-radius: 12px;
+        padding: 11px 22px;
         font-size: 14px;
-        padding: 10px 22px;
     }}
-
     QPushButton#PrimaryButton:hover, QPushButton#HeroButton:hover {{
         background-color: {t.accent_hover};
+        border-color: {t.accent_hover};
     }}
-
     QPushButton#PrimaryButton:pressed, QPushButton#HeroButton:pressed {{
         background-color: {t.accent_pressed};
+        border-color: {t.accent_pressed};
+    }}
+
+    QPushButton#CyanButton {{
+        background-color: {t.accent_secondary_bg};
+        border: 1px solid {t.accent_secondary_border};
+        color: {t.accent_secondary};
+        font-weight: 700;
+    }}
+    QPushButton#CyanButton:hover, QPushButton#CyanButton:checked {{
+        background-color: {t.accent_secondary};
+        color: #061319;
+    }}
+
+    QPushButton#SmallAction {{
+        background-color: {t.bg_surface};
+        border: 1px solid {t.border};
+        border-radius: 8px;
+        padding: 5px 11px;
+        font-size: 12px;
+        font-weight: 600;
+    }}
+    QPushButton#SmallAction:hover {{
+        background-color: {t.bg_hover};
+        border-color: {t.border_hover};
+    }}
+    QPushButton#SmallAction:checked {{
+        background-color: {t.bg_selected};
+        border-color: {t.accent};
+        color: {t.text_primary};
+    }}
+
+    QPushButton#GhostButton {{
+        background-color: transparent;
+        border: 1px solid transparent;
+        border-radius: 8px;
+        padding: 6px 10px;
+        color: {t.text_secondary};
+    }}
+    QPushButton#GhostButton:hover {{
+        background-color: {t.bg_hover};
+        color: {t.text_primary};
+    }}
+
+    QPushButton#ModeSwitch {{
+        background-color: transparent;
+        border: none;
+        border-radius: 8px;
+        padding: 6px 12px;
+        color: {t.text_muted};
+        font-weight: 700;
+        font-size: 12px;
+    }}
+    QPushButton#ModeSwitch:checked {{
+        background-color: {t.accent};
+        color: {t.accent_text};
+    }}
+
+    QPushButton#DurationChip {{
+        background-color: {t.bg_surface};
+        border: 1px solid {t.border};
+        border-radius: 14px;
+        padding: 5px 14px;
+        color: {t.text_secondary};
+        font-size: 12px;
+        font-weight: 700;
+    }}
+    QPushButton#DurationChip:hover {{
+        border-color: {t.border_hover};
+        background-color: {t.bg_hover};
+    }}
+    QPushButton#DurationChip:checked {{
+        background-color: {t.accent};
+        border-color: {t.accent};
+        color: {t.accent_text};
     }}
 
     QPushButton#DangerButton {{
         background-color: {t.error_bg};
-        color: {t.error};
         border: 1px solid {t.error_border};
-    }}
-
-    QPushButton#SmallAction {{
-        padding: 5px 10px;
-        font-size: 12px;
-        border-radius: 7px;
-    }}
-
-    QPushButton#ModeSwitch {{
-        background-color: {t.bg_elevated};
-        color: {t.text_secondary};
-        border: 1px solid {t.border};
-        border-radius: 7px;
-        padding: 5px 12px;
-        font-size: 12px;
-        font-weight: 600;
-    }}
-
-    QPushButton#ModeSwitch:hover {{
-        color: {t.text_primary};
-        background-color: {t.bg_hover};
-    }}
-
-    QPushButton#ModeSwitch:checked {{
-        background-color: {t.accent};
-        color: {t.accent_text};
-        border: 1px solid {t.accent};
+        color: {t.error};
         font-weight: 700;
     }}
-
-    /* Progress Bar */
-    QProgressBar {{
-        background-color: {t.bg_elevated};
-        border: none;
-        border-radius: 4px;
-        min-height: 7px;
-        max-height: 7px;
-        text-align: center;
+    QPushButton#DangerButton:hover {{
+        background-color: {t.error};
+        color: #FFFFFF;
     }}
 
-    QProgressBar::chunk {{
-        background-color: {t.accent};
-        border-radius: 4px;
+    /* Interactive Transcript Word Chips */
+    QPushButton#WordChip {{
+        background-color: {t.bg_surface};
+        border: 1px solid transparent;
+        border-radius: 6px;
+        padding: 3px 6px;
+        color: {t.text_secondary};
+        font-size: 12px;
+        font-weight: 500;
     }}
-    QProgressBar[tone="ok"]::chunk {{ background-color: {t.success}; }}
-    QProgressBar[tone="error"]::chunk {{ background-color: {t.error}; }}
-    QProgressBar[tone="warn"]::chunk {{ background-color: {t.warning}; }}
+    QPushButton#WordChip:hover {{
+        background-color: {t.bg_hover};
+        border-color: {t.border_hover};
+        color: {t.text_primary};
+    }}
+    QPushButton#WordChip[active="true"] {{
+        background-color: {t.accent_secondary_bg};
+        border: 1px solid {t.accent_secondary};
+        color: {t.accent_secondary};
+        font-weight: 700;
+    }}
+    QPushButton#WordChip[edited="true"] {{
+        border-bottom: 2px solid {t.accent};
+    }}
 
-    /* Checkboxes */
+    /* ---------------- CheckBox / Progress / Tabs ---------------- */
     QCheckBox {{
         spacing: 8px;
-        color: {t.text_primary};
-        font-size: 12px;
-        background-color: transparent;
+        color: {t.text_secondary};
+        font-weight: 500;
     }}
-
     QCheckBox::indicator {{
-        width: 16px;
-        height: 16px;
-        border-radius: 4px;
-        border: 1px solid {t.border_hover};
+        width: 17px;
+        height: 17px;
+        border-radius: 5px;
+        border: 1.5px solid {t.border_hover};
         background-color: {t.bg_input};
     }}
-    QCheckBox::indicator:hover {{ border: 1px solid {t.accent}; }}
+    QCheckBox::indicator:hover {{ border-color: {t.accent}; }}
     QCheckBox::indicator:checked {{
+        border-color: {t.accent};
         background-color: {t.accent};
-        border: 1px solid {t.accent};
     }}
 
-    /* Tabs */
+    QProgressBar {{
+        background-color: {t.bg_input};
+        border: 1px solid {t.border};
+        border-radius: 6px;
+        text-align: center;
+        color: {t.text_primary};
+        font-weight: 700;
+        font-size: 11px;
+        min-height: 12px;
+        max-height: 16px;
+    }}
+    QProgressBar::chunk {{
+        background-color: {t.accent};
+        border-radius: 5px;
+    }}
+
     QTabWidget::pane {{
         border: none;
-        border-top: 2px solid {t.border};
+        border-top: 1px solid {t.border};
         background-color: transparent;
         padding-top: 8px;
     }}
@@ -458,11 +606,12 @@ def build_stylesheet(mode: ThemeMode = "dark") -> str:
     QTabBar::tab {{
         background-color: transparent;
         color: {t.text_muted};
-        padding: 8px 13px;
-        margin-right: 4px;
+        padding: 8px 12px;
+        margin-right: 2px;
         border: none;
-        border-bottom: 3px solid transparent;
+        border-bottom: 2px solid transparent;
         font-weight: 600;
+        font-size: 12px;
     }}
     QTabBar::tab:hover {{
         color: {t.text_primary};
@@ -472,22 +621,20 @@ def build_stylesheet(mode: ThemeMode = "dark") -> str:
     }}
     QTabBar::tab:selected {{
         color: {t.text_primary};
-        border-bottom: 3px solid {t.accent};
+        border-bottom: 2px solid {t.accent};
         font-weight: 700;
     }}
 
-    /* Log Viewer */
+    /* ---------------- Log, Scroll, Splitter, Tables, Sliders ---------------- */
     QPlainTextEdit#LogEditor {{
         background-color: {t.bg_input};
         color: {t.text_secondary};
         border: 1px solid {t.border};
-        border-radius: 8px;
-        padding: 8px;
+        border-radius: 10px;
+        padding: 10px;
         font-family: "Cascadia Code", "Consolas", monospace;
         font-size: 12px;
     }}
-
-    /* Scroll Area & Splitter */
     QScrollArea {{
         border: none;
         background-color: transparent;
@@ -497,19 +644,20 @@ def build_stylesheet(mode: ThemeMode = "dark") -> str:
     }}
     QSplitter::handle {{
         background-color: {t.border};
-        width: 3px;
+        width: 2px;
+        height: 2px;
     }}
     QSplitter::handle:hover {{
         background-color: {t.accent};
     }}
     QScrollBar:vertical {{
         background-color: transparent;
-        width: 8px;
+        width: 6px;
         margin: 2px;
     }}
     QScrollBar::handle:vertical {{
         background-color: {t.border_hover};
-        border-radius: 4px;
+        border-radius: 3px;
         min-height: 28px;
     }}
     QScrollBar::handle:vertical:hover {{ background-color: {t.accent}; }}
@@ -518,22 +666,38 @@ def build_stylesheet(mode: ThemeMode = "dark") -> str:
         background: none;
         height: 0px;
     }}
+    QScrollBar:horizontal {{
+        background-color: transparent;
+        height: 6px;
+        margin: 2px;
+    }}
+    QScrollBar::handle:horizontal {{
+        background-color: {t.border_hover};
+        border-radius: 3px;
+        min-width: 28px;
+    }}
+    QScrollBar::handle:horizontal:hover {{ background-color: {t.accent}; }}
+    QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal,
+    QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
+        background: none;
+        width: 0px;
+    }}
 
-    /* Studio GroupBoxes, Lists & Sliders */
     QGroupBox {{
         border: 1px solid {t.border};
         border-radius: 10px;
         margin-top: 12px;
-        padding: 12px 12px 10px 12px;
+        padding: 12px 10px 10px 10px;
         font-weight: 700;
+        font-size: 12px;
         color: {t.text_primary};
         background-color: {t.bg_surface};
     }}
     QGroupBox::title {{
         subcontrol-origin: margin;
-        left: 12px;
-        padding: 0 8px;
-        color: {t.accent};
+        left: 10px;
+        padding: 0 6px;
+        color: {t.accent_secondary};
     }}
 
     QListWidget, QTableWidget {{
@@ -543,33 +707,43 @@ def build_stylesheet(mode: ThemeMode = "dark") -> str:
         gridline-color: {t.border};
         color: {t.text_primary};
     }}
+    QListWidget::item {{
+        padding: 6px 8px;
+        border-radius: 6px;
+    }}
+    QListWidget::item:selected {{
+        background-color: {t.bg_selected};
+        color: {t.text_primary};
+    }}
     QHeaderView::section {{
         background-color: {t.bg_elevated};
-        color: {t.accent};
+        color: {t.text_secondary};
         border: none;
         border-bottom: 1px solid {t.border};
         padding: 6px 8px;
         font-weight: 700;
+        font-size: 11px;
     }}
 
     QSlider::groove:horizontal {{
-        height: 6px;
+        height: 5px;
         background: {t.bg_elevated};
-        border-radius: 3px;
+        border-radius: 2px;
     }}
     QSlider::sub-page:horizontal {{
         background: {t.accent};
-        border-radius: 3px;
+        border-radius: 2px;
     }}
     QSlider::handle:horizontal {{
-        background: {t.accent};
-        border: 2px solid {t.accent_text};
-        width: 15px;
-        height: 15px;
+        background: {t.text_primary};
+        border: 2px solid {t.accent};
+        width: 14px;
+        height: 14px;
         margin: -5px 0;
-        border-radius: 8px;
+        border-radius: 7px;
     }}
     QSlider::handle:horizontal:hover {{
         background: {t.accent_hover};
+        border-color: {t.text_primary};
     }}
     """

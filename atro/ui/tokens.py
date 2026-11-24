@@ -1,4 +1,4 @@
-"""Centralized ATRO V2 Fluent Design Tokens (Dark & Light Themes + Spacing + Radii)."""
+"""Design tokens for ATRO Dark Creator Studio UI."""
 
 from __future__ import annotations
 
@@ -14,14 +14,12 @@ SPACE_LG = 16
 SPACE_XL = 24
 
 RADIUS_SM = 6
-RADIUS_MD = 10
-RADIUS_LG = 14
+RADIUS_MD = 8
+RADIUS_LG = 12
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class ThemeTokens:
-    """Strongly typed Fluent color palette matching Dark and Light surfaces."""
-
     mode: ThemeMode
     bg_base: str
     bg_nav: str
@@ -41,6 +39,9 @@ class ThemeTokens:
     accent_hover: str
     accent_pressed: str
     accent_text: str
+    accent_secondary: str
+    accent_secondary_bg: str
+    accent_secondary_border: str
     success: str
     success_bg: str
     success_border: str
@@ -57,73 +58,78 @@ class ThemeTokens:
 
 DARK_TOKENS = ThemeTokens(
     mode="dark",
-    bg_base="#0F0E0D",
-    bg_nav="#171514",
-    bg_surface="#1E1B19",
-    bg_elevated="#26221F",
-    bg_hover="#312B27",
-    bg_input="#151311",
-    bg_hero="#1D1612",
-    bg_selected="#2B1D14",
-    border="#322C28",
-    border_hover="#574A40",
-    border_hero="#6B3B1D",
-    text_primary="#FFFBEB",
-    text_secondary="#E7E5E4",
-    text_muted="#A8A29E",
-    accent="#F97316",
-    accent_hover="#EA580C",
-    accent_pressed="#C2410C",
+    bg_base="#090A0F",
+    bg_nav="#12141C",
+    bg_surface="#181B26",
+    bg_elevated="#1F2332",
+    bg_hover="#262B3D",
+    bg_input="#0D0F16",
+    bg_hero="#131624",
+    bg_selected="#231B3D",
+    border="#242836",
+    border_hover="#373E54",
+    border_hero="#6D28D9",
+    text_primary="#F3F4F6",
+    text_secondary="#D1D5DB",
+    text_muted="#9CA3AF",
+    accent="#7C3AED",
+    accent_hover="#8B5CF6",
+    accent_pressed="#6D28D9",
     accent_text="#FFFFFF",
+    accent_secondary="#06B6D4",
+    accent_secondary_bg="#0B2530",
+    accent_secondary_border="#0891B2",
     success="#10B981",
-    success_bg="#0F2A22",
-    success_border="#1B5E48",
+    success_bg="#0B2920",
+    success_border="#059669",
     warning="#F59E0B",
-    warning_bg="#2B1F11",
-    warning_border="#9A3412",
+    warning_bg="#2B1F0A",
+    warning_border="#D97706",
     error="#EF4444",
-    error_bg="#2A1616",
-    error_border="#7F1D1D",
-    info="#38BDF8",
-    info_bg="#142333",
-    info_border="#1D4E73",
+    error_bg="#2C1216",
+    error_border="#DC2626",
+    info="#06B6D4",
+    info_bg="#0B2530",
+    info_border="#0E7490",
 )
 
 LIGHT_TOKENS = ThemeTokens(
     mode="light",
-    bg_base="#FAF8F5",
+    bg_base="#F4F5F8",
     bg_nav="#FFFFFF",
     bg_surface="#FFFFFF",
-    bg_elevated="#F3EEE9",
-    bg_hover="#EAE2DA",
-    bg_input="#FFFFFF",
-    bg_hero="#FFF7ED",
-    bg_selected="#FFEDD5",
-    border="#E5DDD5",
-    border_hover="#CBBCAF",
-    border_hero="#FDBA74",
-    text_primary="#1C1917",
-    text_secondary="#44403C",
-    text_muted="#78716C",
-    accent="#EA580C",
-    accent_hover="#C2410C",
-    accent_pressed="#9A3412",
+    bg_elevated="#EEF1F6",
+    bg_hover="#E5E9F2",
+    bg_input="#F9FAFB",
+    bg_hero="#F3F0FF",
+    bg_selected="#EDE9FE",
+    border="#CBD5E1",
+    border_hover="#94A3B8",
+    border_hero="#8B5CF6",
+    text_primary="#0F172A",
+    text_secondary="#334155",
+    text_muted="#64748B",
+    accent="#7C3AED",
+    accent_hover="#6D28D9",
+    accent_pressed="#5B21B6",
     accent_text="#FFFFFF",
+    accent_secondary="#0891B2",
+    accent_secondary_bg="#ECFEFF",
+    accent_secondary_border="#06B6D4",
     success="#059669",
     success_bg="#ECFDF5",
-    success_border="#A7F3D0",
+    success_border="#6EE7B7",
     warning="#D97706",
     warning_bg="#FFFBEB",
-    warning_border="#FDE68A",
+    warning_border="#FCD34D",
     error="#DC2626",
     error_bg="#FEF2F2",
-    error_border="#FECACA",
+    error_border="#FCA5A5",
     info="#0284C7",
     info_bg="#F0F9FF",
-    info_border="#BAE6FD",
+    info_border="#7DD3FC",
 )
 
 
 def get_theme_tokens(mode: ThemeMode = "dark") -> ThemeTokens:
-    """Return dark or light `ThemeTokens`."""
     return LIGHT_TOKENS if mode == "light" else DARK_TOKENS

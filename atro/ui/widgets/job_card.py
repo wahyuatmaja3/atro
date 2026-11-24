@@ -84,7 +84,8 @@ class JobCard(QFrame):
         top_row = QHBoxLayout()
         top_row.setSpacing(8)
         self.title_label = QLabel()
-        self.title_label.setWordWrap(False)
+        self.title_label.setWordWrap(True)
+        self.title_label.setMinimumWidth(60)
         self.title_label.setStyleSheet("font-weight: 600; font-size: 13px;")
         self.status_pill = QLabel()
         self.status_pill.setObjectName("StatusPill")
@@ -94,6 +95,7 @@ class JobCard(QFrame):
 
         # Metadata row
         self.meta_label = QLabel()
+        self.meta_label.setWordWrap(True)
         self.meta_label.setObjectName("MutedText")
         root.addWidget(self.meta_label)
 
