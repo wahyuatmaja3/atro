@@ -17,6 +17,18 @@ from atro.core.schemas import (
 )
 
 _SFX_NORM_RE = re.compile(r"[^a-z0-9]+")
+_TITLE_PREFIX_RE = re.compile(r"^(?:klip\s*\d+|clip\s*\d+|judul)\s*[:\-]\s*", re.IGNORECASE)
+_TITLE_HASHTAG_RE = re.compile(r"\s*#\w+")
+
+
+def _sanitize_clip_title(raw_title: Optional[str], idx: int) -> str:
+    """Clean LLM title formatting artifacts while preserving casual expressive wording."""
+    text = (raw_title or "").strip().strip('"\'`*')
+    text = _TITLE_PREFIX_RE.sub("", text).strip()
+    text = _TITLE_HASHTAG_RE.sub("", text).strip()
+    text = text.strip('"\'`* ')
+    text = " ".join(text.split())
+    return text or f"Klip #{idx}"
 
 
 def _match_available_sfx_name(raw_name: str, available_sfx: Optional[Sequence[str]]) -> Optional[str]:
@@ -220,7 +232,7 @@ def validate_and_sanitize_clips(
 
     sanitized: list[ClipCandidate] = []
     for idx, item in enumerate(raw_response.clips, start=1):
-        title = (item.title or "").strip() or f"Klip #{idx}"
+        title = _sanitize_clip_title(getattr(item, "title", None), idx)
         reason = (item.reason or "").strip() or "Momen penting dengan hook dan penyampaian yang jelas."
 
         start = max(0.0, min(float(item.start_time), video_duration_sec))

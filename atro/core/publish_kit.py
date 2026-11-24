@@ -293,8 +293,11 @@ def build_publish_metadata_text(
 
 
 def _safe_clip_slug(title: str, index: int) -> str:
-    slug = re.sub(r"[^a-zA-Z0-9]+", "_", title).strip("_").lower()[:40]
-    return f"clip_{index:02d}_{slug or 'video'}"
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', " ", (title or "").replace("\r", " ").replace("\n", " "))
+    cleaned = " ".join(cleaned.split()).strip(" ._-")
+    if not cleaned:
+        return f"Klip {index}"
+    return cleaned[:90].strip(" ._-") or f"Klip {index}"
 
 
 def export_publish_kit_zip(

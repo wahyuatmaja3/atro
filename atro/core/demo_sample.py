@@ -186,8 +186,8 @@ def create_offline_demo_job(
         raw_mp4.replace(source_mp4)
         wav_path.unlink(missing_ok=True)
 
-    clip1_path = clips_dir / "clip_01_rahasia_hook_podcast.mp4"
-    clip2_path = clips_dir / "clip_02_plot_twist_panel.mp4"
+    clip1_path = clips_dir / "Tiga Detik Pertama Penentu Viral!.mp4"
+    clip2_path = clips_dir / "Reaksi Panel Saat Kamera Pindah Angle!.mp4"
     clip1_path.write_bytes(source_mp4.read_bytes())
     clip2_path.write_bytes(source_mp4.read_bytes())
 

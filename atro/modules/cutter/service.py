@@ -58,6 +58,15 @@ from atro.modules.cutter.subtitle_burner import generate_clip_ass_file
 from atro.modules.cutter.viral_effects import build_viral_video_overlay_filters
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
+_ILLEGAL_FILENAME_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
+_WINDOWS_RESERVED_STEMS = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+}
 
 
 def _slugify_title(title: str, max_len: int = 44) -> str:
@@ -66,6 +75,56 @@ def _slugify_title(title: str, max_len: int = 44) -> str:
     if not slug:
         return "clip"
     return slug[:max_len].strip("_") or "clip"
+
+
+def sanitize_clip_filename_stem(title: str, max_len: int = 90) -> str:
+    """Turn clip title directly into a clean OS-safe filename stem without 'clip_01' prefix."""
+    cleaned = _ILLEGAL_FILENAME_RE.sub(" ", (title or "").replace("\r", " ").replace("\n", " "))
+    cleaned = " ".join(cleaned.split()).strip(" ._-")
+    if not cleaned:
+        return "Klip Viral"
+    if len(cleaned) > max_len:
+        cut = cleaned[:max_len]
+        if " " in cut and cut.rfind(" ") >= max_len // 2:
+            cut = cut[: cut.rfind(" ")]
+        cleaned = cut.strip(" ._-") or "Klip Viral"
+    if cleaned.upper() in _WINDOWS_RESERVED_STEMS:
+        cleaned = f"{cleaned} (klip)"
+    return cleaned
+
+
+def resolve_clip_output_path(
+    clips_dir: Path,
+    title: str,
+    clip_index: int,
+    job_dir: Optional[Path] = None,
+    reserved_paths: Optional[set[Path]] = None,
+) -> Path:
+    """Pick clean direct `<Title>.mp4` path while avoiding colliding with sibling clips."""
+    stem = sanitize_clip_filename_stem(title)
+    blocked: set[Path] = set()
+    if reserved_paths:
+        blocked.update(p.resolve() for p in reserved_paths)
+    if job_dir is not None:
+        rr_path = job_dir / "render_result.json"
+        if rr_path.is_file():
+            try:
+                rr = RenderResult.model_validate_json(rr_path.read_text(encoding="utf-8"))
+                for existing in rr.rendered_clips:
+                    if existing.clip_index != clip_index and existing.output_path:
+                        blocked.add(Path(existing.output_path).resolve())
+            except Exception:
+                pass
+
+    cand = clips_dir / f"{stem}.mp4"
+    if cand.resolve() not in blocked:
+        return cand
+    suffix = 2
+    while True:
+        alt = clips_dir / f"{stem} ({suffix}).mp4"
+        if alt.resolve() not in blocked:
+            return alt
+        suffix += 1
 
 
 def apply_initial_style_overrides(
@@ -649,6 +708,7 @@ class CutterService:
         )
 
         rendered_clips: list[RenderedClip] = []
+        reserved_output_paths: set[Path] = set()
         for idx, clip in enumerate(analysis.clips, start=1):
             if cancel_event and cancel_event.is_set():
                 raise JobCancelledError("Rendering dibatalkan oleh pengguna.")
@@ -711,7 +771,9 @@ class CutterService:
                     reason=clip.reason,
                     focus_hints=clip.focus_hints,
                     update_render_result=False,
+                    reserved_output_paths=reserved_output_paths,
                 )
+                reserved_output_paths.add(Path(rendered_item.output_path).resolve())
                 rendered_clips.append(rendered_item)
                 if on_progress:
                     pct = (idx / total_clips) * 100.0
@@ -739,8 +801,13 @@ class CutterService:
             )
             framing_plan = await strategy.build_framing_plan(ctx)
 
-            slug = _slugify_title(clip.title)
-            output_path = clips_dir / f"clip_{idx:02d}_{slug}.mp4"
+            output_path = resolve_clip_output_path(
+                clips_dir=clips_dir,
+                title=clip.title,
+                clip_index=idx,
+                reserved_paths=reserved_output_paths,
+            )
+            reserved_output_paths.add(output_path.resolve())
             temp_ass_path = clips_dir / f"_clip_{idx:02d}_subs.ass"
             temp_filter_path = clips_dir / f"_clip_{idx:02d}_filter.txt"
             temp_tts_base = clips_dir / f"_clip_{idx:02d}_intro_tts"
@@ -1082,6 +1149,7 @@ class CutterService:
         reason: str = "Custom Composer Render",
         focus_hints: Optional[list[FocusHintItem]] = None,
         update_render_result: bool = True,
+        reserved_output_paths: Optional[set[Path]] = None,
     ) -> RenderedClip:
         """Render a single clip using full 1:1 WYSIWYG ClipComposerConfig."""
         if cancel_event and cancel_event.is_set():
@@ -1160,8 +1228,13 @@ class CutterService:
         saved_cfg_path = save_job_clip_config(job_dir, orig_config)
         segs = transcript_segments or []
         idx = config.clip_index
-        slug = _slugify_title(config.clip_title)
-        output_path = clips_dir / f"clip_{idx:02d}_{slug}.mp4"
+        output_path = resolve_clip_output_path(
+            clips_dir=clips_dir,
+            title=config.clip_title,
+            clip_index=idx,
+            job_dir=None if reserved_output_paths is not None else job_dir,
+            reserved_paths=reserved_output_paths,
+        )
         temp_filter_path = clips_dir / f"_cmp_{idx:02d}_filter.txt"
         temp_tts_base = clips_dir / f"_cmp_{idx:02d}_intro_tts"
         tts_path: Optional[Path] = None

@@ -18,15 +18,17 @@ def build_system_instruction(
         format_guidance = (
             "Konteks Format Editan: GAME (Gaming / Streamer Shorts).\n"
             "- Prioritaskan momen reaksi paling seru, emosi/rage kocak, clutch dramatis, fail tak terduga, atau banter lucu.\n"
-            "- Contoh gaya judul kasual yang bagus: 'Auto Ngamuk Gara-Gara Ditarget Bocil!', "
-            "'Detik-Detik Kena Mental di Ronde Akhir', 'Malah Kepencet Pas Lagi Clutch!'.\n"
+            "- Contoh gaya judul kasual nonformal yang bagus: 'Auto Ngamuk Gara-Gara Ditarget Bocil!', "
+            "'Detik-Detik Kena Mental di Ronde Akhir', 'Malah Kepencet Ulti Pas Lagi Clutch!'.\n"
         )
     else:
         format_guidance = (
             "Konteks Format Editan: PODCAST (Obrolan / Cerita / Diskusi).\n"
             "- Prioritaskan momen cerita seru, plot twist, punchline obrolan, pengakuan mengejutkan, atau opini kontras.\n"
-            "- Contoh gaya judul kasual yang bagus: 'Ternyata Ini Alasan Aslinya, Plot Twist Banget!', "
-            "'Pas Ditanya Soal Ini Langsung Kicep', 'Jujur Banget Sih Pengakuannya Kali Ini'.\n"
+            "- Contoh gaya judul kasual nonformal yang bagus (HARUS nempel ke topik spesifik videonya!): "
+            "'Beli Tas 200 Juta Ke Kampus, Auto Bikin Kesel!', "
+            "'Keceplosan Spill Gaji Pertama, Satu Studio Langsung Kicep!', "
+            "'Niatnya Ngirit Malah Boncos Dua Kali Lipat!'.\n"
         )
 
     plat_label = (
@@ -73,8 +75,12 @@ def build_system_instruction(
         "5. Tidak tumpang tindih (non-overlapping): rentang waktu antar klip tidak boleh saling bertumpukan.\n"
         f"6. Batas waktu valid: start_time >= 0 dan end_time <= {video_duration_sec:.2f} detik.{excluded_note}\n\n"
         "Aturan Gaya Judul & Output JSON:\n"
-        "- title: HARUS pendek (4-8 kata), bergaya kasual, santai, natural seperti bahasa sehari-hari di TikTok/Shorts Indonesia, "
-        "dan enak dibacakan oleh pengisi suara di opening. HINDARI judul kaku/formal/akademis (seperti 'Analisis...', 'Pembahasan Mengenai...', 'Fenomena...').\n"
+        "- title: HARUS pendek (4-8 kata), bergaya kasual NONFORMAL seperti bahasa obrolan sehari-hari anak muda di TikTok/Shorts Indonesia, "
+        "kreatif, memancing penasaran tanpa terasa clickbait palsu, dan enak dibacakan oleh pengisi suara di opening.\n"
+        "  • PAKAI diksi nonformal yang hidup: 'gue/aku', 'lu/lo', 'gak/nggak', 'sampe', 'bikin', 'malah', 'gara-gara', 'parah sih', 'kok bisa', 'kicep', 'spill', 'auto', 'beneran'.\n"
+        "  • WAJIB SPESIFIK SESUAI ISI VIDEO: Judul harus menyebut kejadian, objek, angka, nama orang, atau konflik nyata yang BENAR-BENAR dibahas di rentang `[start_time - end_time]` klip itu (DILARANG judul generik seperti 'Momen Seru Podcast' atau 'Ternyata Ini Alasannya' yang tidak menjelaskan isi klip!).\n"
+        "  • VARIASI KREATIF ANTAR KLIP: Jangan mengulang awalan/pola kalimat yang sama di beberapa klip (kombinasikan sudut reaksi lucu, plot twist kontras, kutipan nyelekit, atau blunder tak terduga).\n"
+        "  • HINDARI judul kaku/formal/akademis (seperti 'Analisis...', 'Pembahasan Mengenai...', 'Fenomena...', 'Mengapa...', 'Cara Melakukan...', 'Hal Tersebut').\n"
         "- start_time & end_time: Angka detik desimal sesuai timestamp pada transkrip.\n"
         "- virality_score: Integer 1 sampai 10 (10 = paling berpotensi viral).\n"
         "- reason: Penjelasan singkat mengapa hook 3 detik pertama, klimaks, dan nilai retensinya kuat.\n"
@@ -92,7 +98,9 @@ def build_user_prompt(download: DownloadResult, formatted_transcript: str) -> st
         f"Channel: {download.channel or '-'}\n"
         f"Durasi Video Total: {download.duration_sec:.2f} detik\n\n"
         "Transkrip Ber-Timestamp (format: [start_detik - end_detik] teks):\n"
-        f"{formatted_transcript}"
+        f"{formatted_transcript}\n\n"
+        "Catatan Penting: Pastikan setiap `title` klip memakai bahasa santai nonformal, kreatif bervariasi, "
+        "dan secara akurat mencerminkan kejadian/topik spesifik yang terucap pada segmen timestamp klip tersebut."
     )
 
 
