@@ -470,10 +470,10 @@ def test_initial_style_overrides_and_wizard_navigation(tmp_path: Path, monkeypat
 
     win = mw_mod.MainWindow()
     try:
-        assert win.wizard_stack.count() == 4
+        assert win.wizard_stack.count() == 5
         assert win.wizard_stack.currentIndex() == 0
 
-        # Navigate Step 1 -> Step 2
+        # Navigate Home (0) -> Templates (1)
         win.go_to_step(1)
         assert win.wizard_stack.currentIndex() == 1
 
@@ -487,11 +487,13 @@ def test_initial_style_overrides_and_wizard_navigation(tmp_path: Path, monkeypat
         assert overrides["active_word_bg_hex"] == "#F97316"
         assert overrides["subtitle_highlight_hex"] == "#FFFFFF"
 
-        # Navigate to Step 3 and Step 4
+        # Navigate to Editor (2), Render Queue (3), Settings (4)
         win.go_to_step(2)
         assert win.wizard_stack.currentIndex() == 2
         win.go_to_step(3)
         assert win.wizard_stack.currentIndex() == 3
+        win.go_to_step(4)
+        assert win.wizard_stack.currentIndex() == 4
     finally:
         win.close()
         win.deleteLater()
@@ -786,35 +788,24 @@ def test_studio_template_tab_one_click_ready_templates(tmp_path: Path) -> None:
     )
     studio = ClipStudioWidget(settings_provider=lambda: settings)
     try:
-        # Default Easy mode shows 4 simplified visible tabs; Pro mode restores all 6
-        visible_easy = [
+        # Creator Studio 4 scrollable Inspector tabs: Layout, Subtitle, Overlay, Audio
+        visible_tabs = [
             studio.ctrl_tabs.tabText(i)
             for i in range(studio.ctrl_tabs.count())
             if studio.ctrl_tabs.isTabVisible(i)
         ]
-        assert visible_easy == ["1. Template", "2. Tampilan", "3. Teks", "4. Audio"]
+        assert visible_tabs == ["Layout", "Subtitle", "Overlay", "Audio"]
         studio.set_advanced_mode(True)
-        assert studio.ctrl_tabs.count() == 6
-        expected_tabs = [
-            "1. Template",
-            "2. Tata Letak",
-            "3. Teks Subtitle",
-            "4. Judul & Komentar",
-            "5. Musik & Suara",
-            "6. Edit Kata",
-        ]
-        assert [studio.ctrl_tabs.tabText(i) for i in range(6)] == expected_tabs
+        assert studio.ctrl_tabs.count() == 4
         assert studio.ctrl_tabs.currentIndex() == 0
-        assert set(studio.template_cards.keys()) == set(READY_TEMPLATES.keys())
 
         for tid, meta in READY_TEMPLATES.items():
-            studio.template_cards[tid].clicked.emit(tid)
+            studio.apply_preset(tid)
             cfg = studio.current_config()
             assert cfg.preset_id == tid
             assert cfg.layout.mode == meta["layout_mode"]
             assert cfg.subtitles.caption_recipe == meta["caption_recipe"]
             assert cfg.subtitles.placement_preset == meta["placement_preset"]
-            assert studio.template_cards[tid].property("selected") is True
             assert studio.preview_canvas._rendered_qimg is not None
 
         # Verify direct builder matches schema and dimensions
@@ -1862,11 +1853,11 @@ def test_ui_easy_pro_theme_toast_errors_and_min_size(tmp_path: Path, monkeypatch
         head, hint = humanize_error(raw_err)
         assert expect_sub.lower() in head.lower() or expect_sub.lower() in hint.lower()
 
-    # Dark & Light theme QSS compile cleanly
+    # Dark & Light Creator Studio theme QSS compile cleanly
     dark_qss = build_stylesheet("dark")
     light_qss = build_stylesheet("light")
-    assert "#0F0E0D" in dark_qss and "#F97316" in dark_qss
-    assert "#FAF8F5" in light_qss and "#EA580C" in light_qss
+    assert "#090A0F" in dark_qss and "#7C3AED" in dark_qss and "#06B6D4" in dark_qss
+    assert "#F4F5F8" in light_qss and "#7C3AED" in light_qss
 
     ws_dir = tmp_path / "ws"
     settings = AppSettings(
@@ -1881,25 +1872,19 @@ def test_ui_easy_pro_theme_toast_errors_and_min_size(tmp_path: Path, monkeypatch
 
     win = mw_mod.MainWindow()
     try:
-        win.resize(1020, 680)
-        assert win.minimumWidth() <= 1020 and win.minimumHeight() <= 680
+        win.resize(1280, 720)
+        assert win.minimumWidth() >= 1280 and win.minimumHeight() >= 720
 
-        # Easy mode default: 1 health pill, collapsed Step 2 Pro drawer, 4 visible Studio tabs
+        # Easy mode default: 4 visible Studio tabs & compact advanced dividers hidden
         assert win.ui_mode_easy_btn.isChecked() is True
-        assert win.health_pill.isHidden() is False
-        assert win.ffmpeg_pill.isHidden() is True
-        assert win.step2_pro_drawer.isHidden() is True
         visible_easy_tabs = [i for i in range(win.studio_widget.ctrl_tabs.count()) if win.studio_widget.ctrl_tabs.isTabVisible(i)]
         assert len(visible_easy_tabs) == 4
+        assert win.studio_widget._div_grp.isHidden() is True
 
-        # Switch to Pro mode: reveals full details & 6 Studio tabs
+        # Switch to Pro mode: keeps 4 clean tabs and reveals advanced layout dividers
         win._set_ui_advanced_mode(True)
         assert win.ui_mode_pro_btn.isChecked() is True
-        assert win.health_pill.isHidden() is True
-        assert win.ffmpeg_pill.isHidden() is False
-        assert win.step2_pro_drawer.isHidden() is False
-        visible_pro_tabs = [i for i in range(win.studio_widget.ctrl_tabs.count()) if win.studio_widget.ctrl_tabs.isTabVisible(i)]
-        assert len(visible_pro_tabs) == 6
+        assert win.studio_widget._div_grp.isHidden() is False
 
         # Switch theme & emit toast
         win._toggle_ui_theme()
@@ -2052,7 +2037,7 @@ def test_f6_platform_presets_publish_kit_alt_clips_and_demo(tmp_path: Path, monk
         win.platform_combo.setCurrentIndex(0)
         assert win.max_dur_spin.value() <= 60
         win._load_offline_demo_project()
-        assert win.wizard_stack.currentIndex() == 2
+        assert win.wizard_stack.currentIndex() == 3
         assert win.alt_clips_btn.isHidden() is False
         assert "Topik Pembahasan:" in win.topic_outline_label.text()
         assert len(win._clip_cards) == 2
