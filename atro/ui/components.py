@@ -497,3 +497,38 @@ class EmptyStateCard(QFrame):
             self.cta_button: Optional[QPushButton] = btn
         else:
             self.cta_button = None
+
+
+def play_audio_preview_file(owner: QWidget, audio_path: object) -> None:
+    """Play a local TTS preview audio file via QMediaPlayer with Windows WAV fallback."""
+    from pathlib import Path
+    from PyQt6.QtCore import QUrl
+
+    path = Path(str(audio_path))
+    if not path.is_file():
+        return
+    try:
+        from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
+
+        if getattr(owner, "_tts_player", None) is None:
+            audio_out = QAudioOutput(owner)
+            audio_out.setVolume(0.95)
+            player = QMediaPlayer(owner)
+            player.setAudioOutput(audio_out)
+            setattr(owner, "_tts_audio_output", audio_out)
+            setattr(owner, "_tts_player", player)
+        player = getattr(owner, "_tts_player")
+        player.stop()
+        player.setSource(QUrl.fromLocalFile(str(path.resolve())))
+        player.play()
+    except Exception:
+        if path.suffix.lower() == ".wav":
+            try:
+                import winsound
+
+                winsound.PlaySound(
+                    str(path),
+                    winsound.SND_FILENAME | winsound.SND_ASYNC,
+                )
+            except Exception:
+                pass

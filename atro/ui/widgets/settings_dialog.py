@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -27,7 +28,13 @@ from PyQt6.QtWidgets import (
 )
 
 from atro.config import AppSettings
-from atro.ui.components import ToggleSwitch
+from atro.modules.cutter.opening_narrator import (
+    TTS_STYLE_PRESETS,
+    TTS_VOICE_CHOICES,
+    resolve_tts_prosody,
+    synthesize_opening_voiceover,
+)
+from atro.ui.components import ToggleSwitch, play_audio_preview_file
 
 _OPENAI_PRESETS: dict[str, tuple[str, str]] = {
     "OpenAI": ("https://api.openai.com/v1", "gpt-4o-mini"),
@@ -44,6 +51,7 @@ class SettingsWidget(QWidget):
 
     settings_saved = pyqtSignal(object)
     cancelled = pyqtSignal()
+    _tts_preview_ready = pyqtSignal(str, float, str)
 
     def __init__(
         self,
@@ -55,6 +63,9 @@ class SettingsWidget(QWidget):
         self._settings = settings.model_copy(deep=True)
         self._embedded = embedded
         self._suppress_preset_fill = False
+        self._tts_player = None
+        self._tts_audio_output = None
+        self._tts_preview_ready.connect(self._on_tts_preview_ready)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(20 if embedded else 16, 16, 20 if embedded else 16, 14)
@@ -264,13 +275,29 @@ class SettingsWidget(QWidget):
         media_form.addRow("Volume Backsound", bgm_opts_row)
 
         self.tts_voice_combo = QComboBox()
-        self.tts_voice_combo.addItem("Indonesia Cewek - Santai (Gadis)", "id-ID-GadisNeural")
-        self.tts_voice_combo.addItem("Indonesia Cowok - Santai (Ardi)", "id-ID-ArdiNeural")
-        self.tts_voice_combo.addItem("English Female (Jenny)", "en-US-JennyNeural")
-        self.tts_voice_combo.addItem("English Male (Guy)", "en-US-GuyNeural")
+        for label, voice_id in TTS_VOICE_CHOICES:
+            self.tts_voice_combo.addItem(label, voice_id)
         tts_idx = self.tts_voice_combo.findData(self._settings.tts_voice)
         self.tts_voice_combo.setCurrentIndex(max(0, tts_idx))
         media_form.addRow("Suara Opening (TTS)", self.tts_voice_combo)
+
+        tts_style_row = QHBoxLayout()
+        tts_style_row.setSpacing(8)
+        self.tts_style_combo = QComboBox()
+        for style_id, (style_label, _r, _p) in TTS_STYLE_PRESETS.items():
+            self.tts_style_combo.addItem(style_label, style_id)
+        st_idx = self.tts_style_combo.findData(getattr(self._settings, "tts_style", "energetic"))
+        self.tts_style_combo.setCurrentIndex(max(0, st_idx))
+        self.tts_test_btn = QPushButton("Coba Suara")
+        self.tts_test_btn.setObjectName("SmallAction")
+        self.tts_test_btn.clicked.connect(self._preview_tts_voice)
+        tts_style_row.addWidget(self.tts_style_combo, 1)
+        tts_style_row.addWidget(self.tts_test_btn)
+        media_form.addRow("Gaya Pembaca (TTS)", tts_style_row)
+
+        self.tts_test_lbl = QLabel("")
+        self.tts_test_lbl.setObjectName("MutedText")
+        media_form.addRow("", self.tts_test_lbl)
 
         media_lay.addLayout(media_form)
         body.addWidget(media_card)
@@ -315,6 +342,8 @@ class SettingsWidget(QWidget):
         self.bgm_ducking_chk.setChecked(bool(self._settings.enable_backsound_ducking))
         tts_idx = self.tts_voice_combo.findData(self._settings.tts_voice)
         self.tts_voice_combo.setCurrentIndex(max(0, tts_idx))
+        st_idx = self.tts_style_combo.findData(getattr(self._settings, "tts_style", "energetic"))
+        self.tts_style_combo.setCurrentIndex(max(0, st_idx))
         self._on_provider_changed()
 
     def _select_matching_preset(self, base_url: str) -> None:
@@ -423,7 +452,62 @@ class SettingsWidget(QWidget):
         self._settings.backsound_volume = round(self.bgm_volume_spin.value() / 100.0, 2)
         self._settings.enable_backsound_ducking = self.bgm_ducking_chk.isChecked()
         self._settings.tts_voice = self.tts_voice_combo.currentData() or "id-ID-GadisNeural"
+        tts_style = str(self.tts_style_combo.currentData() or "energetic")
+        self._settings.tts_style = tts_style  # type: ignore[assignment]
+        self._settings.tts_rate, self._settings.tts_pitch = resolve_tts_prosody(tts_style)
         return self._settings
+
+    def _preview_tts_voice(self) -> None:
+        import asyncio
+        import tempfile
+        from atro.core.logging_utils import JobLogger
+        from atro.core.preflight import resolve_binary
+
+        voice = str(self.tts_voice_combo.currentData() or "id-ID-GadisNeural")
+        style = str(self.tts_style_combo.currentData() or "energetic")
+        rate, pitch = resolve_tts_prosody(style)
+        sample_text = (
+            "Whoa, you won't believe what happened at the end!"
+            if voice.startswith("en-")
+            else "Wajib tonton! Momen paling gila di video ini!"
+        )
+        self.tts_test_btn.setEnabled(False)
+        self.tts_test_btn.setText("Membuat...")
+        self.tts_test_lbl.setText("Menyiapkan contoh suara...")
+        tmp_base = Path(tempfile.gettempdir()) / "atro_settings_tts_preview"
+        try:
+            ffprobe_p = resolve_binary("ffprobe", self._settings.bin_dir)
+        except Exception:
+            ffprobe_p = None
+
+        def _worker() -> None:
+            try:
+                logger = JobLogger("tts_settings_preview", Path(tempfile.gettempdir()) / "atro_studio_tts.log")
+                out_p, dur = asyncio.run(
+                    synthesize_opening_voiceover(
+                        text=sample_text,
+                        output_audio_path=tmp_base,
+                        voice=voice,
+                        rate=rate,
+                        ffprobe_path=ffprobe_p,
+                        logger=logger,
+                        pitch=pitch,
+                    )
+                )
+                self._tts_preview_ready.emit(str(out_p) if out_p else "", float(dur), "")
+            except Exception as exc:
+                self._tts_preview_ready.emit("", 0.0, str(exc))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_tts_preview_ready(self, audio_path_str: str, dur: float, err_msg: str) -> None:
+        self.tts_test_btn.setEnabled(True)
+        self.tts_test_btn.setText("Coba Suara")
+        if err_msg or not audio_path_str or not Path(audio_path_str).is_file():
+            self.tts_test_lbl.setText(f"Gagal memutar suara: {err_msg or 'TTS tidak tersedia.'}")
+            return
+        self.tts_test_lbl.setText(f"Memutar contoh suara ({dur:.1f} dtk)...")
+        play_audio_preview_file(self, audio_path_str)
 
     def _on_save(self) -> None:
         updated = self.collect_settings()

@@ -6,7 +6,7 @@ import threading
 from pathlib import Path
 from typing import Callable, Optional
 
-from PyQt6.QtCore import QRectF, QSize, Qt, QTimer, QUrl, pyqtSignal
+from PyQt6.QtCore import QRectF, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFontDatabase, QIcon, QImage, QMouseEvent, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
@@ -83,10 +83,14 @@ from atro.modules.cutter.composer_renderer import (
     detect_composer_shot_crops_sync,
     render_hook_style_thumbnail_qimage,
 )
-from atro.modules.cutter.opening_narrator import clean_title_for_speech, synthesize_opening_voiceover
+from atro.modules.cutter.opening_narrator import (
+    clean_title_for_speech,
+    resolve_tts_prosody,
+    synthesize_opening_voiceover,
+)
 from atro.modules.cutter.service import apply_initial_style_overrides, apply_style_template_from_config
 from atro.modules.cutter.transitions import TRANSITION_CHOICES, active_transition_window_at
-from atro.ui.components import create_vector_icon
+from atro.ui.components import create_vector_icon, play_audio_preview_file
 from atro.ui.widgets.preview_canvas import (
     FaceLaneTimelineWidget,
     FrameExtractorCache,
@@ -2988,14 +2992,20 @@ class ClipStudioWidget(QWidget):
             try:
                 log_tmp = Path(tempfile.gettempdir()) / "atro_studio_tts.log"
                 logger = JobLogger("tts_preview", log_tmp)
+                tts_rate, tts_pitch = resolve_tts_prosody(
+                    tts_style=getattr(settings, "tts_style", "energetic"),
+                    rate=getattr(settings, "tts_rate", None),
+                    pitch=getattr(settings, "tts_pitch", None),
+                )
                 audio_path, dur = asyncio.run(
                     synthesize_opening_voiceover(
                         text=raw_txt,
                         output_audio_path=tmp_base,
                         voice=settings.tts_voice,
-                        rate=settings.tts_rate,
+                        rate=tts_rate,
                         ffprobe_path=ffprobe_p,
                         logger=logger,
+                        pitch=tts_pitch,
                     )
                 )
                 self._tts_audition_ready.emit(str(audio_path) if audio_path else "", float(dur), "")
@@ -3014,28 +3024,7 @@ class ClipStudioWidget(QWidget):
             return
         self._tts_tmp_audio = Path(audio_path_str)
         self.hook_intro_info_lbl.setText(f"Memutar suara pembuka ({dur:.1f}s)...")
-        try:
-            from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
-
-            if self._tts_player is None:
-                self._tts_audio_output = QAudioOutput(self)
-                self._tts_audio_output.setVolume(0.95)
-                self._tts_player = QMediaPlayer(self)
-                self._tts_player.setAudioOutput(self._tts_audio_output)
-            self._tts_player.stop()
-            self._tts_player.setSource(QUrl.fromLocalFile(str(self._tts_tmp_audio.resolve())))
-            self._tts_player.play()
-        except Exception:
-            if self._tts_tmp_audio.suffix.lower() == ".wav":
-                try:
-                    import winsound
-
-                    winsound.PlaySound(
-                        str(self._tts_tmp_audio),
-                        winsound.SND_FILENAME | winsound.SND_ASYNC,
-                    )
-                except Exception:
-                    pass
+        play_audio_preview_file(self, self._tts_tmp_audio)
 
     # --- Contextual SFX Cue CRUD ---
     def _reload_sfx_cues_table(self) -> None:
