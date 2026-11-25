@@ -13,6 +13,7 @@ from atro import APP_NAME, __version__
 from atro.config import load_settings
 from atro.core.preflight import check_startup_dependencies
 from atro.core.schemas import JobRequest, JobStatus
+from atro.modules.cutter.opening_narrator import resolve_tts_prosody
 from atro.pipeline.orchestrator import PipelineOrchestrator
 from atro.pipeline.state_store import create_job_state, list_all_jobs, load_state
 
@@ -79,6 +80,7 @@ async def _run_pipeline_cli(
     enable_viral_polish: bool,
     backsound_dir: Optional[str],
     tts_voice: Optional[str],
+    tts_style: Optional[str],
     provider: Optional[str],
     model: Optional[str],
     base_url: Optional[str],
@@ -90,6 +92,9 @@ async def _run_pipeline_cli(
         settings.backsound_dir = Path(backsound_dir)
     if tts_voice:
         settings.tts_voice = tts_voice.strip()
+    if tts_style:
+        settings.tts_style = tts_style.strip()  # type: ignore[assignment]
+        settings.tts_rate, settings.tts_pitch = resolve_tts_prosody(settings.tts_style)
     if provider:
         settings.llm_provider = provider  # type: ignore[assignment]
     if base_url:
@@ -251,6 +256,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--no-viral-polish", action="store_true", help="Nonaktifkan progress bar, fade, dan color polish.")
     p_run.add_argument("--backsound-dir", default=None, help="Override folder backsound lokal.")
     p_run.add_argument("--tts-voice", default=None, help="Override voice ID untuk suara opening TTS.")
+    p_run.add_argument(
+        "--tts-style",
+        choices=["energetic", "hype", "calm"],
+        default=None,
+        help="Gaya intonasi suara opening TTS (energetic, hype, calm).",
+    )
     p_run.add_argument("--provider", choices=["gemini", "openai_compatible"], default=None, help="Provider AI untuk analisis klip.")
     p_run.add_argument("--model", default=None, help="Override nama model AI (Gemini / OpenAI-Compatible).")
     p_run.add_argument("--base-url", default=None, help="Override Base URL untuk provider OpenAI-Compatible.")
@@ -309,6 +320,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 enable_viral_polish=not args.no_viral_polish,
                 backsound_dir=args.backsound_dir,
                 tts_voice=args.tts_voice,
+                tts_style=args.tts_style,
                 provider=args.provider,
                 model=args.model,
                 base_url=args.base_url,
@@ -338,6 +350,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 enable_viral_polish=True,
                 backsound_dir=args.backsound_dir,
                 tts_voice=None,
+                tts_style=None,
                 provider=args.provider,
                 model=args.model,
                 base_url=args.base_url,

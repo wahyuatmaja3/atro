@@ -48,7 +48,9 @@ class AppSettings(BaseModel):
     default_edit_format: EditFormat = "podcast"
     default_framing_mode: FramingMode = "smart_face"
     tts_voice: str = "id-ID-GadisNeural"
-    tts_rate: str = "+8%"
+    tts_style: Literal["energetic", "hype", "calm"] = "energetic"
+    tts_rate: str = "+20%"
+    tts_pitch: str = "+12Hz"
     workspace_dir: Path = Field(default_factory=lambda: get_app_base_dir() / "workspace")
     bin_dir: Path = Field(default_factory=lambda: get_app_base_dir() / "bin")
     backsound_dir: Path = Field(default_factory=lambda: get_app_base_dir() / "backsound")
@@ -205,6 +207,8 @@ def load_settings(base_dir: Optional[Path] = None) -> AppSettings:
                     if k in {"workspace_dir", "backsound_dir"} and (v is None or str(v).strip() == ""):
                         continue
                     raw[k] = v
+                if "tts_style" not in file_data and raw.get("tts_rate") == "+8%":
+                    raw.pop("tts_rate", None)
         except Exception:
             # Corrupt config should not crash startup; defaults/env remain usable
             pass

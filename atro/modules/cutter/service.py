@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import re
 import shutil
 from collections.abc import Awaitable, Callable
@@ -53,7 +54,7 @@ from atro.modules.cutter.jump_cut import (
     remap_words,
     trimmed_duration,
 )
-from atro.modules.cutter.opening_narrator import synthesize_opening_voiceover
+from atro.modules.cutter.opening_narrator import resolve_tts_prosody, synthesize_opening_voiceover
 from atro.modules.cutter.subtitle_burner import generate_clip_ass_file
 from atro.modules.cutter.viral_effects import build_viral_video_overlay_filters
 
@@ -637,6 +638,48 @@ def build_ffmpeg_composer_cut_command(
 class CutterService:
     """Cuts curated clips with format-aware framing, TTS opening, viral captions, and backsound."""
 
+    @staticmethod
+    def _resolve_tts_settings(settings: Optional[AppSettings]) -> tuple[str, str, str]:
+        voice = settings.tts_voice if settings is not None else "id-ID-GadisNeural"
+        style = getattr(settings, "tts_style", "energetic") if settings is not None else "energetic"
+        rate, pitch = resolve_tts_prosody(
+            tts_style=style,
+            rate=getattr(settings, "tts_rate", None) if settings is not None else None,
+            pitch=getattr(settings, "tts_pitch", None) if settings is not None else None,
+        )
+        return voice, rate, pitch
+
+    @staticmethod
+    async def _call_synthesize_opening(
+        text: str,
+        output_audio_path: Path,
+        voice: str,
+        rate: str,
+        pitch: str,
+        ffprobe_path: Optional[Path],
+        logger: JobLogger,
+    ) -> tuple[Optional[Path], float]:
+        """Call `synthesize_opening_voiceover` while staying compatible with 6-arg test stubs."""
+        params = inspect.signature(synthesize_opening_voiceover).parameters
+        if "pitch" in params or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+            return await synthesize_opening_voiceover(
+                text=text,
+                output_audio_path=output_audio_path,
+                voice=voice,
+                rate=rate,
+                ffprobe_path=ffprobe_path,
+                logger=logger,
+                pitch=pitch,
+            )
+        return await synthesize_opening_voiceover(
+            text=text,
+            output_audio_path=output_audio_path,
+            voice=voice,
+            rate=rate,
+            ffprobe_path=ffprobe_path,
+            logger=logger,
+        )
+
     async def run(
         self,
         job_id: str,
@@ -696,8 +739,7 @@ class CutterService:
         transcript_segments = transcript.segments if transcript is not None else []
         bgm_volume = settings.backsound_volume if settings is not None else 0.14
         enable_ducking = settings.enable_backsound_ducking if settings is not None else True
-        tts_voice = settings.tts_voice if settings is not None else "id-ID-GadisNeural"
-        tts_rate = settings.tts_rate if settings is not None else "+8%"
+        tts_voice, tts_rate, tts_pitch = self._resolve_tts_settings(settings)
 
         logger.info(
             "cutter",
@@ -817,11 +859,12 @@ class CutterService:
             try:
                 intro_dur = 0.0
                 if request.enable_opening_tts:
-                    tts_path, intro_dur = await synthesize_opening_voiceover(
+                    tts_path, intro_dur = await self._call_synthesize_opening(
                         text=clip.title,
                         output_audio_path=temp_tts_base,
                         voice=tts_voice,
                         rate=tts_rate,
+                        pitch=tts_pitch,
                         ffprobe_path=ffprobe_path,
                         logger=logger,
                     )
@@ -1245,18 +1288,18 @@ class CutterService:
         try:
             intro_dur = 0.0
             if config.timing.opening_tts_enabled:
-                tts_voice = settings.tts_voice if settings is not None else "id-ID-GadisNeural"
-                tts_rate = settings.tts_rate if settings is not None else "+8%"
+                tts_voice, tts_rate, tts_pitch = self._resolve_tts_settings(settings)
                 tts_source_text = (
                     (config.overlays.hook_banner.text or "").strip()
                     if config.overlays.hook_banner.enabled and (config.overlays.hook_banner.text or "").strip()
                     else config.clip_title
                 )
-                tts_path, intro_dur = await synthesize_opening_voiceover(
+                tts_path, intro_dur = await self._call_synthesize_opening(
                     text=tts_source_text,
                     output_audio_path=temp_tts_base,
                     voice=tts_voice,
                     rate=tts_rate,
+                    pitch=tts_pitch,
                     ffprobe_path=ffprobe_path,
                     logger=logger,
                 )
