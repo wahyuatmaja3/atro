@@ -328,12 +328,18 @@ def test_embedded_settings_page_persists_changes(tmp_path: Path, monkeypatch) ->
         assert win.wizard_stack.currentIndex() == 4
         win.settings_widget.proofread_chk.setChecked(False)
         win.settings_widget.bgm_volume_spin.setValue(42)
+        hype_idx = win.settings_widget.tts_style_combo.findData("hype")
+        assert hype_idx >= 0
+        win.settings_widget.tts_style_combo.setCurrentIndex(hype_idx)
         win.settings_widget.save_btn.click()
 
         assert saved_holder
         last = saved_holder[-1]
         assert last.enable_transcript_proofread is False
         assert last.backsound_volume == 0.42
+        assert last.tts_style == "hype"
+        assert last.tts_rate == "+26%"
+        assert last.tts_pitch == "+16Hz"
         assert win._settings.backsound_volume == 0.42
     finally:
         win.close()

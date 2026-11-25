@@ -323,3 +323,58 @@ def test_studio_tab4_and_step2_hook_design_and_voice_controls(tmp_path: Path, mo
     finally:
         win.close()
         win.deleteLater()
+
+
+@pytest.mark.asyncio
+async def test_energetic_opening_tts_defaults_prosody_and_legacy_migration(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from atro.config import load_settings
+    from atro.modules.cutter import opening_narrator as on_mod
+
+    # 1. Default AppSettings uses energetic style (+20% rate, +12Hz pitch)
+    s_default = AppSettings(workspace_dir=tmp_path / "ws1", bin_dir=tmp_path / "b1", backsound_dir=tmp_path / "bgm1")
+    assert s_default.tts_style == "energetic"
+    assert s_default.tts_rate == "+20%"
+    assert s_default.tts_pitch == "+12Hz"
+
+    # 2. Legacy config.json with old '+8%' rate and no 'tts_style' upgrades to energetic
+    app_dir = tmp_path / "app"
+    app_dir.mkdir(parents=True)
+    (app_dir / "config.json").write_text(
+        json.dumps({"tts_voice": "id-ID-ArdiNeural", "tts_rate": "+8%"}),
+        encoding="utf-8",
+    )
+    migrated = load_settings(base_dir=app_dir)
+    assert migrated.tts_voice == "id-ID-ArdiNeural"
+    assert migrated.tts_style == "energetic"
+    assert migrated.tts_rate == "+20%"
+    assert migrated.tts_pitch == "+12Hz"
+
+    # 3. resolve_tts_prosody and energetic punctuation + pitch forwarding
+    assert on_mod.resolve_tts_prosody("hype") == ("+26%", "+16Hz")
+    assert on_mod.resolve_tts_prosody("calm") == ("+8%", "+0Hz")
+    assert on_mod._sapi_rate_from_percent("+26%") == 3
+    assert on_mod._sapi_rate_from_percent("+20%") == 2
+
+    captured: list[tuple[str, str, str, str]] = []
+
+    async def fake_edge(clean_text, mp3_path, voice, rate, pitch="+12Hz"):
+        captured.append((clean_text, voice, rate, pitch))
+        mp3_path.write_bytes(b"ID3" + b"\x00" * 512)
+        return mp3_path
+
+    monkeypatch.setattr(on_mod, "_synthesize_edge_tts", fake_edge)
+    logger = JobLogger("tts_energetic", tmp_path / "tts.log")
+    out, dur = await on_mod.synthesize_opening_voiceover(
+        text="Rahasia cuan seratus juta.",
+        output_audio_path=tmp_path / "intro",
+        voice="id-ID-GadisNeural",
+        rate="+20%",
+        ffprobe_path=None,
+        logger=logger,
+        pitch="+12Hz",
+    )
+    assert out is not None and out.is_file()
+    assert dur >= 1.2
+    assert captured == [("Rahasia cuan seratus juta!", "id-ID-GadisNeural", "+20%", "+12Hz")]
