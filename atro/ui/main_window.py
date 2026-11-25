@@ -464,7 +464,7 @@ class MainWindow(QMainWindow):
         self.init_sub_pos_combo.addItem("Otomatis", "")
         self.init_sub_pos_combo.addItem("Di Atas Subjek", "above_speaker")
         self.init_sub_pos_combo.addItem("Tengah Split", "split_line_center")
-        self.init_sub_pos_combo.addItem("Bawah Aman", "bottom_safe")
+        self.init_sub_pos_combo.addItem("Tengah Agak Bawah", "bottom_safe")
         self.init_sub_pos_combo.addItem("Atas Aman", "top_safe")
         self.init_sub_pos_combo.currentIndexChanged.connect(lambda _i: self._refresh_step2_preview())
 

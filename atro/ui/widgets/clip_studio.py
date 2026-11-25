@@ -1422,7 +1422,7 @@ class ClipStudioWidget(QWidget):
         self.sub_place_combo = QComboBox()
         self.sub_place_combo.addItem("Di Atas Subjek Bicara (Otomatis)", "above_speaker")
         self.sub_place_combo.addItem("Di Garis Tengah Split", "split_line_center")
-        self.sub_place_combo.addItem("Di Bagian Bawah Layar", "bottom_safe")
+        self.sub_place_combo.addItem("Tengah Agak Bawah (Aman)", "bottom_safe")
         self.sub_place_combo.addItem("Di Bagian Atas Layar", "top_safe")
         self.sub_place_combo.addItem("Geser Bebas (Custom X/Y)", "custom")
         self.sub_place_combo.currentIndexChanged.connect(self._on_placement_preset_changed)
@@ -2307,6 +2307,7 @@ class ClipStudioWidget(QWidget):
         new_cfg.aspect_ratio = self._config.aspect_ratio
         new_cfg.canvas_width = self._config.canvas_width
         new_cfg.canvas_height = self._config.canvas_height
+        new_cfg.sync_subtitle_anchor()
         new_cfg.transcript_overrides = list(self._config.transcript_overrides)
         if self._config.audio.sfx_cues:
             new_cfg.audio.sfx_cues = [c.model_copy(deep=True) for c in self._config.audio.sfx_cues]

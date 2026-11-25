@@ -336,6 +336,18 @@ class SubtitleFootnoteConfig(BaseModel):
         return _normalize_hex_color(v, "#CBD5E1")
 
 
+BOTTOM_SAFE_RATIO_VERTICAL = 0.60
+BOTTOM_SAFE_RATIO_LANDSCAPE = 0.79
+
+
+def resolve_bottom_safe_y(canvas_width: int, canvas_height: int) -> int:
+    """Return subtitle lower-middle Y anchor (`0.60 * h` for 9:16 portrait, `0.79 * h` for landscape)."""
+    h = max(100, int(canvas_height))
+    w = max(100, int(canvas_width))
+    ratio = BOTTOM_SAFE_RATIO_VERTICAL if h > w else BOTTOM_SAFE_RATIO_LANDSCAPE
+    return int(round(h * ratio))
+
+
 class SubtitleLayerConfig(BaseModel):
     """Word-level dynamic typography, color coding, placement, and animation config."""
 
@@ -352,7 +364,7 @@ class SubtitleLayerConfig(BaseModel):
     custom_font_path: Optional[str] = None
     font_size: int = Field(default=64, ge=20, le=140)
     pos_x: int = Field(default=540, ge=60, le=1020)
-    pos_y: int = Field(default=1520, ge=120, le=1840)
+    pos_y: int = Field(default=1152, ge=120, le=1840)
     placement_preset: SubtitlePlacementPreset = "bottom_safe"
     above_speaker_gap_px: int = Field(default=40, ge=0, le=200)
     primary_color_hex: str = "#FFFFFF"
@@ -567,17 +579,18 @@ class ClipComposerConfig(BaseModel):
     transcript_overrides: list[TranscriptSegmentOverride] = Field(default_factory=list)
 
     def sync_subtitle_anchor(self) -> None:
-        """Align subtitle Y position to the selected placement preset in 1080x1920 space."""
+        """Align subtitle Y position to the selected placement preset in canvas space."""
         h = max(100, int(self.canvas_height))
+        w = max(100, int(self.canvas_width))
         preset = self.subtitles.placement_preset
         if preset == "split_line_center":
-            self.subtitles.pos_x = self.canvas_width // 2
+            self.subtitles.pos_x = w // 2
             self.subtitles.pos_y = max(140, min(h - 140, int(round(h * self.layout.split_ratio_top))))
         elif preset in ("bottom_safe", "above_speaker"):
-            self.subtitles.pos_x = self.canvas_width // 2
-            self.subtitles.pos_y = int(round(h * 0.79))
+            self.subtitles.pos_x = w // 2
+            self.subtitles.pos_y = resolve_bottom_safe_y(w, h)
         elif preset == "top_safe":
-            self.subtitles.pos_x = self.canvas_width // 2
+            self.subtitles.pos_x = w // 2
             self.subtitles.pos_y = int(round(h * 0.16))
 
     def clip_duration_sec(self) -> float:

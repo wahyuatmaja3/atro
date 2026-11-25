@@ -12,6 +12,7 @@ from atro.core.composer_schema import (
     FaceAnchorBox,
     LayoutLayerConfig,
     ShotCropSegment,
+    resolve_bottom_safe_y,
 )
 from atro.modules.cutter.framing.face_tracking import _make_even
 
@@ -386,7 +387,7 @@ def resolve_chunks_anchor_positions(
     if subs.placement_preset != "above_speaker":
         return [(float(subs.pos_x), float(subs.pos_y)) for _ in chunks]
 
-    fallback_pos = (float(cw // 2), float(int(round(ch * 0.79))))
+    fallback_pos = (float(cw // 2), float(resolve_bottom_safe_y(cw, ch)))
     gap_px = float(getattr(subs, "above_speaker_gap_px", 40))
     total_dur = max(float(config.clip_duration_sec()), max((float(c.end) for c in chunks), default=1.0))
 

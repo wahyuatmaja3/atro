@@ -351,10 +351,10 @@ def generate_clip_ass_file(
     # Format-specific typography, colors (ASS BGR), and safe-zone placement
     sub_font_size = 64 if is_vertical else 50
     if is_game:
-        sub_margin_v = 330 if is_vertical else 85
+        sub_margin_v = 734 if is_vertical else 85
         highlight_bgr = "&H00F8BD38&"  # Electric cyan (#38BDF8)
     else:
-        sub_margin_v = 370 if is_vertical else 85
+        sub_margin_v = 734 if is_vertical else 85
         highlight_bgr = "&H0015CCFA&"  # Viral yellow (#FACC15)
 
     hook_font_size = 54 if is_vertical else 44

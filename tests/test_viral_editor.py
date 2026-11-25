@@ -72,6 +72,7 @@ def test_subtitle_chunking_and_ass_generation(tmp_path: Path) -> None:
     text = out.read_text(encoding="utf-8")
     assert "[Script Info]" in text
     assert "Style: ViralSub" in text
+    assert ",2,48,48,734,1" in text
     assert "Style: HookTitle" in text
     assert "&H0015CCFA&" in text
     assert "Rahasia Klip Viral" in text

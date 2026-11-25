@@ -50,6 +50,15 @@ def test_composer_schema_and_presets_mix_and_match(tmp_path: Path) -> None:
         assert cfg.canvas_height == 1920
         assert cfg.clip_index == 2
 
+    # Default 9:16 bottom_safe sits at lower-middle (~60% height = 1152), while 16:9 stays near bottom (0.79 * 1080 = 853)
+    pod_cfg = build_preset_config("podcast")
+    assert pod_cfg.subtitles.placement_preset == "bottom_safe"
+    assert pod_cfg.subtitles.pos_y == 1152
+    pod_cfg.aspect_ratio = "16:9"
+    pod_cfg.canvas_width, pod_cfg.canvas_height = 1920, 1080
+    pod_cfg.sync_subtitle_anchor()
+    assert pod_cfg.subtitles.pos_y == 853
+
     # Mix-and-match: Podcast Hook Banner + Gaming Split + Twitch Comment Bubble + Subathon Angled Divider
     mixed = build_preset_config("gaming_split", clip_title="Mix Format Test", start_time=5.0, end_time=35.0)
     mixed.preset_id = "custom_mix"

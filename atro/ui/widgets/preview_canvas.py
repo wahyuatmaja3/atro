@@ -378,7 +378,7 @@ class LivePreviewCanvas9x16(QWidget):
         self._drag_overlay: Optional[str] = None
         self._drag_bubble_idx: int = -1
         self._drag_start_canvas_pt = QPointF()
-        self._drag_orig_pos: tuple[int, int] = (540, 1520)
+        self._drag_orig_pos: tuple[int, int] = (540, 1152)
 
     def set_zoom_factor(self, factor: float) -> None:
         self._zoom_factor = max(0.5, min(1.5, float(factor)))

@@ -726,6 +726,7 @@ class CutterService:
                 comp_cfg.aspect_ratio = request.aspect_ratio
                 if request.aspect_ratio == "16:9":
                     comp_cfg.canvas_width, comp_cfg.canvas_height = 1920, 1080
+                    comp_cfg.sync_subtitle_anchor()
                 comp_cfg.timing.opening_tts_enabled = request.enable_opening_tts
                 comp_cfg.subtitles.enabled = request.enable_subtitles
                 comp_cfg.overlays.hook_banner.enabled = (
@@ -952,6 +953,7 @@ class CutterService:
             default_cfg.aspect_ratio = request.aspect_ratio
             if request.aspect_ratio == "16:9":
                 default_cfg.canvas_width, default_cfg.canvas_height = 1920, 1080
+                default_cfg.sync_subtitle_anchor()
             default_cfg.timing.opening_tts_enabled = request.enable_opening_tts
             default_cfg.subtitles.enabled = request.enable_subtitles
             default_cfg.overlays.hook_banner.enabled = request.enable_hook_title

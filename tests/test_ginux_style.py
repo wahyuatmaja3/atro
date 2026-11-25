@@ -373,11 +373,11 @@ def test_g8_zoom_punch_hysteresis_and_fallback():
     # Ambiguous chunk 1 holds last confident position from chunk 0
     assert pos_zoom[1] == pos_zoom[0]
 
-    # No-face fallback -> bottom_safe (540, 1517)
+    # No-face fallback -> bottom_safe lower-middle (540, 1152)
     cfg_empty = cfg.model_copy(deep=True)
     cfg_empty.layout.shot_crops = []
     pos_fb = resolve_chunks_anchor_positions(chunks, cfg_empty, src_w=1280, src_h=720)
-    assert pos_fb == [(540.0, 1517.0), (540.0, 1517.0)]
+    assert pos_fb == [(540.0, 1152.0), (540.0, 1152.0)]
 
 
 def test_shot_planner_populates_speaker_faces():
