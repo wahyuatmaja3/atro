@@ -224,17 +224,23 @@ class _SubtitlePresetCard(QFrame):
         h_col = str(meta.get("highlight_color_hex", "#FACC15"))[:7]
         bg_hex = str(meta.get("active_word_bg_hex", "#7C3AED"))
         bg_mode = str(meta.get("caption_bg_mode", "none"))
+        is_big_pop = float(meta.get("active_word_scale") or 1.0) >= 1.25
+        ff = str(meta.get("font_family", ""))
+        ff_css = f"font-family: '{ff}'; " if ff else ""
 
-        w1 = QLabel("KATA" if meta.get("uppercase", True) else "Kata")
-        w1.setStyleSheet(f"color: {p_col}; font-weight: 800; font-size: 11px;")
-        w2 = QLabel("VIRAL" if meta.get("uppercase", True) else "Viral")
+        w1_txt = "KATA" if meta.get("uppercase", True) else ("kata" if is_big_pop else "Kata")
+        w2_txt = "VIRAL" if meta.get("uppercase", True) else ("viral" if is_big_pop else "Viral")
+        w1 = QLabel(w1_txt)
+        w1.setStyleSheet(f"{ff_css}color: {p_col}; font-weight: 800; font-size: {'10px' if is_big_pop else '11px'};")
+        w2 = QLabel(w2_txt)
+        w2_size = "15px" if is_big_pop else "11px"
         if bg_mode in ("active_word_pill", "line_pill"):
             w2.setStyleSheet(
-                f"color: {h_col}; background-color: {bg_hex[:7]}; font-weight: 900; font-size: 11px; "
+                f"{ff_css}color: {h_col}; background-color: {bg_hex[:7]}; font-weight: 900; font-size: {w2_size}; "
                 "padding: 1px 5px; border-radius: 4px;"
             )
         else:
-            w2.setStyleSheet(f"color: {h_col}; font-weight: 900; font-size: 11px;")
+            w2.setStyleSheet(f"{ff_css}color: {h_col}; font-weight: 900; font-size: {w2_size};")
         sample_lay.addWidget(w1)
         sample_lay.addWidget(w2)
         lay.addWidget(sample_wrap)
@@ -1340,6 +1346,7 @@ class ClipStudioWidget(QWidget):
         card_short_names = {
             "mrbeast_pill": "Sorot",
             "streamer_kinetic": "Pop",
+            "clipper_pop_kuning": "Pop Kuning",
             "hormozi_viral": "Tumpuk",
             "abdaal_minimal": "Minimal",
             "lokaclip_neon": "Neon",
@@ -1498,14 +1505,23 @@ class ClipStudioWidget(QWidget):
         self.sub_anim_combo = QComboBox()
         self.sub_anim_combo.addItems(["pop", "scale", "karaoke", "none"])
         self.sub_anim_combo.currentIndexChanged.connect(self._on_ui_mutated)
-        self.sub_upper_chk = QCheckBox("HURUF BESAR SEMUA")
+        self.sub_active_scale_spin = QDoubleSpinBox()
+        self.sub_active_scale_spin.setRange(1.00, 1.80)
+        self.sub_active_scale_spin.setSingleStep(0.05)
+        self.sub_active_scale_spin.setDecimals(2)
+        self.sub_active_scale_spin.setSuffix("x")
+        self.sub_active_scale_spin.setToolTip("Skala pembesaran kata aktif saat diucapkan (contoh 1.38x untuk gaya pop viral).")
+        self.sub_active_scale_spin.valueChanged.connect(self._on_ui_mutated)
+        self.sub_upper_chk = QCheckBox("HURUF BESAR")
         self.sub_upper_chk.toggled.connect(self._on_ui_mutated)
         self.sub_max_words_spin = QSpinBox()
         self.sub_max_words_spin.setRange(1, 8)
         self.sub_max_words_spin.valueChanged.connect(self._on_ui_mutated)
         anim_row.addWidget(self.sub_anim_combo)
+        anim_row.addWidget(QLabel("Pop"))
+        anim_row.addWidget(self.sub_active_scale_spin)
         anim_row.addWidget(self.sub_upper_chk)
-        anim_row.addWidget(QLabel("Max Kata/Baris"))
+        anim_row.addWidget(QLabel("Max Kata"))
         anim_row.addWidget(self.sub_max_words_spin)
         sf.addRow("Gerakan & Baris", anim_row)
 
@@ -2534,6 +2550,10 @@ class ClipStudioWidget(QWidget):
         self.sub_shadow_spin.setValue(subs.shadow_depth)
         self.sub_glow_spin.setValue(subs.glow_strength)
         self.sub_anim_combo.setCurrentText(subs.animation)
+        default_sc = 1.16 if subs.animation == "scale" else (1.12 if subs.animation == "pop" else 1.0)
+        self.sub_active_scale_spin.setValue(
+            float(subs.active_word_scale) if subs.active_word_scale is not None else default_sc
+        )
         self.sub_upper_chk.setChecked(subs.uppercase)
         self.sub_max_words_spin.setValue(subs.max_words_per_line)
         bgm_mode_idx = self.sub_bg_mode_combo.findData(subs.caption_bg_mode)
@@ -2788,6 +2808,7 @@ class ClipStudioWidget(QWidget):
         subs.shadow_depth = self.sub_shadow_spin.value()
         subs.glow_strength = self.sub_glow_spin.value()
         subs.animation = self.sub_anim_combo.currentText()  # type: ignore[assignment]
+        subs.active_word_scale = round(self.sub_active_scale_spin.value(), 2)
         subs.uppercase = self.sub_upper_chk.isChecked()
         subs.max_words_per_line = self.sub_max_words_spin.value()
         subs.caption_bg_mode = self.sub_bg_mode_combo.currentData() or "none"

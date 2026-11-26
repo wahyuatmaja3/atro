@@ -211,15 +211,39 @@ CAPTION_RECIPES: dict[str, dict[str, Any]] = {
         "uppercase": True,
         "max_words_per_line": 4,
     },
+    "clipper_pop_kuning": {
+        "label": "Clipper Pop Kuning (Shorts Viral)",
+        "description": "Teks natural Impact putih + kata aktif membesar kuning emas (#FDD700) & outline hitam tebal ala Shorts clipper.",
+        "style_mode": "karaoke_highlight",
+        "caption_bg_mode": "none",
+        "active_word_bg_hex": "#FDD700",
+        "active_word_bg_radius": 18,
+        "dual_keyword_enabled": False,
+        "secondary_keyword_color_hex": "#FDD700",
+        "auto_emoji_enabled": False,
+        "font_family": "Impact",
+        "font_size": 66,
+        "primary_color_hex": "#FFFFFF",
+        "highlight_color_hex": "#FDD700",
+        "outline_color_hex": "#000000",
+        "outline_width": 6.0,
+        "shadow_depth": 3.0,
+        "glow_strength": 0.0,
+        "animation": "pop",
+        "active_word_scale": 1.38,
+        "uppercase": False,
+        "max_words_per_line": 5,
+    },
 }
 
 
 def apply_caption_recipe(config: ClipComposerConfig, recipe_id: str) -> ClipComposerConfig:
-    """Apply one of 8 trendy caption recipes onto SubtitleLayerConfig while preserving anchors."""
+    """Apply a named caption recipe onto SubtitleLayerConfig while preserving anchors."""
     rid = recipe_id if recipe_id in CAPTION_RECIPES else "hormozi_viral"
     recipe = CAPTION_RECIPES[rid]
     sub = config.subtitles
     sub.caption_recipe = rid
+    sub.active_word_scale = recipe.get("active_word_scale")
     for key, val in recipe.items():
         if key in ("label", "description"):
             continue
@@ -703,6 +727,8 @@ def build_ready_template_config(
         cfg.subtitles.secondary_keyword_color_hex = str(meta["secondary_keyword_color_hex"])
     if "active_word_bg_hex" in meta:
         cfg.subtitles.active_word_bg_hex = str(meta["active_word_bg_hex"])
+    if meta.get("active_word_scale") is not None:
+        cfg.subtitles.active_word_scale = max(1.0, min(1.80, float(meta["active_word_scale"])))
     cfg.subtitles.placement_preset = meta["placement_preset"]
     cfg.sync_subtitle_anchor()
 

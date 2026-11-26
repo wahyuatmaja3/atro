@@ -27,6 +27,7 @@ CaptionRecipeId = Literal[
     "gamer_split",
     "streamer_kinetic",
     "podcast_editorial",
+    "clipper_pop_kuning",
 ]
 BlurredFrameAspect = Literal["1:1", "4:3", "16:9"]
 SubtitleStyleMode = Literal["karaoke_highlight", "kinetic_1_2", "podcast_3_4", "plain"]
@@ -375,6 +376,7 @@ class SubtitleLayerConfig(BaseModel):
     shadow_depth: float = Field(default=2.0, ge=0.0, le=15.0)
     glow_strength: float = Field(default=0.0, ge=0.0, le=15.0)
     animation: SubtitleAnimationMode = "pop"
+    active_word_scale: Optional[float] = Field(default=None, ge=1.0, le=1.80)
     uppercase: bool = True
     max_words_per_line: int = Field(default=4, ge=1, le=8)
     multi_speaker_enabled: bool = True

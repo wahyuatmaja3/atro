@@ -12,7 +12,7 @@ from typing import Optional
 from PyQt6.QtCore import QCoreApplication
 from PyQt6.QtGui import QColor, QFont, QFontDatabase, QFontMetrics
 
-from atro.core.composer_schema import ClipComposerConfig
+from atro.core.composer_schema import ClipComposerConfig, SubtitleLayerConfig
 from atro.core.schemas import AspectRatio, EditFormat, TranscriptSegment, TranscriptWord
 
 _ACTION_TOKEN_RE = re.compile(r"^(?:\*[^*]+\*|\[[^\]]+\])$")
@@ -655,6 +655,15 @@ class CaptionLineLayout:
     emoji_y: float
 
 
+def resolve_active_word_scale(subs: SubtitleLayerConfig) -> float:
+    """Return scale multiplier applied to the currently active spoken word."""
+    if subs.animation not in ("pop", "scale"):
+        return 1.0
+    if subs.active_word_scale is not None:
+        return max(1.0, min(1.80, float(subs.active_word_scale)))
+    return 1.16 if subs.animation == "scale" else 1.12
+
+
 def compute_caption_line_layout(
     config: ClipComposerConfig,
     raw_words: list[str],
@@ -672,10 +681,15 @@ def compute_caption_line_layout(
     font.setBold(True)
     fm = QFontMetrics(font)
     space_w = float(fm.horizontalAdvance(" "))
+    w_scale = resolve_active_word_scale(subs)
 
     display_words = [w.upper() if subs.uppercase else w for w in raw_words]
     widths = [float(fm.horizontalAdvance(txt)) for txt in display_words]
-    total_w = sum(widths) + (space_w * max(0, len(widths) - 1))
+    eff_widths = [
+        ww * (w_scale if (idx == active_idx and w_scale > 1.001) else 1.0)
+        for idx, ww in enumerate(widths)
+    ]
+    total_w = sum(eff_widths) + (space_w * max(0, len(eff_widths) - 1))
     max_avail_w = max(120, canvas_w - 80)
     scale_fit = min(1.0, max_avail_w / max(1.0, total_w))
 
@@ -691,13 +705,13 @@ def compute_caption_line_layout(
 
     word_boxes: list[WordBoxMetrics] = []
     cursor_x = -total_w * 0.5
-    for idx, (txt, raw_tok, ww) in enumerate(zip(display_words, raw_words, widths)):
-        center_canvas_x = anchor_x + (cursor_x + ww * 0.5) * scale_fit
+    for idx, (txt, raw_tok, ww, ew) in enumerate(zip(display_words, raw_words, widths, eff_widths)):
+        center_canvas_x = anchor_x + (cursor_x + ew * 0.5) * scale_fit
         word_boxes.append(
             WordBoxMetrics(
                 text=txt,
                 raw_text=raw_tok,
-                local_x=cursor_x,
+                local_x=cursor_x + (ew - ww) * 0.5,
                 width=ww,
                 center_canvas_x=center_canvas_x,
                 is_active=(idx == active_idx),
@@ -705,13 +719,12 @@ def compute_caption_line_layout(
                 is_secondary_keyword=(idx == sec_idx),
             )
         )
-        cursor_x += ww + space_w
+        cursor_x += ew + space_w
 
     line_h = float(fm.height()) * scale_fit
     box_w = total_w * scale_fit + max(32.0, font_px * 0.65)
     box_h = line_h + max(18.0, font_px * 0.36)
 
-    w_scale = 1.12 if subs.animation == "pop" else (1.16 if subs.animation == "scale" else 1.0)
     if 0 <= active_idx < len(word_boxes):
         act_box = word_boxes[active_idx]
         pill_cx = act_box.center_canvas_x
@@ -1060,6 +1073,8 @@ def generate_composer_ass_file(
                 anchor_x_override=c_anchor_x,
                 anchor_y_override=c_anchor_y,
             )
+            ev_fit_pct = max(50, int(round(word_layout.scale_fit * 100.0)))
+            active_w_scale = resolve_active_word_scale(subs)
 
             if subs.caption_bg_mode == "active_word_pill":
                 pill_path = _ass_rounded_rect_drawing(
@@ -1080,17 +1095,16 @@ def generate_composer_ass_file(
                 action_word = is_action_token(w.text)
                 if j == active_idx:
                     active_c = action_col_tag if action_word else h_tag
-                    if subs.animation == "pop":
-                        sc = max(55, int(round(112 * word_layout.scale_fit)))
+                    if active_w_scale > 1.001:
+                        sc = max(55, int(round(active_w_scale * 100.0 * word_layout.scale_fit)))
+                        if active_w_scale >= 1.25:
+                            sc_over = max(sc, int(round(sc * 1.07)))
+                            pop_tag = f"\\fscx{sc_over}\\fscy{sc_over}\\t(0,65,\\fscx{sc}\\fscy{sc})"
+                        else:
+                            pop_tag = f"\\fscx{sc}\\fscy{sc}"
                         rendered_words.append(
-                            f"{{\\c{active_c}\\fscx{sc}\\fscy{sc}}}{esc}"
-                            f"{{\\c{p_tag}\\fscx{fit_pct}\\fscy{fit_pct}}}"
-                        )
-                    elif subs.animation == "scale":
-                        sc = max(55, int(round(116 * word_layout.scale_fit)))
-                        rendered_words.append(
-                            f"{{\\c{active_c}\\fscx{sc}\\fscy{sc}}}{esc}"
-                            f"{{\\c{p_tag}\\fscx{fit_pct}\\fscy{fit_pct}}}"
+                            f"{{\\c{active_c}{pop_tag}}}{esc}"
+                            f"{{\\c{p_tag}\\fscx{ev_fit_pct}\\fscy{ev_fit_pct}}}"
                         )
                     else:
                         rendered_words.append(f"{{\\c{active_c}}}{esc}{{\\c{p_tag}}}")
@@ -1106,16 +1120,16 @@ def generate_composer_ass_file(
             if active_idx == 0:
                 if subs.animation == "pop":
                     s0 = max(45, int(round(90 * word_layout.scale_fit)))
-                    anim_prefix = f"\\fscx{s0}\\fscy{s0}\\t(0,80,\\fscx{fit_pct}\\fscy{fit_pct})"
+                    anim_prefix = f"\\fscx{s0}\\fscy{s0}\\t(0,80,\\fscx{ev_fit_pct}\\fscy{ev_fit_pct})"
                 elif subs.animation == "scale":
                     s0 = max(40, int(round(82 * word_layout.scale_fit)))
                     s1 = max(55, int(round(112 * word_layout.scale_fit)))
                     anim_prefix = (
                         f"\\fscx{s0}\\fscy{s0}\\t(0,95,\\fscx{s1}\\fscy{s1})"
-                        f"\\t(95,180,\\fscx{fit_pct}\\fscy{fit_pct})"
+                        f"\\t(95,180,\\fscx{ev_fit_pct}\\fscy{ev_fit_pct})"
                     )
-            elif fit_pct < 100:
-                anim_prefix = f"\\fscx{fit_pct}\\fscy{fit_pct}"
+            elif ev_fit_pct < 100:
+                anim_prefix = f"\\fscx{ev_fit_pct}\\fscy{ev_fit_pct}"
 
             base_tag = f"{{\\an5\\pos({cpx},{cpy})\\c{p_tag}\\3c{o_tag}{blur_tag}{anim_prefix}}}"
             line_text = base_tag + " ".join(rendered_words)

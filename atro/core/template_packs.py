@@ -522,6 +522,38 @@ _SEED_TEMPLATE_SPECS: list[dict[str, Any]] = [
         "transition_type": "zoom_in",
         "transition_sfx": "whoosh",
     },
+    {
+        "id": "shorts_clipper_pop",
+        "category": "Komedi",
+        "title": "Clipper Pop Kuning (Shorts Viral)",
+        "badge": "Pop Kuning 1.38x • Lowercase",
+        "description": "Gaya subtitle clipper Shorts Indonesia: huruf natural Impact putih + kata aktif pop membesar kuning emas (#FDD700) & outline hitam tebal.",
+        "base_preset": "podcast",
+        "job_edit_format": "podcast",
+        "layout_mode": "blurred_frame",
+        "blurred_frame_aspect": "4:3",
+        "frame_corner_radius_px": 24,
+        "frame_border_width_px": 0,
+        "frame_border_color_hex": "#111827",
+        "caption_recipe": "clipper_pop_kuning",
+        "caption_bg_mode": "none",
+        "max_words_per_line": 5,
+        "auto_emoji_enabled": False,
+        "dual_keyword_enabled": False,
+        "placement_preset": "bottom_safe",
+        "hook_enabled": False,
+        "vignette_enabled": True,
+        "topic_header_enabled": False,
+        "zoom_punch_enabled": False,
+        "font_family": "Impact",
+        "highlight_color_hex": "#FDD700",
+        "active_word_scale": 1.38,
+        "progress_bar_color_hex": "#FDD700",
+        "focus_strategy": "active_speaker",
+        "transition_mode": "auto",
+        "transition_type": "fade",
+        "transition_sfx": "none",
+    },
     # --- 6. GAMING (3) ---
     {
         "id": "gaming_split",
@@ -789,6 +821,7 @@ class TemplatePackEntry(BaseModel):
     highlight_color_hex: Optional[str] = None
     secondary_keyword_color_hex: Optional[str] = None
     active_word_bg_hex: Optional[str] = None
+    active_word_scale: Optional[float] = None
     progress_bar_color_hex: Optional[str] = None
     focus_strategy: Optional[str] = None
     group_mode: Optional[str] = None
@@ -872,7 +905,7 @@ def recommend_templates_for_context(
         (("game", "gameplay", "clutch", "ranked", "valorant", "mobile legends", "ff", "pubg", "subathon"), ["gaming_split", "pip_facecam_bulat", "subathon"]),
         (("saham", "crypto", "kripto", "bitcoin", "bisnis", "omzet", "cuan", "investasi", "uang", "marketing"), ["biz_crypto_chart", "biz_executive_noir", "biz_case_study_glass"]),
         (("ustadz", "kajian", "tausiyah", "doa", "alquran", "shalat", "hijrah", "pahala", "surga"), ["religi_tausiyah_kalem", "edu_motivasi_sinematik"]),
-        (("ngakak", "kocak", "prank", "wkwk", "haha", "lucu", "standup", "komedi"), ["ginux_clip_meme", "comedy_punch_whip", "ginux_reaction_zoom", "comedy_duet_miring"]),
+        (("ngakak", "kocak", "prank", "wkwk", "haha", "lucu", "standup", "komedi", "clipper", "shorts", "react", "omel"), ["shorts_clipper_pop", "ginux_clip_meme", "comedy_punch_whip", "ginux_reaction_zoom"]),
         (("curhat", "cerita", "horor", "misteri", "plot twist", "selingkuh", "drama"), ["story_drama_zoom", "story_confession_blur"]),
         (("belajar", "tips", "cara", "tutorial", "produktivitas", "coding", "edukasi"), ["edu_abdaal_clean", "edu_whiteboard_pip"]),
         (("berita", "breaking", "viral", "heboh", "trending", "kasus"), ["news_breaking_bar", "podcast_mageran_glass"]),

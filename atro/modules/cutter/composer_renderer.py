@@ -68,6 +68,7 @@ from atro.modules.cutter.subtitle_burner import (
     is_action_token,
     qcolor_from_hex,
     register_qt_font,
+    resolve_active_word_scale,
     resolve_font_family,
     resolve_speaker_colors,
 )
@@ -1533,10 +1534,11 @@ def draw_subtitles_on_painter(
         if layout.scale_fit < 0.999:
             painter.scale(layout.scale_fit, layout.scale_fit)
 
+        active_word_scale = resolve_active_word_scale(subs)
         for wb in layout.word_boxes:
             if wb.is_active:
                 fill_c = action_col if wb.is_action else highlight_col
-                w_scale = 1.12 if subs.animation == "pop" else (1.16 if subs.animation == "scale" else 1.0)
+                w_scale = active_word_scale
             else:
                 if wb.is_action:
                     fill_c = action_col
