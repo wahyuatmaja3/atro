@@ -15,6 +15,7 @@ from atro.modules.analyzer import openai_compat as compat_mod
 from atro.modules.analyzer.openai_compat import (
     build_openai_payload,
     call_openai_compatible_sync,
+    clear_response_format_cache,
     extract_json_payload,
     normalize_chat_completions_url,
 )
@@ -227,3 +228,45 @@ def test_app_settings_provider_readiness(tmp_path: Path, monkeypatch) -> None:
     )
     ok, _ = s_ollama.is_active_provider_ready()
     assert ok is True
+
+
+def test_openai_response_format_fallback_is_cached_across_calls(monkeypatch) -> None:
+    clear_response_format_cache()
+    valid_body = {
+        "clips": [
+            {
+                "title": "Klip Cepat",
+                "start_time": 1.0,
+                "end_time": 35.0,
+                "virality_score": 8,
+                "reason": "Hook kuat.",
+            }
+        ]
+    }
+    ok_resp = {"choices": [{"message": {"content": json.dumps(valid_body)}}]}
+    seen_modes: list[str] = []
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        mode = (json or {}).get("response_format", {}).get("type", "none")
+        seen_modes.append(mode)
+        if mode == "json_schema":
+            return SimpleNamespace(status_code=400, text='{"error": "json_schema unsupported"}')
+        return SimpleNamespace(status_code=200, json=lambda: ok_resp, text="")
+
+    monkeypatch.setattr(compat_mod.requests, "post", fake_post)
+    call_openai_compatible_sync("https://api.deepseek.com", "sk-ds", "deepseek-v4-pro", "sys", "usr1")
+    call_openai_compatible_sync("https://api.deepseek.com", "sk-ds", "deepseek-v4-pro", "sys", "usr2")
+
+    # First call tries json_schema -> json_object; second call goes straight to json_object
+    assert seen_modes == ["json_schema", "json_object", "json_object"]
+    clear_response_format_cache()
+
+
+def test_humanize_error_explains_insufficient_balance_402() -> None:
+    from atro.core.error_messages import humanize_error
+
+    headline, hint = humanize_error(
+        'Error dari endpoint OpenAI-Compatible (HTTP 402: {"error":{"message":"Insufficient Balance"}})'
+    )
+    assert "Saldo" in headline or "Balance" in headline
+    assert "Pengaturan" in hint

@@ -37,8 +37,10 @@ from atro.modules.transcriber.proofreader import (
     build_whisper_initial_prompt,
     clean_transcript_segments_offline,
     infer_language_hint,
+    proofread_clip_segments_with_llm,
     proofread_transcript_segments_with_llm,
 )
+from atro.core.subprocess_utils import JobCancelledError
 from tests.test_composer_studio import ensure_qt_gui_app
 
 
@@ -362,3 +364,404 @@ def test_prompts_enforce_nonformal_creative_video_specific_titles_and_settings_u
     finally:
         dlg.close()
         dlg.deleteLater()
+
+
+def test_transcript_proofread_defaults_off_to_prevent_unexpected_token_drain(tmp_path: Path) -> None:
+    s = AppSettings(workspace_dir=tmp_path, bin_dir=tmp_path, backsound_dir=tmp_path)
+    assert s.enable_transcript_proofread is False
+
+
+@pytest.mark.asyncio
+async def test_llm_proofreader_aborts_immediately_on_402_and_timeout_and_honors_cancel(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import asyncio
+    import requests
+    from atro.modules.analyzer import openai_compat as compat_mod
+
+    compat_mod.clear_response_format_cache()
+    dl = DownloadResult(
+        job_id="j_abort",
+        video_id="v1",
+        title="Podcast Test",
+        channel="PodHub",
+        duration_sec=120.0,
+        width=1280,
+        height=720,
+        fps=30.0,
+        source_video_path=str(tmp_path / "src.mp4"),
+    )
+    settings = AppSettings(
+        llm_provider="openai_compatible",
+        openai_base_url="https://api.openai.com/v1",
+        openai_api_key="sk-test",
+        openai_model="gpt-4o-mini",
+        enable_transcript_proofread=True,
+    )
+    # 30 segments across 3 batches of batch_size=10
+    segs = [
+        TranscriptSegment(
+            index=i,
+            start=float(i * 2),
+            end=float(i * 2 + 1.5),
+            text=f"Kalimat ke {i} di podcast ini.",
+        )
+        for i in range(30)
+    ]
+
+    # 1) HTTP 402 Insufficient Balance -> stops after 1 call, NOT 3 calls!
+    calls_402 = 0
+
+    def fake_post_402(url, headers=None, json=None, timeout=None):
+        nonlocal calls_402
+        calls_402 += 1
+        return SimpleNamespace(
+            status_code=402,
+            text='{"error":{"message":"Insufficient Balance","type":"insufficient_balance_error"}}',
+        )
+
+    monkeypatch.setattr(compat_mod.requests, "post", fake_post_402)
+    await proofread_transcript_segments_with_llm(
+        segs,
+        download=dl,
+        settings=settings,
+        logger=JobLogger("j_402", tmp_path / "log_402.txt"),
+        batch_size=10,
+    )
+    assert calls_402 == 1
+
+    # 2) Timeout -> stops after 1 call instead of draining tokens on subsequent timed-out batches
+    calls_to = 0
+
+    def fake_post_timeout(url, headers=None, json=None, timeout=None):
+        nonlocal calls_to
+        calls_to += 1
+        raise requests.ReadTimeout("timed out")
+
+    monkeypatch.setattr(compat_mod.requests, "post", fake_post_timeout)
+    await proofread_transcript_segments_with_llm(
+        segs,
+        download=dl,
+        settings=settings,
+        logger=JobLogger("j_to", tmp_path / "log_to.txt"),
+        batch_size=10,
+    )
+    assert calls_to == 1
+
+    # 3) Cancel event cancels cleanly and progress callback fires
+    cancel_ev = asyncio.Event()
+    prog_values: list[float] = []
+    calls_cancel = 0
+
+    def fake_post_ok(url, headers=None, json=None, timeout=None):
+        nonlocal calls_cancel
+        calls_cancel += 1
+        cancel_ev.set()
+        return SimpleNamespace(
+            status_code=200,
+            json=lambda: {"choices": [{"message": {"content": '{"corrections": []}'}}]},
+            text="",
+        )
+
+    monkeypatch.setattr(compat_mod.requests, "post", fake_post_ok)
+    with pytest.raises(JobCancelledError):
+        await proofread_transcript_segments_with_llm(
+            segs,
+            download=dl,
+            settings=settings,
+            logger=JobLogger("j_can", tmp_path / "log_can.txt"),
+            batch_size=10,
+            cancel_event=cancel_ev,
+            on_progress=prog_values.append,
+        )
+    assert calls_cancel == 1
+    assert prog_values and prog_values[0] > 0.0
+
+
+@pytest.mark.asyncio
+async def test_clip_scoped_proofreader_only_sends_selected_clip_segments(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from atro.modules.analyzer import openai_compat as compat_mod
+
+    sent_prompts: list[str] = []
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        sent_prompts.append((json or {})["messages"][1]["content"])
+        body = {"corrections": [{"index": 2, "text": "Pas dia bawa tas 200 juta ke Sila."}]}
+        return SimpleNamespace(
+            status_code=200,
+            json=lambda: {"choices": [{"message": {"content": json_mod.dumps(body)}}]},
+            text="",
+        )
+
+    import json as json_mod
+
+    monkeypatch.setattr(compat_mod.requests, "post", fake_post)
+    dl = DownloadResult(
+        job_id="j_clip_pr",
+        video_id="v1",
+        title="Tas 200 Juta Ke Sila",
+        channel="PodHub",
+        duration_sec=300.0,
+        width=1280,
+        height=720,
+        fps=30.0,
+        source_video_path=str(tmp_path / "src.mp4"),
+    )
+    settings = AppSettings(
+        llm_provider="openai_compatible",
+        openai_base_url="http://localhost:11434/v1",
+        openai_model="qwen2.5:7b",
+        enable_transcript_proofread=True,
+    )
+    segs = [
+        TranscriptSegment(index=0, start=0.0, end=5.0, text="Segmen luar klip awal."),
+        TranscriptSegment(index=1, start=10.0, end=15.0, text="Segmen luar klip juga."),
+        TranscriptSegment(index=2, start=50.0, end=55.0, text="Pas dia bawa tas 200 juta ke silah."),
+        TranscriptSegment(index=3, start=180.0, end=185.0, text="Segmen jauh di luar klip."),
+    ]
+    clips = [
+        ClipCandidate(
+            title="Bawa Tas 200 Juta!",
+            start_time=48.0,
+            end_time=60.0,
+            virality_score=9,
+            reason="Hook mantap.",
+        )
+    ]
+
+    out = await proofread_clip_segments_with_llm(
+        segs,
+        clips=clips,
+        download=dl,
+        settings=settings,
+        logger=JobLogger("j_clip_pr", tmp_path / "log.txt"),
+    )
+    assert len(sent_prompts) == 1
+    assert "[2]" in sent_prompts[0]
+    assert "[0]" not in sent_prompts[0]
+    assert "[3]" not in sent_prompts[0]
+    assert out[2].text == "Pas dia bawa tas 200 juta ke Sila."
+    assert out[0].text == "Segmen luar klip awal."
+
+
+@pytest.mark.asyncio
+async def test_transcriber_service_saves_transcript_without_blocking_on_llm_proofread(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from atro.modules.analyzer import openai_compat as compat_mod
+    from atro.modules.transcriber import service as tr_svc_mod
+    from atro.modules.transcriber.service import TranscriberService
+
+    api_calls = 0
+
+    def fail_if_called(*args, **kwargs):
+        nonlocal api_calls
+        api_calls += 1
+        raise AssertionError("TranscriberService tidak boleh memanggil LLM API saat transkripsi.")
+
+    monkeypatch.setattr(compat_mod.requests, "post", fail_if_called)
+
+    job_dir = tmp_path / "job_tr"
+    job_dir.mkdir(parents=True)
+    src_mp4 = job_dir / "source.mp4"
+    src_mp4.write_bytes(b"\x00")
+    sub_vtt = job_dir / "auto.id.vtt"
+    sub_vtt.write_text(
+        "WEBVTT\n\n"
+        "00:00:01.000 --> 00:00:04.000\n"
+        "ini podkas yg seru bgt\n\n"
+        "00:00:05.000 --> 00:00:09.000\n"
+        "pembahasan lanjutan yg jelas\n\n"
+        "00:00:10.000 --> 00:00:14.000\n"
+        "penutup episode hari ini\n",
+        encoding="utf-8",
+    )
+    from atro.core.schemas import PreflightBinaryInfo, PreflightReport, SubtitleCandidate
+
+    dl = DownloadResult(
+        job_id="job_tr",
+        video_id="v1",
+        title="Podcast Seru",
+        duration_sec=16.0,
+        width=1280,
+        height=720,
+        fps=30.0,
+        source_video_path=str(src_mp4),
+        subtitle_candidates=[
+            SubtitleCandidate(lang="id", is_auto_generated=True, ext="vtt", local_path=str(sub_vtt))
+        ],
+    )
+    settings = AppSettings(
+        llm_provider="openai_compatible",
+        openai_base_url="https://api.openai.com/v1",
+        openai_api_key="sk-test",
+        openai_model="gpt-4o-mini",
+        enable_transcript_proofread=True,
+        workspace_dir=tmp_path,
+        bin_dir=tmp_path,
+    )
+    preflight = PreflightReport(
+        ok=True,
+        yt_dlp=PreflightBinaryInfo(name="yt-dlp", available=True, path="yt-dlp"),
+        ffmpeg=PreflightBinaryInfo(name="ffmpeg", available=True, path="ffmpeg"),
+        ffprobe=PreflightBinaryInfo(name="ffprobe", available=True, path="ffprobe"),
+    )
+    progress_seen: list[float] = []
+    res = await TranscriberService().run(
+        job_id="job_tr",
+        download=dl,
+        job_dir=job_dir,
+        settings=settings,
+        preflight=preflight,
+        logger=JobLogger("job_tr", job_dir / "job.log"),
+        on_progress=progress_seen.append,
+    )
+    assert api_calls == 0
+    assert (job_dir / "transcript.json").is_file()
+    assert progress_seen and progress_seen[-1] == 100.0
+    assert "podcast" in res.segments[0].text.lower()
+    assert "banget" in res.segments[0].text.lower()
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_saves_transcript_at_55_pct_and_proofreads_only_clips(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from atro.core.schemas import JobStatus, PreflightBinaryInfo, PreflightReport, RenderResult
+    from atro.modules.analyzer import openai_compat as compat_mod
+    from atro.pipeline.orchestrator import PipelineOrchestrator
+    from atro.pipeline.state_store import create_job_state
+
+    ws_dir = tmp_path / "ws"
+    ws_dir.mkdir(parents=True)
+    src_mp4 = tmp_path / "source.mp4"
+    src_mp4.write_bytes(b"\x00")
+
+    req = JobRequest(source_type="local_file", local_video_path=str(src_mp4), clip_count=1)
+    state = create_job_state(ws_dir, req)
+    job_dir = Path(state.workspace_dir)
+
+    settings = AppSettings(
+        llm_provider="openai_compatible",
+        openai_base_url="https://api.openai.com/v1",
+        openai_api_key="sk-test",
+        openai_model="gpt-4o-mini",
+        enable_transcript_proofread=True,
+        workspace_dir=ws_dir,
+        bin_dir=tmp_path,
+        backsound_dir=tmp_path,
+    )
+    preflight = PreflightReport(
+        ok=True,
+        yt_dlp=PreflightBinaryInfo(name="yt-dlp", available=True, path="yt-dlp"),
+        ffmpeg=PreflightBinaryInfo(name="ffmpeg", available=True, path="ffmpeg"),
+        ffprobe=PreflightBinaryInfo(name="ffprobe", available=True, path="ffprobe"),
+    )
+
+    stages_seen: list[tuple[str, float]] = []
+    proofread_prompts: list[str] = []
+    transcript_existed_before_analyzer = False
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        proofread_prompts.append((json or {})["messages"][1]["content"])
+        return SimpleNamespace(
+            status_code=200,
+            json=lambda: {
+                "choices": [
+                    {
+                        "message": {
+                            "content": '{"corrections": [{"index": 1, "text": "Bawa tas 200 juta ke Sila."}]}'
+                        }
+                    }
+                ]
+            },
+            text="",
+        )
+
+    monkeypatch.setattr(compat_mod.requests, "post", fake_post)
+
+    orch = PipelineOrchestrator(
+        settings_provider=lambda: settings,
+        preflight_provider=lambda: preflight,
+        on_state_change=lambda st: stages_seen.append((st.current_stage, st.progress_pct)),
+    )
+
+    async def fake_ingest(**kwargs):
+        dl = DownloadResult(
+            job_id=state.job_id,
+            video_id="v1",
+            title="Tas 200 Juta Ke Sila",
+            duration_sec=120.0,
+            width=1280,
+            height=720,
+            fps=30.0,
+            source_video_path=str(src_mp4),
+        )
+        (job_dir / "metadata.json").write_text(dl.model_dump_json(indent=2), encoding="utf-8")
+        return dl
+
+    async def fake_transcribe(**kwargs):
+        tr = TranscriptResult(
+            job_id=state.job_id,
+            source="faster_whisper",
+            language="id",
+            segments=[
+                TranscriptSegment(index=0, start=0.0, end=5.0, text="Segmen awal di luar klip."),
+                TranscriptSegment(index=1, start=40.0, end=45.0, text="Bawa tas 200 juta ke silah."),
+                TranscriptSegment(index=2, start=90.0, end=95.0, text="Segmen akhir di luar klip."),
+            ],
+        )
+        (job_dir / "transcript.json").write_text(tr.model_dump_json(indent=2), encoding="utf-8")
+        return tr
+
+    async def fake_analyze(**kwargs):
+        nonlocal transcript_existed_before_analyzer
+        transcript_existed_before_analyzer = (job_dir / "transcript.json").is_file()
+        an = AnalysisResult(
+            job_id=state.job_id,
+            model="openai:gpt-4o-mini",
+            clips=[
+                ClipCandidate(
+                    title="Bawa Tas 200 Juta!",
+                    start_time=38.0,
+                    end_time=68.0,
+                    virality_score=9,
+                    reason="Kocak banget.",
+                )
+            ],
+        )
+        (job_dir / "analysis.json").write_text(an.model_dump_json(indent=2), encoding="utf-8")
+        return an
+
+    async def fake_cut(**kwargs):
+        tr_passed = kwargs["transcript"]
+        assert tr_passed.segments[1].text == "Bawa tas 200 juta ke Sila."
+        rr = RenderResult(
+            job_id=state.job_id,
+            aspect_ratio="9:16",
+            framing_strategy="smart_face",
+            padding_sec=0.4,
+            output_dir=str(job_dir / "clips"),
+            rendered_clips=[],
+        )
+        (job_dir / "render_result.json").write_text(rr.model_dump_json(indent=2), encoding="utf-8")
+        return rr
+
+    monkeypatch.setattr(orch._downloader, "ingest_local_file", fake_ingest)
+    monkeypatch.setattr(orch._transcriber, "run", fake_transcribe)
+    monkeypatch.setattr(orch._analyzer, "run", fake_analyze)
+    monkeypatch.setattr(orch._cutter, "run", fake_cut)
+
+    final_state = await orch.run_job(state, resume=False)
+    assert final_state.status == JobStatus.COMPLETED
+    assert transcript_existed_before_analyzer is True
+    assert ("transcriber", 55.0) in stages_seen
+    assert any(stage == "proofreader" for stage, _ in stages_seen)
+    assert len(proofread_prompts) == 1
+    assert "[1]" in proofread_prompts[0]
+    assert "[0]" not in proofread_prompts[0]
+    assert "[2]" not in proofread_prompts[0]
+    persisted = TranscriptResult.model_validate_json((job_dir / "transcript.json").read_text(encoding="utf-8"))
+    assert persisted.segments[1].text == "Bawa tas 200 juta ke Sila."
