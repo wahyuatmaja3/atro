@@ -39,7 +39,7 @@ class AppSettings(BaseModel):
     whisper_model: Literal["tiny", "base", "small", "medium", "large-v3-turbo"] = "small"
     whisper_device: Literal["auto", "cpu", "cuda"] = "auto"
     whisper_language: Literal["auto", "id", "en"] = "auto"
-    enable_transcript_proofread: bool = True
+    enable_transcript_proofread: bool = False
     default_clip_count: int = Field(default=4, ge=1, le=10)
     default_min_duration_sec: int = Field(default=30, ge=5, le=300)
     default_max_duration_sec: int = Field(default=60, ge=10, le=600)

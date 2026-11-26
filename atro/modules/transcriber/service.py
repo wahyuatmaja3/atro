@@ -21,7 +21,6 @@ from atro.modules.transcriber.proofreader import (
     build_whisper_initial_prompt,
     clean_transcript_segments_offline,
     infer_language_hint,
-    proofread_transcript_segments_with_llm,
 )
 from atro.modules.transcriber.subtitle_parser import evaluate_subtitle_quality, parse_subtitle_file
 from atro.modules.transcriber.whisper_engine import extract_audio_wav, transcribe_with_faster_whisper
@@ -100,13 +99,6 @@ class TranscriberService:
                         title=download.title,
                         channel=download.channel,
                     )
-                    if cand.is_auto_generated:
-                        segments = await proofread_transcript_segments_with_llm(
-                            segments,
-                            download=download,
-                            settings=settings,
-                            logger=logger,
-                        )
                     if on_progress:
                         res = on_progress(100.0)
                         if asyncio.iscoroutine(res):
@@ -191,12 +183,6 @@ class TranscriberService:
             title=download.title,
             channel=download.channel,
         )
-        segments = await proofread_transcript_segments_with_llm(
-            segments,
-            download=download,
-            settings=settings,
-            logger=logger,
-        )
 
         result = TranscriptResult(
             job_id=job_id,
@@ -207,5 +193,9 @@ class TranscriberService:
             segments=segments,
         )
         (job_dir / "transcript.json").write_text(result.model_dump_json(indent=2), encoding="utf-8")
+        if on_progress:
+            res = on_progress(100.0)
+            if asyncio.iscoroutine(res):
+                await res
         logger.info("transcriber", f"Transkripsi Whisper selesai: {len(segments)} segmen (bahasa={result.language}).")
         return result

@@ -193,6 +193,9 @@ def _run_faster_whisper_sync(
                 last_pct = pct
                 _emit_progress(pct)
 
+        if last_pct < 100.0:
+            _emit_progress(100.0)
+
         detected_lang = getattr(info, "language", None)
         return results, detected_lang
 

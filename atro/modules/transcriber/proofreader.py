@@ -3,16 +3,24 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import re
+from collections.abc import Awaitable, Callable, Sequence
 from difflib import SequenceMatcher
+from pathlib import Path
 from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
 from atro.config import AppSettings
 from atro.core.logging_utils import JobLogger
-from atro.core.schemas import DownloadResult, TranscriptSegment, TranscriptWord
+from atro.core.schemas import (
+    ClipCandidate,
+    DownloadResult,
+    TranscriptResult,
+    TranscriptSegment,
+    TranscriptWord,
+)
+from atro.core.subprocess_utils import JobCancelledError
 
 _WORD_SPLIT_RE = re.compile(r"^([^\w]*)(.*?)([^\w]*)$", re.UNICODE)
 _ALNUM_RE = re.compile(r"[^\w]+", re.UNICODE)
@@ -462,13 +470,14 @@ def clean_transcript_segments_offline(
 
 def _build_proofread_system_prompt(download: DownloadResult) -> str:
     return (
-        "Anda adalah editor transkrip audio Indonesia profesional (post-processor ASR/Whisper).\n"
+        "Anda adalah editor koreksi typo transkrip ASR/Whisper Bahasa Indonesia.\n"
         f"Konteks Video: '{download.title}' (Channel: {download.channel or '-'}).\n\n"
-        "TUGAS KETAT:\n"
-        "1. Perbaiki HANYA typo salah dengar STT/Whisper, salah eja kata serapan, tanda baca dasar, dan penulisan nama orang/brand/istilah sesuai konteks video.\n"
-        "2. PERTAHANKAN gaya bahasa bicara nonformal apa adanya (tetap pertahankan 'gue', 'elo', 'nggak', 'gak', 'banget', 'sih', 'nih', 'tuh', 'gitu', 'kayak', 'bikin', 'sampe'). Jangan mengubah menjadi bahasa baku formal!\n"
-        "3. DILARANG meringkas, menghapus kata penting, memotong kalimat, atau menggabungkan baris.\n"
-        "4. Kembalikan HANYA baris `index` yang memang perlu diperbaiki ejaannya dalam JSON `{corrections: [{index, text}]}`."
+        "ATURAN KETAT (HEMAT TOKEN):\n"
+        "1. Perbaiki HANYA kata yang jelas salah dengar STT/Whisper, salah eja kata serapan, atau nama orang/brand/istilah sesuai konteks video.\n"
+        "2. PERTAHANKAN gaya bahasa bicara nonformal apa adanya ('gue', 'elo', 'nggak', 'gak', 'banget', 'sih', 'nih', 'tuh', 'gitu', 'kayak', 'bikin', 'sampe'). Jangan diubah jadi bahasa baku!\n"
+        "3. JANGAN mengembalikan baris hanya untuk menambah/mengubah koma, titik, atau kapitalisasi kecil. Jika kata sudah benar, LEWATI baris tersebut!\n"
+        "4. DILARANG meringkas, menghapus kata penting, memotong kalimat, atau menggabungkan baris.\n"
+        "5. Kembalikan HANYA baris `index` yang kata/ejaannya benar-benar salah dalam JSON `{\"corrections\": [{\"index\": 0, \"text\": \"...\"}]}`. Jika tidak ada typo nyata, kembalikan `{\"corrections\": []}`."
     )
 
 
@@ -497,13 +506,49 @@ def _is_safe_correction(orig_text: str, new_text: str) -> bool:
     return True
 
 
+_FATAL_PROOFREAD_ERROR_HINTS: tuple[str, ...] = (
+    "http 401",
+    "http 402",
+    "http 403",
+    "http 404",
+    "http 429",
+    "insufficient",
+    "balance",
+    "quota",
+    "billing",
+    "credit",
+    "rate limit",
+    "resource_exhausted",
+    "too many requests",
+    "unauthorized",
+    "invalid_api_key",
+    "invalid api key",
+    "api key",
+    "model_not_found",
+    "gagal menghubungi endpoint",
+    "timed out",
+    "timeout",
+    "connection",
+)
+
+
+def _is_fatal_proofread_error(exc: Exception) -> bool:
+    """Return True when retrying more batches would waste tokens, quota, or time."""
+    status_code = getattr(exc, "status_code", None)
+    if status_code in (401, 402, 403, 404, 429):
+        return True
+    low = str(exc).lower()
+    return any(hint in low for hint in _FATAL_PROOFREAD_ERROR_HINTS)
+
+
 def _call_proofread_batch_sync(
     batch_items: list[dict[str, Any]],
     download: DownloadResult,
     settings: AppSettings,
 ) -> dict[int, str]:
     sys_prompt = _build_proofread_system_prompt(download)
-    user_prompt = json.dumps({"segments": batch_items}, ensure_ascii=False)
+    lines = [f"[{item['index']}] {item['text']}" for item in batch_items]
+    user_prompt = "Periksa baris transkrip berikut (format: [index] teks):\n" + "\n".join(lines)
 
     if settings.llm_provider == "openai_compatible":
         from atro.modules.analyzer.openai_compat import call_openai_structured_json_sync
@@ -518,7 +563,7 @@ def _call_proofread_batch_sync(
             schema_name="transcript_proofread",
             json_schema=_OPENAI_PROOFREAD_JSON_SCHEMA,
             schema_reminder=_proofread_reminder_text(),
-            timeout=90.0,
+            timeout=60.0,
         )
     else:
         from google import genai
@@ -551,30 +596,79 @@ def _call_proofread_batch_sync(
     return {int(c.index): _MULTI_SPACE_RE.sub(" ", c.text or "").strip() for c in res.corrections}
 
 
+async def _emit_proofread_progress(
+    on_progress: Optional[Callable[[float], Awaitable[None] | None]],
+    pct: float,
+) -> None:
+    if on_progress is None:
+        return
+    res = on_progress(max(0.0, min(100.0, pct)))
+    if asyncio.iscoroutine(res):
+        await res
+
+
 async def proofread_transcript_segments_with_llm(
     segments: list[TranscriptSegment],
     download: DownloadResult,
     settings: AppSettings,
     logger: JobLogger,
-    batch_size: int = 75,
+    batch_size: int = 120,
+    cancel_event: Optional[asyncio.Event] = None,
+    on_progress: Optional[Callable[[float], Awaitable[None] | None]] = None,
+    max_batches: int = 10,
 ) -> list[TranscriptSegment]:
-    """Use active LLM provider to fix contextual ASR typos while guarding timestamps safely."""
-    if not segments or not getattr(settings, "enable_transcript_proofread", True):
+    """Use active LLM provider to fix contextual ASR typos while guarding timestamps & quota."""
+    if not segments or not getattr(settings, "enable_transcript_proofread", False):
         return segments
     ready, _ = settings.is_active_provider_ready()
     if not ready:
         return segments
 
     out = [s.model_copy(deep=True) for s in segments]
-    corrected_count = 0
+    eligible = [s for s in out if any(ch.isalpha() for ch in (s.text or ""))]
+    if not eligible:
+        return out
 
-    for start_i in range(0, len(out), max(10, batch_size)):
-        chunk = out[start_i : start_i + max(10, batch_size)]
+    eff_batch = max(10, batch_size)
+    batches = [eligible[i : i + eff_batch] for i in range(0, len(eligible), eff_batch)]
+    if max_batches > 0 and len(batches) > max_batches:
+        logger.warning(
+            "transcriber",
+            f"Koreksi typo AI dibatasi maksimal {max_batches} batch ({max_batches * eff_batch} segmen) agar token API tetap hemat.",
+        )
+        batches = batches[:max_batches]
+
+    total_batches = len(batches)
+    corrected_count = 0
+    consecutive_errors = 0
+
+    for batch_idx, chunk in enumerate(batches, start=1):
+        if cancel_event and cancel_event.is_set():
+            raise JobCancelledError("Koreksi typo transkrip dibatalkan.")
+
+        logger.info(
+            "transcriber",
+            f"Koreksi typo AI batch {batch_idx}/{total_batches} ({len(chunk)} segmen)...",
+        )
         payload = [{"index": s.index, "text": s.text} for s in chunk]
         try:
             mapping = await asyncio.to_thread(_call_proofread_batch_sync, payload, download, settings)
+            consecutive_errors = 0
         except Exception as exc:
-            logger.warning("transcriber", f"Koreksi typo AI dilewati pada batch {start_i}: {exc}")
+            if cancel_event and cancel_event.is_set():
+                raise JobCancelledError("Koreksi typo transkrip dibatalkan.") from exc
+            consecutive_errors += 1
+            if _is_fatal_proofread_error(exc) or consecutive_errors >= 2:
+                logger.warning(
+                    "transcriber",
+                    f"Koreksi typo AI dihentikan pada batch {batch_idx}/{total_batches} untuk mencegah pemborosan kuota/token: {exc}",
+                )
+                break
+            logger.warning(
+                "transcriber",
+                f"Koreksi typo AI dilewati pada batch {batch_idx}/{total_batches}: {exc}",
+            )
+            await _emit_proofread_progress(on_progress, (batch_idx / total_batches) * 100.0)
             continue
 
         for seg in chunk:
@@ -592,9 +686,109 @@ async def proofread_transcript_segments_with_llm(
             seg.text = fixed
             corrected_count += 1
 
+        await _emit_proofread_progress(on_progress, (batch_idx / total_batches) * 100.0)
+
     if corrected_count > 0:
         logger.info(
             "transcriber",
             f"Koreksi typo transkrip AI memperbaiki {corrected_count} segmen (timestamp kata tetap presisi).",
         )
+        return out
+    return segments
+
+
+def select_segments_for_clips(
+    segments: list[TranscriptSegment],
+    clips: Sequence[ClipCandidate],
+    pad_sec: float = 1.5,
+) -> list[TranscriptSegment]:
+    """Return unique segments overlapping any selected clip time window."""
+    if not segments or not clips:
+        return []
+    windows = [
+        (max(0.0, float(c.start_time) - pad_sec), float(c.end_time) + pad_sec)
+        for c in clips
+    ]
+    return [
+        seg
+        for seg in segments
+        if any(seg.end >= w_start and seg.start <= w_end for w_start, w_end in windows)
+    ]
+
+
+async def proofread_clip_segments_with_llm(
+    segments: list[TranscriptSegment],
+    clips: Sequence[ClipCandidate],
+    download: DownloadResult,
+    settings: AppSettings,
+    logger: JobLogger,
+    cancel_event: Optional[asyncio.Event] = None,
+    on_progress: Optional[Callable[[float], Awaitable[None] | None]] = None,
+    pad_sec: float = 1.5,
+) -> list[TranscriptSegment]:
+    """Proofread only transcript segments overlapping selected clips to minimize token usage."""
+    if not segments or not clips or not getattr(settings, "enable_transcript_proofread", False):
+        return segments
+    ready, _ = settings.is_active_provider_ready()
+    if not ready:
+        return segments
+
+    target_segs = select_segments_for_clips(segments, clips, pad_sec=pad_sec)
+    if not target_segs:
+        return segments
+
+    logger.info(
+        "transcriber",
+        f"Koreksi typo AI fokus pada {len(target_segs)}/{len(segments)} segmen dari {len(clips)} klip terpilih...",
+    )
+    refined_subset = await proofread_transcript_segments_with_llm(
+        target_segs,
+        download=download,
+        settings=settings,
+        logger=logger,
+        cancel_event=cancel_event,
+        on_progress=on_progress,
+    )
+    if refined_subset is target_segs:
+        return segments
+    refined_by_index = {seg.index: seg for seg in refined_subset}
+    out = [s.model_copy(deep=True) for s in segments]
+    for i, seg in enumerate(out):
+        if seg.index in refined_by_index:
+            out[i] = refined_by_index[seg.index]
     return out
+
+
+async def refine_transcript_result_for_clips(
+    transcript: TranscriptResult,
+    clips: Sequence[ClipCandidate],
+    download: DownloadResult,
+    settings: AppSettings,
+    logger: JobLogger,
+    transcript_path: Path,
+    cancel_event: Optional[asyncio.Event] = None,
+    on_progress: Optional[Callable[[float], Awaitable[None] | None]] = None,
+) -> TranscriptResult:
+    """Apply clip-scoped AI typo cleanup when enabled and persist updated transcript.json."""
+    if (
+        transcript.source == "yt_dlp_manual_sub"
+        or not getattr(settings, "enable_transcript_proofread", False)
+        or not transcript.segments
+        or not clips
+    ):
+        return transcript
+
+    refined_segs = await proofread_clip_segments_with_llm(
+        transcript.segments,
+        clips=clips,
+        download=download,
+        settings=settings,
+        logger=logger,
+        cancel_event=cancel_event,
+        on_progress=on_progress,
+    )
+    if refined_segs is transcript.segments:
+        return transcript
+    updated = transcript.model_copy(update={"segments": refined_segs})
+    transcript_path.write_text(updated.model_dump_json(indent=2), encoding="utf-8")
+    return updated

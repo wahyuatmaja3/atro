@@ -23,6 +23,7 @@ from atro.modules.analyzer import AnalyzerService
 from atro.modules.cutter import CutterService
 from atro.modules.downloader import DownloaderService
 from atro.modules.transcriber import TranscriberService
+from atro.modules.transcriber.proofreader import refine_transcript_result_for_clips
 from atro.pipeline.state_store import save_state
 
 
@@ -190,6 +191,7 @@ class PipelineOrchestrator:
 
             # 3. ANALYZER (55% -> 70%)
             analysis_result: Optional[AnalysisResult] = None
+            analysis_was_cached = False
             analysis_path = job_dir / "analysis.json"
             if resume and analysis_path.is_file():
                 try:
@@ -198,6 +200,7 @@ class PipelineOrchestrator:
                     )
                     if cached_an.clips:
                         analysis_result = cached_an
+                        analysis_was_cached = True
                         state.artifacts.analysis_json = str(analysis_path.resolve())
                         logger.info("analyzer", "Resume: menggunakan analysis.json yang sudah ada.")
                 except Exception:
@@ -205,9 +208,15 @@ class PipelineOrchestrator:
 
             if analysis_result is None:
                 self._update_progress(state, JobStatus.ANALYZING, "analyzer", 57.0)
+                an_weight = (
+                    0.11
+                    if getattr(settings, "enable_transcript_proofread", False)
+                    and transcript_result.source != "yt_dlp_manual_sub"
+                    else 0.13
+                )
 
                 def _an_prog(pct: float) -> None:
-                    self._update_progress(state, JobStatus.ANALYZING, "analyzer", 57.0 + pct * 0.13)
+                    self._update_progress(state, JobStatus.ANALYZING, "analyzer", 57.0 + pct * an_weight)
 
                 analysis_result = await self._analyzer.run(
                     job_id=state.job_id,
@@ -221,6 +230,29 @@ class PipelineOrchestrator:
                     cancel_event=cancel_event,
                 )
                 state.artifacts.analysis_json = str((job_dir / "analysis.json").resolve())
+
+            if (
+                not analysis_was_cached
+                and transcript_result.source != "yt_dlp_manual_sub"
+                and getattr(settings, "enable_transcript_proofread", False)
+                and transcript_result.segments
+                and analysis_result.clips
+            ):
+                self._update_progress(state, JobStatus.ANALYZING, "proofreader", 68.0)
+
+                def _pr_prog(pct: float) -> None:
+                    self._update_progress(state, JobStatus.ANALYZING, "proofreader", 68.0 + pct * 0.02)
+
+                transcript_result = await refine_transcript_result_for_clips(
+                    transcript_result,
+                    clips=analysis_result.clips,
+                    download=download_result,
+                    settings=settings,
+                    logger=logger,
+                    transcript_path=transcript_path,
+                    cancel_event=cancel_event,
+                    on_progress=_pr_prog,
+                )
 
             self._update_progress(state, JobStatus.ANALYZING, "analyzer", 70.0)
 

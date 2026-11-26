@@ -215,11 +215,11 @@ class SettingsWidget(QWidget):
         tr_form.addRow("Bahasa Transkrip", self.whisper_lang_combo)
 
         self.proofread_chk = ToggleSwitch(
-            "Perbaiki typo & ejaan transkrip otomatis (kamus lokal + AI)",
+            "Koreksi typo subtitle klip terpilih pakai AI (kamus lokal selalu aktif gratis; memakai token AI)",
             checked=bool(self._settings.enable_transcript_proofread),
             accent_color="#7C3AED",
         )
-        tr_form.addRow("Koreksi Typo", self.proofread_chk)
+        tr_form.addRow("Koreksi Typo AI", self.proofread_chk)
         tr_lay.addLayout(tr_form)
         body.addWidget(tr_card)
 

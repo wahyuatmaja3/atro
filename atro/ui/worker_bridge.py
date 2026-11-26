@@ -25,6 +25,7 @@ from atro.core.schemas import (
 from atro.core.subprocess_utils import run_subprocess_capture
 from atro.modules.analyzer import AnalyzerService
 from atro.modules.cutter.service import CutterService
+from atro.modules.transcriber.proofreader import refine_transcript_result_for_clips
 from atro.pipeline.state_store import load_state, save_state
 from atro.pipeline.worker import AsyncJobWorker
 
@@ -347,6 +348,15 @@ class WorkerBridge(QObject):
                     job_dir=job_dir,
                     settings=settings,
                     logger=logger,
+                )
+
+                transcript = await refine_transcript_result_for_clips(
+                    transcript,
+                    clips=fresh_an.clips,
+                    download=download,
+                    settings=settings,
+                    logger=logger,
+                    transcript_path=tr_path,
                 )
 
                 combined_clips = old_clips + list(fresh_an.clips)
