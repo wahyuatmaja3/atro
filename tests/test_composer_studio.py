@@ -518,6 +518,7 @@ def test_eight_caption_recipes_and_social_copywriting() -> None:
         "gamer_split",
         "streamer_kinetic",
         "podcast_editorial",
+        "clipper_pop_kuning",
     }
     assert set(CAPTION_RECIPES.keys()) == expected_ids
 
@@ -533,6 +534,12 @@ def test_eight_caption_recipes_and_social_copywriting() -> None:
         assert cfg.subtitles.pos_x == 512
         assert cfg.subtitles.pos_y == 1480
         assert cfg.subtitles.placement_preset == "custom"
+
+    apply_caption_recipe(cfg, "clipper_pop_kuning")
+    assert cfg.subtitles.active_word_scale == pytest.approx(1.38)
+    assert cfg.subtitles.uppercase is False
+    apply_caption_recipe(cfg, "hormozi_viral")
+    assert cfg.subtitles.active_word_scale is None
 
     pack_shorts = generate_social_copywriting(
         clip_title="Cara Cuan 100 Juta Pertama",
@@ -619,6 +626,99 @@ def test_pill_glass_dual_keyword_and_emoji_ass_and_preview(tmp_path: Path) -> No
         )
         assert img.width() == 1080
         assert img.height() == 1920
+
+
+def test_clipper_pop_kuning_recipe_and_shorts_template_wysiwyg(tmp_path: Path) -> None:
+    ensure_qt_gui_app()
+    from atro.core.presets import render_template_thumbnail_qimage
+    from atro.modules.cutter.composer_renderer import compile_composer_ffmpeg_plan
+    from atro.modules.cutter.subtitle_burner import (
+        compute_caption_line_layout,
+        resolve_active_word_scale,
+    )
+
+    cfg = build_ready_template_config("shorts_clipper_pop", clip_title="Shorts Viral Pop", start_time=0.0, end_time=4.0)
+    cfg.timing.padding_sec = 0.0
+    assert cfg.subtitles.caption_recipe == "clipper_pop_kuning"
+    assert cfg.subtitles.font_family == "Impact"
+    assert cfg.subtitles.uppercase is False
+    assert cfg.subtitles.highlight_color_hex == "#FDD700"
+    assert cfg.subtitles.primary_color_hex == "#FFFFFF"
+    assert cfg.subtitles.caption_bg_mode == "none"
+    assert cfg.subtitles.max_words_per_line == 5
+    assert resolve_active_word_scale(cfg.subtitles) == pytest.approx(1.38)
+
+    # Adjacent word bounding boxes must not overlap when active word scales up 1.38x
+    layout = compute_caption_line_layout(
+        config=cfg,
+        raw_words=["brand", "ada", "yang", "nanya", "sama"],
+        active_idx=2,
+        canvas_w=1080,
+        canvas_h=1920,
+    )
+    scaled_spans: list[tuple[float, float]] = []
+    for wb in layout.word_boxes:
+        w_eff = wb.width * (1.38 if wb.is_active else 1.0)
+        cx = wb.local_x + wb.width * 0.5
+        scaled_spans.append((cx - w_eff * 0.5, cx + w_eff * 0.5))
+    for (_, right_prev), (left_next, _) in zip(scaled_spans, scaled_spans[1:]):
+        assert left_next > right_prev
+
+    segs = [
+        TranscriptSegment(
+            index=0,
+            start=0.0,
+            end=3.2,
+            text="brand ada yang nanya sama",
+            words=[
+                TranscriptWord(word="brand", start=0.1, end=0.5),
+                TranscriptWord(word="ada", start=0.5, end=0.9),
+                TranscriptWord(word="yang", start=0.9, end=1.4),
+                TranscriptWord(word="nanya", start=1.4, end=2.0),
+                TranscriptWord(word="sama", start=2.0, end=2.8),
+            ],
+        )
+    ]
+    ass_path = generate_composer_ass_file(
+        output_ass_path=tmp_path / "shorts_clipper_pop.ass",
+        config=cfg,
+        segments=segs,
+        clip_duration_sec=4.0,
+        clip_start_sec=0.0,
+        clip_end_sec=4.0,
+    )
+    assert ass_path is not None and ass_path.is_file()
+    ass_text = ass_path.read_text(encoding="utf-8")
+    assert "Impact" in ass_text
+    assert "&H0000D7FD&" in ass_text  # #FDD700
+    assert "\\t(0,65," in ass_text
+    assert "brand ada" in ass_text  # natural lowercase preserved
+
+    src = np.full((720, 1280, 3), (45, 40, 55), dtype=np.uint8)
+    img = render_preview_frame(
+        source_frame_bgr=src,
+        config=cfg,
+        rel_time_sec=1.1,
+        segments=segs,
+        clip_start_sec=0.0,
+        clip_end_sec=4.0,
+    )
+    assert img.width() == 1080 and img.height() == 1920
+
+    plan = compile_composer_ffmpeg_plan(
+        config=cfg,
+        src_w=1280,
+        src_h=720,
+        fps=30.0,
+        duration_sec=4.0,
+        work_dir=tmp_path / "plan_clipper_pop",
+        segments=segs,
+        clip_start_sec=0.0,
+        clip_end_sec=4.0,
+    )
+    assert plan.ass_path is not None and plan.ass_path.is_file()
+    thumb = render_template_thumbnail_qimage("shorts_clipper_pop", width=120, height=214)
+    assert thumb.width() == 120 and thumb.height() == 214
 
 
 @pytest.mark.asyncio
