@@ -4,6 +4,11 @@ from __future__ import annotations
 
 _ERROR_RULES: tuple[tuple[tuple[str, ...], str, str], ...] = (
     (
+        ("402", "insufficient balance", "insufficient_balance", "billing", "credit"),
+        "Saldo / kredit API AI tidak mencukupi (Insufficient Balance).",
+        "Isi saldo provider AI Anda atau ganti provider/model di Pengaturan (atau gunakan Ollama lokal).",
+    ),
+    (
         ("gemini_api_key", "openai_api_key", "api key", "api_key", "401", "unauthorized", "invalid key"),
         "Kunci API AI belum valid atau belum diisi.",
         "Buka Pengaturan di pojok kanan atas, lalu periksa kembali API Key Gemini atau Endpoint OpenAI Anda.",

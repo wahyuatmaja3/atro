@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import threading
 from typing import Any, Literal, Optional, TypeVar
 
 import requests
@@ -14,6 +15,23 @@ from atro.modules.analyzer.prompts import build_json_schema_reminder
 TModel = TypeVar("TModel", bound=BaseModel)
 
 ResponseFormatMode = Literal["json_schema", "json_object", "none"]
+
+_FORMAT_CACHE_LOCK = threading.Lock()
+_ENDPOINT_MIN_MODE_IDX: dict[tuple[str, str], int] = {}
+
+
+class OpenAICompatRequestError(RuntimeError):
+    """RuntimeError carrying optional HTTP status code from an OpenAI-Compatible API."""
+
+    def __init__(self, message: str, status_code: Optional[int] = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def clear_response_format_cache() -> None:
+    """Reset remembered response_format fallback offsets for OpenAI-compatible endpoints."""
+    with _FORMAT_CACHE_LOCK:
+        _ENDPOINT_MIN_MODE_IDX.clear()
 
 OPENAI_CLIP_JSON_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -177,9 +195,14 @@ def call_openai_structured_json_sync(
         headers["X-Title"] = "ATRO"
 
     modes: tuple[ResponseFormatMode, ...] = ("json_schema", "json_object", "none")
+    cache_key = (endpoint.lower(), (model_name or "").strip().lower())
+    with _FORMAT_CACHE_LOCK:
+        start_idx = _ENDPOINT_MIN_MODE_IDX.get(cache_key, 0)
     last_error_detail = ""
+    last_status_code: Optional[int] = None
 
-    for idx, mode in enumerate(modes):
+    for idx in range(start_idx, len(modes)):
+        mode = modes[idx]
         payload = build_openai_payload(
             model_name=model_name,
             system_instruction=system_instruction,
@@ -192,9 +215,17 @@ def call_openai_structured_json_sync(
         try:
             resp = requests.post(endpoint, headers=headers, json=payload, timeout=timeout)
         except requests.RequestException as exc:
-            raise RuntimeError(f"Gagal menghubungi endpoint '{endpoint}': {exc}") from exc
+            raise OpenAICompatRequestError(
+                f"Gagal menghubungi endpoint '{endpoint}': {exc}",
+                status_code=None,
+            ) from exc
 
         if resp.status_code < 400:
+            if idx > start_idx:
+                with _FORMAT_CACHE_LOCK:
+                    _ENDPOINT_MIN_MODE_IDX[cache_key] = max(
+                        _ENDPOINT_MIN_MODE_IDX.get(cache_key, 0), idx
+                    )
             try:
                 data = resp.json()
             except ValueError as exc:
@@ -210,14 +241,21 @@ def call_openai_structured_json_sync(
                     f"Output model tidak sesuai schema JSON: {exc}. Cuplikan: {cleaned_json[:300]}"
                 ) from exc
 
+        last_status_code = resp.status_code
         snippet = (resp.text or "").strip()[:400]
         last_error_detail = f"HTTP {resp.status_code}: {snippet}"
         has_next = idx < len(modes) - 1
         if has_next and _should_fallback_response_format(resp.status_code, resp.text or ""):
             continue
-        raise RuntimeError(f"Error dari endpoint OpenAI-Compatible ({last_error_detail})")
+        raise OpenAICompatRequestError(
+            f"Error dari endpoint OpenAI-Compatible ({last_error_detail})",
+            status_code=last_status_code,
+        )
 
-    raise RuntimeError(f"Error dari endpoint OpenAI-Compatible ({last_error_detail})")
+    raise OpenAICompatRequestError(
+        f"Error dari endpoint OpenAI-Compatible ({last_error_detail})",
+        status_code=last_status_code,
+    )
 
 
 def call_openai_compatible_sync(
