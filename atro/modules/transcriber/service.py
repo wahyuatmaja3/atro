@@ -174,6 +174,7 @@ class TranscriberService:
             language_hint=lang_hint,
             initial_prompt=initial_prompt,
             hotwords=hotwords,
+            speed_mode=getattr(settings, "whisper_speed_mode", "fast"),
         )
         if not segments:
             raise RuntimeError("faster-whisper tidak menghasilkan segmen transkrip apa pun.")

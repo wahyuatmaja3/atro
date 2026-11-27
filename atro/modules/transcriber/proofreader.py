@@ -75,6 +75,14 @@ _ID_TITLE_HINTS: set[str] = {
     "ribu",
     "pakai",
     "pake",
+    "mabar",
+    "anjir",
+    "gacor",
+    "malah",
+    "detik",
+    "klip",
+    "kicep",
+    "auto",
 }
 
 _HALLUCINATION_PHRASES: tuple[str, ...] = (

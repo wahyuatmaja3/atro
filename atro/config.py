@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field, ValidationInfo, field_validator
 from atro.core.schemas import EditFormat, FramingMode
 
 LLMProvider = Literal["gemini", "openai_compatible"]
+WhisperSpeedMode = Literal["fast", "balanced", "accurate"]
 
 
 def get_app_base_dir() -> Path:
@@ -39,6 +40,7 @@ class AppSettings(BaseModel):
     whisper_model: Literal["tiny", "base", "small", "medium", "large-v3-turbo"] = "small"
     whisper_device: Literal["auto", "cpu", "cuda"] = "auto"
     whisper_language: Literal["auto", "id", "en"] = "auto"
+    whisper_speed_mode: WhisperSpeedMode = "fast"
     enable_transcript_proofread: bool = False
     default_clip_count: int = Field(default=4, ge=1, le=10)
     default_min_duration_sec: int = Field(default=30, ge=5, le=300)
@@ -172,6 +174,10 @@ def load_settings(base_dir: Optional[Path] = None) -> AppSettings:
     env_wlang = os.environ.get("ATRO_WHISPER_LANGUAGE", "").strip()
     if env_wlang in ("auto", "id", "en"):
         raw["whisper_language"] = env_wlang
+
+    env_wspeed = os.environ.get("ATRO_WHISPER_SPEED_MODE", "").strip().lower()
+    if env_wspeed in ("fast", "balanced", "accurate"):
+        raw["whisper_speed_mode"] = env_wspeed
 
     env_key = os.environ.get("GEMINI_API_KEY", "").strip()
     if env_key:

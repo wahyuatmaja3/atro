@@ -206,6 +206,14 @@ class SettingsWidget(QWidget):
         self.whisper_device_combo.setCurrentText(self._settings.whisper_device)
         tr_form.addRow("Whisper Device", self.whisper_device_combo)
 
+        self.whisper_speed_combo = QComboBox()
+        self.whisper_speed_combo.addItem("Cepat - Batched 2x-4x (Direkomendasikan)", "fast")
+        self.whisper_speed_combo.addItem("Seimbang (Batched Beam 2)", "balanced")
+        self.whisper_speed_combo.addItem("Akurat Maksimal (Beam 5 Klasik)", "accurate")
+        ws_idx = self.whisper_speed_combo.findData(getattr(self._settings, "whisper_speed_mode", "fast"))
+        self.whisper_speed_combo.setCurrentIndex(max(0, ws_idx))
+        tr_form.addRow("Kecepatan Transkrip", self.whisper_speed_combo)
+
         self.whisper_lang_combo = QComboBox()
         self.whisper_lang_combo.addItem("Otomatis (Sesuai Judul & Audio)", "auto")
         self.whisper_lang_combo.addItem("Bahasa Indonesia (id)", "id")
@@ -333,6 +341,8 @@ class SettingsWidget(QWidget):
         self._select_matching_preset(self._settings.openai_base_url)
         self.whisper_model_combo.setCurrentText(self._settings.whisper_model)
         self.whisper_device_combo.setCurrentText(self._settings.whisper_device)
+        ws_idx = self.whisper_speed_combo.findData(getattr(self._settings, "whisper_speed_mode", "fast"))
+        self.whisper_speed_combo.setCurrentIndex(max(0, ws_idx))
         wl_idx = self.whisper_lang_combo.findData(self._settings.whisper_language)
         self.whisper_lang_combo.setCurrentIndex(max(0, wl_idx))
         self.proofread_chk.setChecked(bool(self._settings.enable_transcript_proofread))
@@ -441,6 +451,7 @@ class SettingsWidget(QWidget):
         self._settings.openai_model = openai_model or self._settings.openai_model
         self._settings.whisper_model = self.whisper_model_combo.currentText()  # type: ignore[assignment]
         self._settings.whisper_device = self.whisper_device_combo.currentText()  # type: ignore[assignment]
+        self._settings.whisper_speed_mode = self.whisper_speed_combo.currentData() or "fast"  # type: ignore[assignment]
         self._settings.whisper_language = self.whisper_lang_combo.currentData() or "auto"  # type: ignore[assignment]
         self._settings.enable_transcript_proofread = self.proofread_chk.isChecked()
         ws_text = self.workspace_edit.text().strip()
