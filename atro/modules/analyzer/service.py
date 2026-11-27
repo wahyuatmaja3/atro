@@ -184,6 +184,7 @@ class AnalyzerService:
                     clip.start_time,
                     clip.end_time,
                     available_sfx=available_sfx,
+                    edit_format=request.edit_format,
                 )
 
         for warn in warnings:

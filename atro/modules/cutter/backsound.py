@@ -60,7 +60,7 @@ def build_audio_filter_chain(
     intro_duration_sec: float = 0.0,
     bgm_input_idx: int = 1,
     enable_loudnorm: bool = False,
-    transition_sfx_events: Optional[list[tuple[float, int, float]]] = None,
+    transition_sfx_events: Optional[list[tuple[float, int, float] | tuple[float, int, float, Optional[float]]]] = None,
 ) -> tuple[list[str], Optional[str]]:
     """Build FFmpeg filter_complex audio lines and return `(lines, output_label)`."""
     dur_main = max(0.5, round(float(duration_sec), 3))
@@ -68,11 +68,16 @@ def build_audio_filter_chain(
     has_intro = intro_tts_input_idx is not None and dur_intro > 0.0
     total_dur = round(dur_main + (dur_intro if has_intro else 0.0), 3)
     vol = max(0.0, min(1.0, float(bgm_volume)))
-    valid_sfx = [
-        (max(0.0, round(float(t), 3)), int(idx), max(0.0, min(1.0, float(sv))))
-        for t, idx, sv in (transition_sfx_events or [])
-        if 0.0 <= float(t) < max(0.05, total_dur - 0.05) and float(sv) > 0.005
-    ]
+    valid_sfx: list[tuple[float, int, float, Optional[float]]] = []
+    for ev in transition_sfx_events or []:
+        t_val = float(ev[0])
+        idx_val = int(ev[1])
+        sv_val = float(ev[2])
+        max_d = float(ev[3]) if len(ev) > 3 and ev[3] is not None else None
+        if 0.0 <= t_val < max(0.05, total_dur - 0.05) and sv_val > 0.005:
+            valid_sfx.append(
+                (max(0.0, round(t_val, 3)), idx_val, max(0.0, min(1.0, sv_val)), max_d)
+            )
     has_sfx = bool(valid_sfx)
 
     if not has_source_audio and not has_backsound and not has_intro and not has_sfx:
@@ -152,7 +157,7 @@ def build_audio_filter_chain(
     if has_sfx:
         # Group events by input index so shared WAV inputs get asplit cleanly
         counts_by_idx: dict[int, int] = {}
-        for _, in_idx, _ in valid_sfx:
+        for _, in_idx, _, _ in valid_sfx:
             counts_by_idx[in_idx] = counts_by_idx.get(in_idx, 0) + 1
         split_cursor: dict[int, int] = {}
         for in_idx, cnt in counts_by_idx.items():
@@ -162,7 +167,7 @@ def build_audio_filter_chain(
                 split_cursor[in_idx] = 0
 
         sfx_lbls: list[str] = []
-        for k, (ev_t, in_idx, sfx_vol) in enumerate(valid_sfx):
+        for k, (ev_t, in_idx, sfx_vol, max_dur) in enumerate(valid_sfx):
             if in_idx in split_cursor:
                 slot = split_cursor[in_idx]
                 split_cursor[in_idx] = slot + 1
@@ -171,8 +176,15 @@ def build_audio_filter_chain(
                 in_lbl = f"{in_idx}:a"
             delay_ms = max(0, int(round(ev_t * 1000.0)))
             out_sfx = f"sfx_ev_{k}"
+            trim_fade = ""
+            if max_dur is not None and max_dur > 0.35:
+                cap_d = round(float(max_dur), 3)
+                fade_d = round(min(0.55, cap_d * 0.22), 3)
+                fade_st = max(0.05, round(cap_d - fade_d, 3))
+                trim_fade = f"atrim=0:{cap_d:.3f},asetpts=PTS-STARTPTS,afade=t=out:st={fade_st:.3f}:d={fade_d:.3f},"
             lines.append(
                 f"[{in_lbl}]aresample=48000,aformat=sample_rates=48000:channel_layouts=stereo,"
+                f"{trim_fade}"
                 f"volume={sfx_vol:.3f},adelay={delay_ms}|{delay_ms},"
                 f"apad=whole_dur={total_dur:.3f},atrim=0:{total_dur:.3f},asetpts=PTS-STARTPTS[{out_sfx}]"
             )

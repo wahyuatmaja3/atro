@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from typing import Optional
 
 from atro.core.schemas import DownloadResult, JobRequest
+from atro.modules.cutter.sfx import format_sfx_catalog_for_prompt
 
 
 def build_system_instruction(
@@ -53,12 +54,19 @@ def build_system_instruction(
     sfx_list = [s.strip() for s in (available_sfx or []) if s and s.strip()]
     sfx_guidance = ""
     if sfx_list:
-        sfx_preview = ", ".join(sfx_list[:75])
+        sfx_catalog_text = format_sfx_catalog_for_prompt(sfx_list, edit_format=request.edit_format)
+        gaming_sfx_note = (
+            "Untuk klip GAMING, prioritaskan momen clutch, rage, fail, sus/impostor, jumpscare, loot, disconnect, "
+            "diam canggung, atau freeze punchline agar SFX & zoom-in/out terasa hidup.\n"
+            if request.edit_format == "game"
+            else ""
+        )
         sfx_guidance = (
-            "- sfx_cues (opsional): Pilih 1-4 momen punchline, kaget, canggung, tertawa, atau penekanan cerita di dalam klip "
-            "untuk dipicu efek suara meme (t_sec dalam detik absolut transkrip, sfx_name, reason). "
-            "Berikan jarak minimal 2.5 detik antar SFX dan HANYA gunakan nama persis dari daftar SFX tersedia berikut: "
-            f"[{sfx_preview}].\n"
+            "- sfx_cues (opsional): Pilih 1-5 momen punchline, kaget, canggung, tertawa, fail, clutch, atau penekanan cerita "
+            "di dalam klip untuk dipicu efek suara meme (t_sec dalam detik absolut transkrip, sfx_name, reason). "
+            f"{gaming_sfx_note}"
+            "Berikan jarak minimal 2.5 detik antar SFX dan HANYA gunakan nama persis dari daftar SFX & konteks pemakaian berikut:\n"
+            f"{sfx_catalog_text}\n"
         )
 
     return (

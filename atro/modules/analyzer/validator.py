@@ -85,35 +85,167 @@ def sanitize_sfx_cues(
 
 
 _HEURISTIC_SFX_RULES: tuple[tuple[tuple[str, ...], tuple[str, ...], str], ...] = (
+    # Money / loot / top-up
     (
-        ("cuan", "duit", "uang", "juta", "miliar", "omzet", "kaya", "harga", "bayar", "mahal"),
+        ("cuan", "duit", "uang", "juta", "miliar", "omzet", "kaya", "harga", "bayar", "mahal", "top up", "diamond", "bounty", "gold"),
         ("Cash Register (Kaching)", "Ding", "pop"),
-        "Topik uang / nilai besar",
+        "Topik uang / cuan / bounty",
+    ),
+    # Loot / gear pickup (gaming)
+    (
+        ("loot", "senjata", "item", "upgrade", "armor", "equip", "skin", "drop"),
+        ("Counter Strike Item Pickup", "Cash Register (Kaching)", "Ding"),
+        "Dapat loot / item / upgrade",
+    ),
+    # Awkward / silence (check before generic shock/rage)
+    (
+        ("canggung", "krik", "diam", "hening", "awkward", "kicep", "bengong", "garing"),
+        ("Awkward", "Blinking Eyes", "Spongebob Sad Face"),
+        "Momen canggung / kicep",
+    ),
+    # Suspicion / impostor / troll
+    (
+        ("bohong", "boong", "curiga", "mencurigakan", "sus", "penipu", "ketahuan", "impostor", "troll", "khianat"),
+        ("Among Us SUS", "Vine Boom", "Metal Gear Solid Alert"),
+        "Momen curiga / sus / plot twist",
+    ),
+    # Rage quit / disconnect / join
+    (
+        ("rage quit", "disconnect", "dc", "afk", "keluar", "leave", "cabut", "ninggalin"),
+        ("Discord Leave", "Spongebob Sad Face", "DJ Stop"),
+        "Teammate rage quit / disconnect",
     ),
     (
-        ("bohong", "curiga", "mencurigakan", "aneh", "sus", "penipu", "ketahuan"),
-        ("Among Us SUS", "Metal Gear Solid Alert", "Prowler Goku"),
-        "Momen curiga / plot twist",
+        ("mabar", "join", "gabung", "discord", "spawn"),
+        ("Discord Join", "pop", "Ding"),
+        "Player join / masuk mabar",
+    ),
+    # Clutch / headshot / victory / hype
+    (
+        ("clutch", "comeback", "ulti", "maniac", "savage", "ace", "wipe", "rata", "bantai", "gacor"),
+        ("Bass Drop", "Japanese Drum", "Crowd Applause"),
+        "Momen clutch / wipeout / ulti",
     ),
     (
-        ("kaget", "anjir", "gila", "parah", "serius", "buset", "plot twist", "ternyata", "waduh"),
+        ("headshot", "one tap", "karma", "telak", "makan tuh"),
+        ("Taco Bell", "Vine Boom but perfectly bass boosted", "Bass Drop"),
+        "Headshot / karma instan",
+    ),
+    (
+        ("hoki", "ajaib", "dewa", "mythic", "legendary", "gacha", "jackpot"),
+        ("Holy", "Ding", "Crowd Applause"),
+        "Momen hoki / RNG dewa",
+    ),
+    (
+        ("duel", "by one", "by1", "showdown", "yooo"),
+        ("Japanese Drum", "Prowler Goku", "Bass Drop"),
+        "Duel / showdown dramatis",
+    ),
+    # Alert / danger / horror / panic
+    (
+        ("awas", "belakang", "musuh", "bahaya", "alert", "sniper", "jumpscare", "nongol"),
+        ("Metal Gear Solid Alert", "FAHH", "Crowd Gasp"),
+        "Bahaya / musuh muncul mendadak",
+    ),
+    (
+        ("horor", "serem", "hantu", "gelap", "gemeter", "merinding", "takut", "sembunyi"),
+        ("Teeth Clattering", "Minecraft Cave Ambience", "Prowler Goku"),
+        "Suasana horor / ketakutan",
+    ),
+    (
+        ("bos", "boss", "monster", "smurf", "cheater", "hacker", "aura"),
+        ("Prowler Goku", "Hell_s Kitchen Dramatic Sound", "Vine Boom"),
+        "Boss / ancaman OP muncul",
+    ),
+    # Freeze / record scratch / confused
+    (
+        ("eh salah", "tunggu", "bentar", "stop", "freeze", "pause", "kecolongan"),
+        ("DJ Stop", "Vine Boom", "Blinking Eyes"),
+        "Record scratch / freeze salah langkah",
+    ),
+    (
+        ("kok bisa", "apaan", "huh", "bingung", "loading", "gimana sih", "nyasar"),
+        ("Blinking Eyes", "Cartoon Dizzybirds", "Wobble"),
+        "Momen bingung / bengong",
+    ),
+    # Teleport / vanish / heal / consume
+    (
+        ("teleport", "blink", "flicker", "lag", "rubberband"),
+        ("Minecraft Enderman Teleport", "Wobble", "Vanish"),
+        "Teleport / blink / lag mendadak",
+    ),
+    (
+        ("hilang", "ngilang", "lenyap", "menghilang", "vanish", "kabur"),
+        ("Vanish", "Disappear", "FAHH"),
+        "Karakter kabur / menghilang",
+    ),
+    (
+        ("minum", "potion", "heal", "shield"),
+        ("Minecraft Drinking", "Water Droplet", "pop"),
+        "Minum potion / healing",
+    ),
+    (
+        ("makan", "regen", "ngemil", "gigit"),
+        ("Minecraft Eating", "Munch", "pop"),
+        "Makan / regen HP",
+    ),
+    # Toxic / sensor / yapping
+    (
+        ("anjing", "bangsat", "asu", "cok", "sensor", "toxic"),
+        ("Censor", "Vine Boom but perfectly bass boosted", "Bonk"),
+        "Sensor kata kasar / rage",
+    ),
+    (
+        ("bacot", "ngomel", "ceramah", "bawel", "yapping"),
+        ("Cartoon Phone Talking", "Awkward", "Bonk"),
+        "Teammate bacot / yapping",
+    ),
+    # Sad / lose streak / fail / blunder / damage
+    (
+        ("lose streak", "turun rank", "sedih", "kecewa", "nyesek", "rip", "gagal total"),
+        ("Spongebob Sad Face", "Awkward", "Lego Break Fall Apart"),
+        "Kekalahan / kecewa berat",
+    ),
+    (
+        ("mati", "tewas", "knock", "tumbang", "pecah", "hancur", "roboh", "meledak"),
+        ("Lego Break Fall Apart", "Minecraft Take Damage", "Garry_s Mod Ragdoll"),
+        "Karakter mati / hancur",
+    ),
+    (
+        ("patah", "fall damage", "ketinggian", "critical", "terpental", "ragdoll"),
+        ("Bone Break Crack Snap", "Garry_s Mod Ragdoll", "Splat"),
+        "Fall damage / ragdoll parah",
+    ),
+    (
+        ("bonk", "pukul", "kepentok", "nabrak", "salah", "gagal", "jatuh", "bodoh", "tolol", "blunder", "kalah", "noob", "cupu"),
+        ("Bonk", "Lego Break Fall Apart", "Metal Pipe", "Splat"),
+        "Momen blunder / bonk / fail",
+    ),
+    (
+        ("damage", "kena hit", "creeper", "jebakan", "trap", "sekarat", "1 hp", "satu hp"),
+        ("Minecraft Take Damage", "Hell_s Kitchen Dramatic Sound", "Crowd Gasp"),
+        "Kena damage / HP kritis",
+    ),
+    # Rizz / blush / anime / comedy / generic shock
+    (
+        ("rizz", "ganteng", "keren", "sultan", "emote", "sigma", "kece"),
+        ("Rizz", "Blush", "Ding"),
+        "Momen pamer / rizz / emote",
+    ),
+    (
+        ("malu", "salting", "ciee", "blush"),
+        ("Blush", "Oppai", "pop"),
+        "Salah tingkah / malu-malu",
+    ),
+    (
+        ("kaget", "anjir", "gila", "parah", "serius", "buset", "plot twist", "ternyata", "waduh", "astaga"),
         ("Vine Boom", "Bass Drop", "Metal Gear Solid Alert", "Ding"),
         "Punchline / momen kaget",
     ),
     (
-        ("canggung", "krik", "diam", "hening", "awkward", "kicep", "bengong"),
-        ("Awkward", "Spongebob Sad Face", "Teeth Clattering"),
-        "Momen canggung",
-    ),
-    (
-        ("salah", "gagal", "jatuh", "bodoh", "tolol", "blunder", "kalah", "hancur"),
-        ("Bonk", "Lego Break Fall Apart", "Metal Pipe", "Splat"),
-        "Momen blunder / fail",
-    ),
-    (
-        ("wkwk", "haha", "hehe", "ngakak", "ketawa", "tertawa", "kocak", "lucu"),
+        ("wkwk", "haha", "hehe", "ngakak", "ketawa", "tertawa", "kocak", "lucu", "menang", "booyah", "victory", "gg"),
         ("Crowd Applause", "FAHH", "Cartoon Dizzybirds", "pop"),
-        "Reaksi tawa / komedi",
+        "Reaksi tawa / kemenangan",
     ),
 )
 
@@ -123,24 +255,82 @@ def build_heuristic_sfx_cues(
     clip_start: float,
     clip_end: float,
     available_sfx: Sequence[str],
+    edit_format: str = "podcast",
+    max_cues: int = 4,
 ) -> list[SfxCueItem]:
-    """Infer lightweight contextual SFX cues from transcript keywords matching available SFX files."""
+    """Infer contextual SFX cues from transcript keywords + gaming rhythm matching available SFX files."""
     if not available_sfx or not segments:
         return []
     in_win = [s for s in segments if s.end > clip_start and s.start < clip_end]
     cues: list[SfxCueItem] = []
+    used_names: set[str] = set()
+
     for seg in in_win:
         low = seg.text.lower()
+        best_rule: Optional[tuple[tuple[str, ...], str]] = None
+        best_hits = 0
         for keywords, pref_names, reason in _HEURISTIC_SFX_RULES:
-            if any(kw in low for kw in keywords):
-                chosen = next((_match_available_sfx_name(p, available_sfx) for p in pref_names if _match_available_sfx_name(p, available_sfx)), None)
-                if chosen:
-                    t_cue = round(max(clip_start, min(clip_end - 0.15, seg.end - 0.15)), 3)
-                    if not cues or (t_cue - cues[-1].t_sec) >= 2.5:
-                        cues.append(SfxCueItem(t_sec=t_cue, sfx_name=chosen, volume=0.72, reason=reason))
-                    break
-        if len(cues) >= 4:
+            hits = sum(1 for kw in keywords if kw in low)
+            if hits > best_hits:
+                best_hits = hits
+                best_rule = (pref_names, reason)
+        if best_rule is not None:
+            pref_names, reason = best_rule
+            # Prefer unused SFX first so a clip gets varied reactions instead of repeating 1 sound
+            chosen = next(
+                (
+                    m
+                    for p in pref_names
+                    if (m := _match_available_sfx_name(p, available_sfx)) and m not in used_names
+                ),
+                None,
+            ) or next(
+                (m for p in pref_names if (m := _match_available_sfx_name(p, available_sfx))),
+                None,
+            )
+            if chosen:
+                t_cue = round(max(clip_start, min(clip_end - 0.15, seg.end - 0.15)), 3)
+                if not cues or (t_cue - cues[-1].t_sec) >= 2.5:
+                    cues.append(SfxCueItem(t_sec=t_cue, sfx_name=chosen, volume=0.72, reason=reason))
+                    used_names.add(chosen)
+        if len(cues) >= max_cues:
             break
+
+    # Gaming rhythm fallback: when gaming transcripts lack explicit Indonesian trigger keywords
+    # (e.g., short exclamations, questions, or dramatic pauses), place contextually fitting meme SFX.
+    if edit_format == "game" and len(cues) < min(3, max_cues) and in_win:
+        rhythm_candidates: list[tuple[float, tuple[str, ...], str]] = []
+        for idx_s, seg in enumerate(in_win):
+            txt = seg.text.strip()
+            t_seg = round(max(clip_start + 0.3, min(clip_end - 0.2, seg.end - 0.12)), 3)
+            if "?" in txt:
+                rhythm_candidates.append((t_seg, ("Blinking Eyes", "Among Us SUS", "Vine Boom"), "Reaksi pertanyaan / kebingungan"))
+            elif "!" in txt:
+                rhythm_candidates.append((t_seg, ("Vine Boom", "Bass Drop", "Metal Gear Solid Alert", "Ding"), "Penekanan momen seru"))
+            elif idx_s > 0 and (seg.start - in_win[idx_s - 1].end) >= 0.9:
+                t_gap = round(max(clip_start + 0.2, min(clip_end - 0.2, in_win[idx_s - 1].end + 0.2)), 3)
+                rhythm_candidates.append((t_gap, ("Awkward", "DJ Stop", "Vine Boom"), "Jeda dramatis / freeze"))
+            elif idx_s == len(in_win) - 1:
+                rhythm_candidates.append((t_seg, ("Vine Boom", "Bonk", "pop"), "Punchline penutup klip"))
+
+        for t_cand, prefs, reason in rhythm_candidates:
+            if len(cues) >= max_cues:
+                break
+            if any(abs(t_cand - c.t_sec) < 2.5 for c in cues):
+                continue
+            chosen = next(
+                (
+                    m
+                    for p in prefs
+                    if (m := _match_available_sfx_name(p, available_sfx)) and m not in used_names
+                ),
+                None,
+            ) or next((m for p in prefs if (m := _match_available_sfx_name(p, available_sfx))), None)
+            if chosen:
+                cues.append(SfxCueItem(t_sec=t_cand, sfx_name=chosen, volume=0.70, reason=reason))
+                used_names.add(chosen)
+                cues.sort(key=lambda c: c.t_sec)
+
     return cues
 
 
