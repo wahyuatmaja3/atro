@@ -765,3 +765,203 @@ async def test_orchestrator_saves_transcript_at_55_pct_and_proofreads_only_clips
     assert "[2]" not in proofread_prompts[0]
     persisted = TranscriptResult.model_validate_json((job_dir / "transcript.json").read_text(encoding="utf-8"))
     assert persisted.segments[1].text == "Bawa tas 200 juta ke Sila."
+
+
+@pytest.mark.asyncio
+async def test_whisper_speed_profiles_model_cache_and_cuda_precheck(tmp_path: Path, monkeypatch) -> None:
+    import faster_whisper
+    from atro.modules.transcriber import whisper_engine as we
+
+    we.clear_whisper_model_cache()
+    threads = we.get_optimal_cpu_threads()
+    assert 1 <= threads <= 8
+
+    init_calls: list[dict] = []
+    transcribe_calls: list[dict] = []
+
+    class FakeModel:
+        def __init__(self, model_name, device="cpu", compute_type="int8", cpu_threads=0):
+            init_calls.append({
+                "model": model_name,
+                "device": device,
+                "compute_type": compute_type,
+                "cpu_threads": cpu_threads,
+            })
+
+        def transcribe(
+            self,
+            audio,
+            language=None,
+            vad_filter=True,
+            vad_parameters=None,
+            word_timestamps=True,
+            condition_on_previous_text=False,
+            beam_size=5,
+            best_of=5,
+            temperature=None,
+            initial_prompt=None,
+            hotwords=None,
+            repetition_penalty=1.08,
+            no_repeat_ngram_size=3,
+            hallucination_silence_threshold=1.5,
+        ):
+            transcribe_calls.append({
+                "kind": "seq",
+                "beam_size": beam_size,
+                "best_of": best_of,
+                "temperature": temperature,
+            })
+            seg = SimpleNamespace(
+                start=0.1,
+                end=1.4,
+                text="Halo tes cepat.",
+                words=[
+                    SimpleNamespace(word="Halo", start=0.1, end=0.5),
+                    SimpleNamespace(word="tes", start=0.55, end=0.9),
+                    SimpleNamespace(word="cepat.", start=0.95, end=1.4),
+                ],
+            )
+            return iter([seg]), SimpleNamespace(language="id")
+
+    class FakeBatched:
+        def __init__(self, model):
+            self.model = model
+
+        def transcribe(
+            self,
+            audio,
+            language=None,
+            vad_filter=True,
+            vad_parameters=None,
+            word_timestamps=True,
+            condition_on_previous_text=False,
+            beam_size=1,
+            batch_size=8,
+            temperature=None,
+            initial_prompt=None,
+            hotwords=None,
+            repetition_penalty=1.08,
+            no_repeat_ngram_size=3,
+            hallucination_silence_threshold=1.5,
+        ):
+            transcribe_calls.append({
+                "kind": "batched",
+                "beam_size": beam_size,
+                "batch_size": batch_size,
+                "temperature": temperature,
+                "hotwords": hotwords,
+            })
+            seg = SimpleNamespace(
+                start=0.1,
+                end=1.4,
+                text="Halo batched cepat.",
+                words=[
+                    SimpleNamespace(word="Halo", start=0.1, end=0.5),
+                    SimpleNamespace(word="batched", start=0.55, end=0.95),
+                    SimpleNamespace(word="cepat.", start=1.0, end=1.4),
+                ],
+            )
+            return iter([seg]), SimpleNamespace(language="id")
+
+    monkeypatch.setattr(faster_whisper, "WhisperModel", FakeModel)
+    monkeypatch.setattr(faster_whisper, "BatchedInferencePipeline", FakeBatched)
+    monkeypatch.setattr(we, "_probe_cuda_ready", lambda: (False, "cublas64_12.dll belum terpasang"))
+
+    wav = tmp_path / "audio.wav"
+    wav.write_bytes(b"RIFF" + b"\x00" * 64)
+    logger = JobLogger("j_sp", tmp_path / "job.log")
+
+    # 1) Auto device skips broken CUDA completely and runs fast batched mode on CPU
+    segs1, lang1, used1 = await we.transcribe_with_faster_whisper(
+        audio_path=wav,
+        video_duration_sec=5.0,
+        model_name="small",
+        device_pref="auto",
+        logger=logger,
+        language_hint="id",
+        hotwords="Halo, Tes",
+        speed_mode="fast",
+    )
+    assert lang1 == "id"
+    assert used1 == "small (cpu/int8)"
+    assert len(init_calls) == 1
+    assert init_calls[0]["device"] == "cpu"
+    assert init_calls[0]["cpu_threads"] == threads
+    assert transcribe_calls[-1]["kind"] == "batched"
+    assert transcribe_calls[-1]["beam_size"] == 1
+    assert transcribe_calls[-1]["batch_size"] == 8
+    assert transcribe_calls[-1]["hotwords"] is None
+    assert "batched" in segs1[0].text
+
+    # 2) Repeat call with same model/device/threads reuses cached WhisperModel (no duplicate load!)
+    await we.transcribe_with_faster_whisper(
+        audio_path=wav,
+        video_duration_sec=5.0,
+        model_name="small",
+        device_pref="auto",
+        logger=logger,
+        language_hint="id",
+        hotwords="Halo, Tes",
+        speed_mode="balanced",
+    )
+    assert len(init_calls) == 1
+    assert transcribe_calls[-1]["kind"] == "batched"
+    assert transcribe_calls[-1]["beam_size"] == 2
+    assert transcribe_calls[-1]["hotwords"] == "Halo, Tes"
+
+    # 3) Accurate mode uses classic sequential beam=5 while still hitting model cache
+    await we.transcribe_with_faster_whisper(
+        audio_path=wav,
+        video_duration_sec=5.0,
+        model_name="small",
+        device_pref="cpu",
+        logger=logger,
+        language_hint="id",
+        speed_mode="accurate",
+    )
+    assert len(init_calls) == 1
+    assert transcribe_calls[-1]["kind"] == "seq"
+    assert transcribe_calls[-1]["beam_size"] == 5
+    we.clear_whisper_model_cache()
+
+
+@pytest.mark.asyncio
+async def test_extract_audio_wav_skips_fresh_cached_wav_and_settings_speed_ui(tmp_path: Path, monkeypatch) -> None:
+    import os
+    from atro.config import load_settings
+    from atro.modules.transcriber import whisper_engine as we
+    from atro.ui.widgets.settings_dialog import SettingsDialog
+
+    src = tmp_path / "source.mp4"
+    src.write_bytes(b"video")
+    wav = tmp_path / "audio.wav"
+    wav.write_bytes(b"R" * 2048)
+    os.utime(src, (1000, 1000))
+    os.utime(wav, (2000, 2000))
+
+    called = False
+
+    async def fail_if_called(*_a, **_kw):
+        nonlocal called
+        called = True
+        return 0, []
+
+    monkeypatch.setattr(we, "run_subprocess_streaming", fail_if_called)
+    out = await we.extract_audio_wav(src, wav, Path("ffmpeg"), JobLogger("j_ex", tmp_path / "log.txt"))
+    assert out == wav
+    assert called is False
+
+    monkeypatch.setenv("ATRO_WHISPER_SPEED_MODE", "balanced")
+    loaded = load_settings(base_dir=tmp_path)
+    assert loaded.whisper_speed_mode == "balanced"
+
+    ensure_qt_gui_app()
+    dlg = SettingsDialog(AppSettings(whisper_speed_mode="fast"))
+    try:
+        assert dlg.whisper_speed_combo.currentData() == "fast"
+        dlg.whisper_speed_combo.setCurrentIndex(dlg.whisper_speed_combo.findData("accurate"))
+        dlg._on_save()
+        assert dlg.updated_settings().whisper_speed_mode == "accurate"
+    finally:
+        dlg.close()
+        dlg.deleteLater()
