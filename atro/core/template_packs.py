@@ -554,7 +554,7 @@ _SEED_TEMPLATE_SPECS: list[dict[str, Any]] = [
         "transition_type": "fade",
         "transition_sfx": "none",
     },
-    # --- 6. GAMING (3) ---
+    # --- 6. GAMING (5) ---
     {
         "id": "gaming_split",
         "category": "Gaming",
@@ -574,6 +574,94 @@ _SEED_TEMPLATE_SPECS: list[dict[str, Any]] = [
         "vignette_enabled": True,
         "topic_header_enabled": False,
         "zoom_punch_enabled": True,
+        "font_family": "Arial Black",
+    },
+    {
+        "id": "gaming_interactive_meme",
+        "category": "Gaming",
+        "title": "Gaming Interaktif Meme (Zoom + SFX)",
+        "badge": "Zoom Sinkron SFX • Cutaway Reaksi",
+        "description": "Gameplay full 9:16 + PiP facecam + zoom-in/out mulus sinkron SFX meme & cutaway reaksi otomatis.",
+        "base_preset": "gaming_split",
+        "job_edit_format": "game",
+        "layout_mode": "pip_facecam",
+        "pip_shape": "rounded_rect",
+        "pip_position": "top_right",
+        "pip_scale": 0.33,
+        "frame_corner_radius_px": 24,
+        "frame_border_width_px": 5,
+        "frame_border_color_hex": "#22D3EE",
+        "interactive_reaction_cuts": True,
+        "caption_recipe": "streamer_kinetic",
+        "caption_bg_mode": "active_word_pill",
+        "max_words_per_line": 2,
+        "auto_emoji_enabled": True,
+        "dual_keyword_enabled": True,
+        "placement_preset": "bottom_safe",
+        "hook_enabled": True,
+        "hook_design_style": "cyan_arcade",
+        "hook_transition_in": "zoom",
+        "hook_accent_hex": "#22D3EE",
+        "vignette_enabled": True,
+        "topic_header_enabled": False,
+        "zoom_punch_enabled": True,
+        "zoom_punch_start_sec": 1.2,
+        "zoom_punch_duration_sec": 1.15,
+        "zoom_punch_factor": 1.26,
+        "zoom_punch_repeat_sec": 3.8,
+        "zoom_curve": "smooth_in_out",
+        "zoom_sync_sfx": True,
+        "zoom_target": "auto_context",
+        "silence_trim_enabled": True,
+        "silence_max_gap_sec": 0.32,
+        "contextual_sfx_enabled": True,
+        "transition_mode": "fixed",
+        "transition_type": "zoom_in",
+        "transition_sfx": "none",
+        "progress_bar_color_hex": "#22D3EE",
+        "font_family": "Arial Black",
+    },
+    {
+        "id": "gaming_split_interaktif",
+        "category": "Gaming",
+        "title": "Gaming Split Interaktif (Zoom + Cut)",
+        "badge": "Split 38:62 • Snap Zoom SFX",
+        "description": "Facecam 38% atas & gameplay 62% bawah + snap zoom in/out ke facecam/gameplay sinkron SFX + cutaway penuh.",
+        "base_preset": "gaming_split",
+        "job_edit_format": "game",
+        "layout_mode": "split_screen",
+        "split_ratio_top": 0.38,
+        "divider_enabled": True,
+        "divider_angle_deg": 0.0,
+        "divider_color_hex": "#A3E635",
+        "interactive_reaction_cuts": True,
+        "caption_recipe": "gamer_split",
+        "caption_bg_mode": "active_word_pill",
+        "max_words_per_line": 2,
+        "auto_emoji_enabled": True,
+        "dual_keyword_enabled": True,
+        "placement_preset": "split_line_center",
+        "hook_enabled": True,
+        "hook_design_style": "toxic_lime",
+        "hook_transition_in": "whip",
+        "hook_accent_hex": "#A3E635",
+        "vignette_enabled": True,
+        "topic_header_enabled": False,
+        "zoom_punch_enabled": True,
+        "zoom_punch_start_sec": 1.0,
+        "zoom_punch_duration_sec": 0.95,
+        "zoom_punch_factor": 1.32,
+        "zoom_punch_repeat_sec": 3.4,
+        "zoom_curve": "snap_out",
+        "zoom_sync_sfx": True,
+        "zoom_target": "auto_context",
+        "silence_trim_enabled": True,
+        "silence_max_gap_sec": 0.30,
+        "contextual_sfx_enabled": True,
+        "transition_mode": "fixed",
+        "transition_type": "zoom_in",
+        "transition_sfx": "none",
+        "progress_bar_color_hex": "#A3E635",
         "font_family": "Arial Black",
     },
     {
@@ -813,7 +901,14 @@ class TemplatePackEntry(BaseModel):
     vignette_enabled: bool = True
     topic_header_enabled: bool = False
     zoom_punch_enabled: bool = False
+    zoom_punch_start_sec: Optional[float] = None
+    zoom_punch_duration_sec: Optional[float] = None
+    zoom_punch_factor: Optional[float] = None
     zoom_punch_repeat_sec: Optional[float] = None
+    zoom_curve: Optional[str] = None
+    zoom_sync_sfx: Optional[bool] = None
+    zoom_target: Optional[str] = None
+    interactive_reaction_cuts: Optional[bool] = None
     silence_trim_enabled: Optional[bool] = None
     silence_max_gap_sec: Optional[float] = None
     contextual_sfx_enabled: Optional[bool] = None
@@ -902,7 +997,7 @@ def recommend_templates_for_context(
 
     recs: list[str] = []
     kw_rules: list[tuple[tuple[str, ...], list[str]]] = [
-        (("game", "gameplay", "clutch", "ranked", "valorant", "mobile legends", "ff", "pubg", "subathon"), ["gaming_split", "pip_facecam_bulat", "subathon"]),
+        (("game", "gameplay", "clutch", "ranked", "valorant", "mobile legends", "ff", "pubg", "subathon"), ["gaming_interactive_meme", "gaming_split", "gaming_split_interaktif"]),
         (("saham", "crypto", "kripto", "bitcoin", "bisnis", "omzet", "cuan", "investasi", "uang", "marketing"), ["biz_crypto_chart", "biz_executive_noir", "biz_case_study_glass"]),
         (("ustadz", "kajian", "tausiyah", "doa", "alquran", "shalat", "hijrah", "pahala", "surga"), ["religi_tausiyah_kalem", "edu_motivasi_sinematik"]),
         (("ngakak", "kocak", "prank", "wkwk", "haha", "lucu", "standup", "komedi", "clipper", "shorts", "react", "omel"), ["shorts_clipper_pop", "ginux_clip_meme", "comedy_punch_whip", "ginux_reaction_zoom"]),
@@ -921,7 +1016,7 @@ def recommend_templates_for_context(
 
     if not recs:
         if edit_format == "game":
-            recs = ["gaming_split", "pip_facecam_bulat", "subathon"]
+            recs = ["gaming_interactive_meme", "gaming_split", "gaming_split_interaktif"]
         elif edit_format == "twitch_comment":
             recs = ["twitch_comment", "pip_facecam_kotak", "comedy_punch_whip"]
         elif edit_format == "subathon":
@@ -971,6 +1066,13 @@ def export_template_package(
         vignette_enabled=snap.overlays.climax_effects.vignette_enabled,
         topic_header_enabled=snap.overlays.climax_effects.topic_header_enabled,
         zoom_punch_enabled=snap.overlays.climax_effects.zoom_punch_enabled,
+        zoom_punch_repeat_sec=snap.overlays.climax_effects.zoom_punch_repeat_sec,
+        zoom_curve=snap.overlays.climax_effects.zoom_curve,
+        zoom_sync_sfx=snap.overlays.climax_effects.zoom_sync_sfx,
+        zoom_target=snap.overlays.climax_effects.zoom_target,
+        interactive_reaction_cuts=snap.layout.interactive_reaction_cuts,
+        silence_trim_enabled=snap.timing.silence_trim_enabled,
+        contextual_sfx_enabled=snap.audio.contextual_sfx_enabled,
         font_family=snap.subtitles.font_family,
         composer_override=snap.model_dump(mode="json"),
     )

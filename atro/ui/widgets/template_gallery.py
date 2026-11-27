@@ -58,7 +58,7 @@ class TemplateGalleryWidget(QWidget):
         self.search_input.textChanged.connect(self._relayout_filtered_cards)
 
         self.category_combo = QComboBox()
-        self.category_combo.addItem("Semua Kategori (25+)", "__ALL__")
+        self.category_combo.addItem("Semua Kategori (30+)", "__ALL__")
         self.category_combo.addItem("Disarankan AI", "__REC__")
         self.category_combo.addItem("Favorit ★", "__FAV__")
         for cat in TEMPLATE_CATEGORIES:

@@ -410,6 +410,7 @@ class HomeQuickClipPage(QWidget):
         quick_templates = [
             ("podcast", "Podcast Focus"),
             ("ginux_clip_meme", "Viral Meme"),
+            ("gaming_interactive_meme", "Gaming Zoom+SFX"),
             ("gaming_split", "Gaming Split"),
             ("podcast_duo_split", "Podcast Split"),
             ("twitch_comment", "Twitch Bubble"),

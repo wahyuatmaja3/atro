@@ -1085,6 +1085,13 @@ class MainWindow(QMainWindow):
         cfg.overlays.climax_effects.progress_bar_enabled = self.viral_polish_chk.isChecked()
         cfg.overlays.climax_effects.contrast_boost_enabled = self.viral_polish_chk.isChecked()
         cfg.sync_subtitle_anchor()
+        if cfg.audio.contextual_sfx_enabled and not cfg.audio.sfx_cues:
+            from atro.core.composer_schema import ComposerSfxCue
+
+            cfg.audio.sfx_cues = [
+                ComposerSfxCue(time_sec=1.2, sfx_name="Vine Boom", volume=0.80, reason="sample_zoom"),
+                ComposerSfxCue(time_sec=4.6, sfx_name="Bonk", volume=0.75, reason="sample_fail"),
+            ]
         if cfg.subtitles.placement_preset == "above_speaker" and not cfg.layout.shot_crops:
             from atro.core.composer_schema import CropBoxConfig, FaceAnchorBox, ShotCropSegment
 

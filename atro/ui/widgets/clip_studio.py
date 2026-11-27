@@ -1176,6 +1176,13 @@ class ClipStudioWidget(QWidget):
         pin_row.addWidget(self.speaker_alias_edit, 1)
         pin_row.addWidget(alias_apply_btn)
         sf.addRow("Pin & Nama Pembicara", pin_row)
+
+        self.interactive_cuts_chk = QCheckBox("Cutaway Zoom Reaksi (Otomatis ke Facecam/Aksi)")
+        self.interactive_cuts_chk.setToolTip(
+            "Saat aktif, Auto Deteksi Wajah akan menyelipkan cutaway zoom penuh ke facecam (atau gameplay) saat momen reaksi / SFX meme."
+        )
+        self.interactive_cuts_chk.toggled.connect(self._on_ui_mutated)
+        sf.addRow("Cutaway Gaming", self.interactive_cuts_chk)
         vbox.addWidget(spk_grp)
 
         jc_grp = QGroupBox("Jump-Cut && Ritme Cepat (Saat Export)")
@@ -1965,6 +1972,33 @@ class ClipStudioWidget(QWidget):
         zp_row.addWidget(self.zoom_repeat_spin)
         clf.addRow("Zoom Klimaks", zp_row)
 
+        zp_cfg_row = QHBoxLayout()
+        self.zoom_curve_combo = QComboBox()
+        self.zoom_curve_combo.addItem("Loncat Instan (Step)", "step")
+        self.zoom_curve_combo.addItem("Mulus In-Out (Gaming)", "smooth_in_out")
+        self.zoom_curve_combo.addItem("Snap Cepat + Mundur", "snap_out")
+        self.zoom_curve_combo.currentIndexChanged.connect(self._on_ui_mutated)
+
+        self.zoom_target_combo = QComboBox()
+        self.zoom_target_combo.addItem("Tengah Kanvas", "center")
+        self.zoom_target_combo.addItem("Auto Konteks (SFX/Reaksi)", "auto_context")
+        self.zoom_target_combo.addItem("Fokus Facecam", "facecam")
+        self.zoom_target_combo.addItem("Fokus Gameplay", "gameplay")
+        self.zoom_target_combo.currentIndexChanged.connect(self._on_ui_mutated)
+
+        self.zoom_sync_sfx_chk = QCheckBox("Sinkron SFX")
+        self.zoom_sync_sfx_chk.setToolTip(
+            "Otomatis jalankan zoom in-out tepat saat SFX meme / beat reaksi berbunyi."
+        )
+        self.zoom_sync_sfx_chk.toggled.connect(self._on_ui_mutated)
+
+        zp_cfg_row.addWidget(QLabel("Kurva"))
+        zp_cfg_row.addWidget(self.zoom_curve_combo, 1)
+        zp_cfg_row.addWidget(QLabel("Target"))
+        zp_cfg_row.addWidget(self.zoom_target_combo, 1)
+        zp_cfg_row.addWidget(self.zoom_sync_sfx_chk)
+        clf.addRow("Zoom Interaktif", zp_cfg_row)
+
         hdr_row = QHBoxLayout()
         self.vignette_chk = QCheckBox("Vignette Gelap Sinematik")
         self.vignette_chk.toggled.connect(self._on_ui_mutated)
@@ -2077,10 +2111,14 @@ class ClipStudioWidget(QWidget):
         sfx_add_btn = QPushButton("+ Tambah SFX di Playhead")
         sfx_add_btn.setObjectName("SmallAction")
         sfx_add_btn.clicked.connect(self._add_sfx_cue_row)
+        sfx_play_btn = QPushButton("▶ Tes SFX")
+        sfx_play_btn.setObjectName("SmallAction")
+        sfx_play_btn.clicked.connect(self._preview_selected_sfx_cue)
         sfx_del_btn = QPushButton("Hapus SFX")
         sfx_del_btn.setObjectName("SmallAction")
         sfx_del_btn.clicked.connect(self._remove_sfx_cue_row)
         sfx_btns.addWidget(sfx_add_btn)
+        sfx_btns.addWidget(sfx_play_btn)
         sfx_btns.addWidget(sfx_del_btn)
         sfx_btns.addStretch()
         sfx_box = QVBoxLayout()
@@ -2331,7 +2369,43 @@ class ClipStudioWidget(QWidget):
         new_cfg.transcript_overrides = list(self._config.transcript_overrides)
         if self._config.audio.sfx_cues:
             new_cfg.audio.sfx_cues = [c.model_copy(deep=True) for c in self._config.audio.sfx_cues]
-        if new_cfg.layout.mode == self._config.layout.mode:
+        elif new_cfg.audio.contextual_sfx_enabled and self._transcript_segments:
+            from atro.modules.analyzer.validator import build_heuristic_sfx_cues
+            from atro.modules.cutter.sfx import list_all_sfx_names
+
+            p_start = max(0.0, new_cfg.timing.start_time - new_cfg.timing.padding_sec)
+            p_end = max(p_start + 1.0, new_cfg.timing.end_time + new_cfg.timing.padding_sec)
+            tpl_meta = READY_TEMPLATES.get(preset_id, {})
+            inferred_fmt = (
+                "game"
+                if (
+                    tpl_meta.get("category") == "Gaming"
+                    or "gaming" in preset_id.lower()
+                    or new_cfg.layout.interactive_reaction_cuts
+                )
+                else str(tpl_meta.get("job_edit_format") or "podcast")
+            )
+            heur = build_heuristic_sfx_cues(
+                self._transcript_segments,
+                p_start,
+                p_end,
+                list_all_sfx_names(),
+                edit_format=inferred_fmt,
+            )
+            new_cfg.audio.sfx_cues = [
+                ComposerSfxCue(
+                    time_sec=max(0.0, round(c.t_sec - p_start, 3)),
+                    sfx_name=c.sfx_name,
+                    volume=c.volume,
+                    reason=c.reason,
+                )
+                for c in heur
+                if c.t_sec >= p_start
+            ]
+        if (
+            new_cfg.layout.mode == self._config.layout.mode
+            and new_cfg.layout.interactive_reaction_cuts == self._config.layout.interactive_reaction_cuts
+        ):
             if self._config.layout.shot_crops:
                 new_cfg.layout.shot_crops = [s.model_copy(deep=True) for s in self._config.layout.shot_crops]
             if self._config.layout.speaker_turns:
@@ -2519,6 +2593,8 @@ class ClipStudioWidget(QWidget):
         self.pin_speaker_combo.setCurrentIndex(
             max(0, self.pin_speaker_combo.findData(cfg.layout.pinned_speaker_id or ""))
         )
+        if hasattr(self, "interactive_cuts_chk"):
+            self.interactive_cuts_chk.setChecked(bool(getattr(cfg.layout, "interactive_reaction_cuts", False)))
 
         self._sync_crop_spins_from_config()
 
@@ -2621,6 +2697,14 @@ class ClipStudioWidget(QWidget):
         self.zoom_start_spin.setValue(cl.zoom_punch_start_sec)
         self.zoom_factor_spin.setValue(cl.zoom_punch_factor)
         self.zoom_repeat_spin.setValue(cl.zoom_punch_repeat_sec)
+        if hasattr(self, "zoom_curve_combo"):
+            self.zoom_curve_combo.setCurrentIndex(
+                max(0, self.zoom_curve_combo.findData(getattr(cl, "zoom_curve", "step")))
+            )
+            self.zoom_target_combo.setCurrentIndex(
+                max(0, self.zoom_target_combo.findData(getattr(cl, "zoom_target", "center")))
+            )
+            self.zoom_sync_sfx_chk.setChecked(bool(getattr(cl, "zoom_sync_sfx", False)))
         self.vignette_chk.setChecked(cl.vignette_enabled)
         self.topic_hdr_chk.setChecked(cl.topic_header_enabled)
         self.topic_hdr_edit.setText(cl.topic_header_text)
@@ -2781,6 +2865,8 @@ class ClipStudioWidget(QWidget):
         cfg.layout.min_shot_sec = round(self.min_shot_spin.value(), 1)
         pin_val = self.pin_speaker_combo.currentData() or None
         cfg.layout.pinned_speaker_id = str(pin_val) if pin_val else None
+        if hasattr(self, "interactive_cuts_chk"):
+            cfg.layout.interactive_reaction_cuts = self.interactive_cuts_chk.isChecked()
 
         cfg.timing.silence_trim_enabled = self.silence_trim_chk.isChecked()
         cfg.timing.silence_max_gap_sec = round(self.silence_max_gap_spin.value(), 2)
@@ -2870,6 +2956,10 @@ class ClipStudioWidget(QWidget):
         cl.zoom_punch_start_sec = self.zoom_start_spin.value()
         cl.zoom_punch_factor = self.zoom_factor_spin.value()
         cl.zoom_punch_repeat_sec = round(self.zoom_repeat_spin.value(), 2)
+        if hasattr(self, "zoom_curve_combo"):
+            cl.zoom_curve = self.zoom_curve_combo.currentData() or "step"  # type: ignore[assignment]
+            cl.zoom_target = self.zoom_target_combo.currentData() or "center"  # type: ignore[assignment]
+            cl.zoom_sync_sfx = self.zoom_sync_sfx_chk.isChecked()
         cl.vignette_enabled = self.vignette_chk.isChecked()
         cl.topic_header_enabled = self.topic_hdr_chk.isChecked()
         cl.topic_header_text = self.topic_hdr_edit.text()
@@ -3058,7 +3148,7 @@ class ClipStudioWidget(QWidget):
         self.sfx_cues_table.blockSignals(False)
 
     def _insert_sfx_cue_row(self, cue: ComposerSfxCue) -> None:
-        from atro.modules.cutter.sfx import list_all_sfx_names
+        from atro.modules.cutter.sfx import get_sfx_context, list_all_sfx_names
 
         row = self.sfx_cues_table.rowCount()
         self.sfx_cues_table.insertRow(row)
@@ -3068,13 +3158,38 @@ class ClipStudioWidget(QWidget):
         sfx_combo.setEditable(True)
         for nm in list_all_sfx_names():
             sfx_combo.addItem(nm, nm)
+            spec = get_sfx_context(nm)
+            if spec is not None:
+                idx = sfx_combo.count() - 1
+                sfx_combo.setItemData(
+                    idx,
+                    f"[{spec.category}] {spec.usage_id} | Zoom: {spec.zoom_role}",
+                    Qt.ItemDataRole.ToolTipRole,
+                )
         if cue.sfx_name and sfx_combo.findText(cue.sfx_name) < 0:
             sfx_combo.addItem(cue.sfx_name, cue.sfx_name)
         sfx_combo.setCurrentText(cue.sfx_name)
+        spec_cur = get_sfx_context(cue.sfx_name)
+        if spec_cur is not None:
+            sfx_combo.setToolTip(f"[{spec_cur.category}] {spec_cur.usage_id} | Zoom: {spec_cur.zoom_role}")
         sfx_combo.currentTextChanged.connect(lambda _t: self._sync_sfx_cues_from_table())
         self.sfx_cues_table.setCellWidget(row, 1, sfx_combo)
 
         self.sfx_cues_table.setItem(row, 2, QTableWidgetItem(f"{cue.volume:.2f}"))
+
+    def _preview_selected_sfx_cue(self) -> None:
+        from atro.modules.cutter.sfx import resolve_transition_sfx_path
+
+        row = self.sfx_cues_table.currentRow()
+        if row < 0 and self.sfx_cues_table.rowCount() > 0:
+            row = 0
+        if row < 0:
+            return
+        sfx_w = self.sfx_cues_table.cellWidget(row, 1)
+        name = sfx_w.currentText().strip() if isinstance(sfx_w, QComboBox) else ""
+        wav = resolve_transition_sfx_path(name)
+        if wav is not None and wav.is_file():
+            play_audio_preview_file(self, wav)
 
     def _on_sfx_cue_cell_changed(self, _row: int, _col: int) -> None:
         if not self._syncing_ui:
@@ -3291,6 +3406,7 @@ class ClipStudioWidget(QWidget):
         job_dir = Path(self._job_state.workspace_dir) if self._job_state is not None else None
         hints = self._active_clip_focus_hints()
         segs_tr = list(self._transcript_segments)
+        sfx_snap = [c.model_copy(deep=True) for c in self._config.audio.sfx_cues]
 
         self._detect_request_id += 1
         req_id = self._detect_request_id
@@ -3315,6 +3431,7 @@ class ClipStudioWidget(QWidget):
                     job_dir=job_dir,
                     focus_hints=hints,
                     transcript_segments=segs_tr,
+                    sfx_cues=sfx_snap,
                 )
             except Exception:
                 segs = []
@@ -3607,9 +3724,23 @@ class ClipStudioWidget(QWidget):
     def _on_playback_tick(self) -> None:
         p_start, p_end = self._effective_window()
         dur = max(0.5, p_end - p_start)
+        prev_t = self._rel_time_sec
         self._rel_time_sec += 0.033
+        wrapped = False
         if self._rel_time_sec >= dur:
             self._rel_time_sec = 0.0
+            wrapped = True
+        if self.isVisible() and self._config.audio.contextual_sfx_enabled and self._config.audio.sfx_cues:
+            from atro.modules.cutter.sfx import resolve_transition_sfx_path
+
+            for cue in self._config.audio.sfx_cues:
+                ct = float(cue.time_sec)
+                hit = (prev_t <= ct < self._rel_time_sec) if not wrapped else (prev_t <= ct <= dur)
+                if hit:
+                    wav = resolve_transition_sfx_path(cue.sfx_name)
+                    if wav is not None and wav.is_file():
+                        play_audio_preview_file(self, wav)
+                    break
         self._sync_timeline_slider(dur)
         self._refresh_preview()
 

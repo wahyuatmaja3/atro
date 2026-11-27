@@ -709,6 +709,8 @@ def build_ready_template_config(
         lay.transition.type = meta["transition_type"]
     if "transition_sfx" in meta:
         lay.transition.sfx = meta["transition_sfx"]
+    if meta.get("interactive_reaction_cuts") is not None:
+        lay.interactive_reaction_cuts = bool(meta["interactive_reaction_cuts"])
 
     apply_caption_recipe(cfg, str(meta["caption_recipe"]))
     if meta.get("caption_bg_mode") in ("none", "active_word_pill", "full_line_box"):
@@ -753,8 +755,20 @@ def build_ready_template_config(
     cl = ov.climax_effects
     cl.vignette_enabled = bool(meta.get("vignette_enabled", False))
     cl.zoom_punch_enabled = bool(meta.get("zoom_punch_enabled", False))
+    if meta.get("zoom_punch_start_sec") is not None:
+        cl.zoom_punch_start_sec = max(0.0, float(meta["zoom_punch_start_sec"]))
+    if meta.get("zoom_punch_duration_sec") is not None:
+        cl.zoom_punch_duration_sec = max(0.2, min(4.0, float(meta["zoom_punch_duration_sec"])))
+    if meta.get("zoom_punch_factor") is not None:
+        cl.zoom_punch_factor = max(1.02, min(1.5, float(meta["zoom_punch_factor"])))
     if meta.get("zoom_punch_repeat_sec") is not None:
         cl.zoom_punch_repeat_sec = max(0.0, min(30.0, float(meta["zoom_punch_repeat_sec"])))
+    if meta.get("zoom_curve") in ("step", "smooth_in_out", "snap_out"):
+        cl.zoom_curve = meta["zoom_curve"]
+    if meta.get("zoom_sync_sfx") is not None:
+        cl.zoom_sync_sfx = bool(meta["zoom_sync_sfx"])
+    if meta.get("zoom_target") in ("center", "auto_context", "facecam", "gameplay"):
+        cl.zoom_target = meta["zoom_target"]
     if meta.get("silence_trim_enabled") is not None:
         cfg.timing.silence_trim_enabled = bool(meta["silence_trim_enabled"])
     if meta.get("silence_max_gap_sec") is not None:
