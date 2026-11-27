@@ -15,6 +15,7 @@ from atro.core.composer_schema import (
     resolve_bottom_safe_y,
 )
 from atro.modules.cutter.framing.face_tracking import _make_even
+from atro.modules.cutter.sfx import get_sfx_context
 
 
 def compute_pixel_crop_rect(
@@ -157,6 +158,250 @@ def zoom_punch_windows(climax: Any, total_dur: float, shift: float = 0.0) -> lis
     return wins
 
 
+@dataclass(slots=True)
+class ZoomWindowSpec:
+    """Resolved interactive zoom-in/zoom-out window with curve and normalized anchor."""
+
+    t_start: float
+    t_end: float
+    factor: float
+    anchor_x: float
+    anchor_y: float
+    curve: str = "step"
+
+
+def _effective_shot_mode_at(layout: LayoutLayerConfig, rel_t: float) -> str:
+    shot = _shot_at_time(layout, rel_t)
+    if shot is not None and shot.shot_mode:
+        if layout.mode == "single_focus" and shot.shot_mode == "blurred_frame":
+            return "blurred_frame"
+        if getattr(layout, "interactive_reaction_cuts", False) and shot.shot_mode in (
+            "single_focus",
+            "blurred_frame",
+            "pip_facecam",
+            "split_screen",
+        ):
+            return shot.shot_mode
+    return layout.mode
+
+
+def _resolve_zoom_anchor(
+    config: ClipComposerConfig,
+    role: str,
+    rel_t: float,
+    cw: int,
+    ch: int,
+) -> tuple[float, float]:
+    clean = (role or "center").strip().lower()
+    if clean in ("center", "none", ""):
+        return 0.5, 0.5
+
+    layout = config.layout
+    eff_mode = _effective_shot_mode_at(layout, rel_t)
+
+    if clean == "gameplay":
+        if eff_mode == "split_screen":
+            top_r = float(layout.split_ratio_top)
+            return 0.5, round(max(0.52, min(0.84, top_r + (1.0 - top_r) * 0.50)), 4)
+        return 0.5, 0.52
+
+    # clean == "facecam"
+    if eff_mode == "split_screen":
+        top_r = float(layout.split_ratio_top)
+        return 0.5, round(max(0.14, min(0.45, top_r * 0.50)), 4)
+    if eff_mode == "pip_facecam":
+        px, py, pip_w, pip_h = compute_pip_rect(cw, ch, layout)
+        return round((px + pip_w * 0.5) / max(1, cw), 4), round((py + pip_h * 0.5) / max(1, ch), 4)
+    if eff_mode == "single_focus":
+        return 0.5, 0.42
+    # blurred_frame: locate face in center frame if known
+    shot = _shot_at_time(layout, rel_t)
+    if shot is not None and shot.speaker_faces:
+        face = next(iter(shot.speaker_faces.values()))
+        crop, dest_x, dest_y, tw, th = _panel_for_face(face, config, shot, cw, ch)
+        # Approximate relative position inside blurred frame panel
+        fcx = (face.x + face.w * 0.5 - crop.x) / max(0.05, crop.w)
+        fcy = (face.y + face.h * 0.4 - crop.y) / max(0.05, crop.h)
+        ax = max(0.18, min(0.82, (dest_x + fcx * tw) / max(1, cw)))
+        ay = max(0.18, min(0.82, (dest_y + fcy * th) / max(1, ch)))
+        return round(ax, 4), round(ay, 4)
+    return 0.5, 0.40
+
+
+def _window_timings_for_curve(curve: str, dur: float) -> tuple[float, float]:
+    d = max(0.2, float(dur))
+    if curve == "snap_out":
+        t_in = min(0.08, d * 0.14)
+        t_out = max(0.12, d * 0.52)
+        return round(t_in, 3), round(t_out, 3)
+    t_in = max(0.10, min(0.42, d * 0.28))
+    t_out = max(0.12, min(0.50, d * 0.34))
+    return round(t_in, 3), round(t_out, 3)
+
+
+def resolve_interactive_zoom_windows(
+    config: ClipComposerConfig,
+    total_dur: float,
+    shift: float = 0.0,
+) -> list[ZoomWindowSpec]:
+    """Resolve non-overlapping interactive zoom-in/zoom-out windows synced to SFX cues or rhythmic beats."""
+    climax = config.overlays.climax_effects
+    if not climax.zoom_punch_enabled:
+        return []
+
+    cw = max(320, int(config.canvas_width))
+    ch = max(320, int(config.canvas_height))
+    main_dur = max(0.5, float(total_dur) - max(0.0, float(shift)))
+    dur = max(0.25, float(climax.zoom_punch_duration_sec))
+    factor = max(1.02, float(climax.zoom_punch_factor))
+    curve = str(getattr(climax, "zoom_curve", "step") or "step")
+    sync_sfx = bool(getattr(climax, "zoom_sync_sfx", False))
+    target_mode = str(getattr(climax, "zoom_target", "center") or "center")
+    repeat = float(getattr(climax, "zoom_punch_repeat_sec", 0.0) or 0.0)
+
+    candidates: list[tuple[float, float, str]] = []
+    lead = 0.14 if curve == "smooth_in_out" else (0.04 if curve == "snap_out" else 0.0)
+
+    if sync_sfx and config.audio.contextual_sfx_enabled and config.audio.sfx_cues:
+        for cue in sorted(config.audio.sfx_cues, key=lambda c: c.time_sec):
+            ct = float(cue.time_sec)
+            if ct < 0.0 or ct >= main_dur - 0.15:
+                continue
+            ws = max(0.0, round(ct - lead, 3))
+            we = min(main_dur, round(ws + dur, 3))
+            if we - ws < 0.25:
+                continue
+            spec = get_sfx_context(cue.sfx_name)
+            if target_mode == "auto_context":
+                role_hint = spec.zoom_role if (spec is not None and spec.zoom_role != "none") else "gameplay"
+            else:
+                role_hint = target_mode
+            candidates.append((ws, we, role_hint))
+
+    if not candidates:
+        base_wins = zoom_punch_windows(climax, main_dur, shift=0.0)
+        for idx, (ws, we) in enumerate(base_wins):
+            if target_mode == "auto_context":
+                shot = _shot_at_time(config.layout, 0.5 * (ws + we))
+                if shot is not None and shot.reason == "reaction":
+                    role_hint = "facecam"
+                else:
+                    role_hint = "gameplay" if idx % 2 == 0 else "facecam"
+            else:
+                role_hint = target_mode
+            candidates.append((ws, we, role_hint))
+    elif repeat > 0.0:
+        # Fill long gaps between SFX cues so pacing stays interactive throughout the Short
+        step = max(repeat, dur + 0.4)
+        extra_t = max(float(climax.zoom_punch_start_sec), 0.8)
+        alt_idx = 0
+        while extra_t + 0.35 < main_dur and len(candidates) < 40:
+            ws = round(extra_t, 3)
+            we = min(main_dur, round(ws + dur, 3))
+            overlaps = any(not (we <= cs - 0.35 or ws >= ce + 0.35) for cs, ce, _ in candidates)
+            if not overlaps and (we - ws) >= 0.35:
+                if target_mode == "auto_context":
+                    role_hint = "gameplay" if alt_idx % 2 == 0 else "facecam"
+                    alt_idx += 1
+                else:
+                    role_hint = target_mode
+                candidates.append((ws, we, role_hint))
+            extra_t += step
+
+    candidates.sort(key=lambda item: item[0])
+    out: list[ZoomWindowSpec] = []
+    for ws, we, role_hint in candidates:
+        if out and ws < out[-1].t_end - shift + 0.06:
+            ws = round(out[-1].t_end - shift + 0.06, 3)
+        if we - ws < 0.25 or ws >= main_dur:
+            continue
+        mid_t = 0.5 * (ws + we)
+        ax, ay = _resolve_zoom_anchor(config, role_hint, mid_t, cw, ch)
+        out.append(
+            ZoomWindowSpec(
+                t_start=round(ws + shift, 3),
+                t_end=round(we + shift, 3),
+                factor=factor,
+                anchor_x=ax,
+                anchor_y=ay,
+                curve=curve,
+            )
+        )
+        if len(out) >= 60:
+            break
+    return out
+
+
+def evaluate_zoom_at_time(
+    windows: Sequence[ZoomWindowSpec],
+    rel_t: float,
+) -> tuple[float, float, float]:
+    """Return `(zoom_factor, anchor_x, anchor_y)` at clip-relative `rel_t`."""
+    t = float(rel_t)
+    for w in windows:
+        if w.t_start <= t <= w.t_end:
+            if w.curve == "step":
+                p = 1.0
+            else:
+                t_in, t_out = _window_timings_for_curve(w.curve, w.t_end - w.t_start)
+                r = min(1.0, max(0.0, min((t - w.t_start) / t_in, (w.t_end - t) / t_out)))
+                p = 0.5 * (1.0 - math.cos(r * math.pi))
+            return 1.0 + (max(1.01, float(w.factor)) - 1.0) * p, w.anchor_x, w.anchor_y
+    return 1.0, 0.5, 0.5
+
+
+def build_ffmpeg_zoom_filter_exprs(
+    windows: Sequence[ZoomWindowSpec],
+    cw: int,
+    ch: int,
+) -> tuple[str, str, str, str]:
+    """Return `(w_expr, h_expr, x_expr, y_expr)` for FFmpeg `scale=...:eval=frame,crop=...`."""
+    if not windows:
+        return str(cw), str(ch), f"(iw-{cw})/2", f"(ih-{ch})/2"
+
+    all_step_center = all(
+        w.curve == "step" and abs(w.anchor_x - 0.5) < 0.005 and abs(w.anchor_y - 0.5) < 0.005
+        for w in windows
+    )
+    if all_step_center:
+        zw = _make_even(cw * float(windows[0].factor), 2)
+        zh = _make_even(ch * float(windows[0].factor), 2)
+        cond = "+".join(f"between(t,{w.t_start:.3f},{w.t_end:.3f})" for w in windows)
+        return (
+            f"if(gt({cond},0),{zw},{cw})",
+            f"if(gt({cond},0),{zh},{ch})",
+            f"(iw-{cw})/2",
+            f"(ih-{ch})/2",
+        )
+
+    z_terms: list[str] = []
+    ax_terms: list[str] = []
+    ay_terms: list[str] = []
+    for w in windows:
+        dz = max(0.01, float(w.factor) - 1.0)
+        if w.curve == "step":
+            z_terms.append(f"between(t,{w.t_start:.3f},{w.t_end:.3f})*{dz:.4f}")
+        else:
+            t_in, t_out = _window_timings_for_curve(w.curve, w.t_end - w.t_start)
+            z_terms.append(
+                f"between(t,{w.t_start:.3f},{w.t_end:.3f})*{dz:.4f}"
+                f"*0.5*(1-cos(clip(min((t-{w.t_start:.3f})/{t_in:.3f},({w.t_end:.3f}-t)/{t_out:.3f}),0,1)*PI))"
+            )
+        if abs(w.anchor_x - 0.5) > 0.005:
+            ax_terms.append(f"between(t,{w.t_start:.3f},{w.t_end:.3f})*({w.anchor_x - 0.5:+.4f})")
+        if abs(w.anchor_y - 0.5) > 0.005:
+            ay_terms.append(f"between(t,{w.t_start:.3f},{w.t_end:.3f})*({w.anchor_y - 0.5:+.4f})")
+
+    z_expr = "1+" + "+".join(z_terms)
+    w_expr = f"max({cw},trunc(({cw}*({z_expr})+0.5)/2)*2)"
+    h_expr = f"max({ch},trunc(({ch}*({z_expr})+0.5)/2)*2)"
+    ax_expr = ("0.5+" + "+".join(ax_terms)) if ax_terms else "0.5"
+    ay_expr = ("0.5+" + "+".join(ay_terms)) if ay_terms else "0.5"
+    x_expr = f"clip(iw*({ax_expr})-{cw}/2,0,iw-{cw})"
+    y_expr = f"clip(ih*({ay_expr})-{ch}/2,0,ih-{ch})"
+    return w_expr, h_expr, x_expr, y_expr
+
+
 def _speaker_aliases(speaker_id: Optional[str]) -> list[str]:
     if not speaker_id:
         return []
@@ -263,6 +508,8 @@ def _panel_for_face(
     eff_mode = layout.mode
     if layout.mode == "single_focus" and shot is not None and shot.shot_mode == "blurred_frame":
         eff_mode = "blurred_frame"
+    elif getattr(layout, "interactive_reaction_cuts", False) and shot is not None and shot.shot_mode:
+        eff_mode = shot.shot_mode
 
     if config.aspect_ratio == "16:9" or eff_mode == "single_focus":
         return top_crop, 0, 0, cw, ch
@@ -323,11 +570,13 @@ def _project_face_to_canvas(
 
     climax = config.overlays.climax_effects
     if climax.zoom_punch_enabled:
-        wins = zoom_punch_windows(climax, max(total_dur, rel_t + 1.0))
-        if any(ws <= rel_t <= we for ws, we in wins):
-            zf = max(1.01, float(climax.zoom_punch_factor))
-            cx = cw * 0.5 + (cx - cw * 0.5) * zf
-            head_top = ch * 0.5 + (head_top - ch * 0.5) * zf
+        wins = resolve_interactive_zoom_windows(config, max(total_dur, rel_t + 1.0))
+        zf, ax, ay = evaluate_zoom_at_time(wins, rel_t)
+        if zf > 1.001:
+            ox = max(0.0, min(cw * (zf - 1.0), cw * zf * ax - cw * 0.5))
+            oy = max(0.0, min(ch * (zf - 1.0), ch * zf * ay - ch * 0.5))
+            cx = cx * zf - ox
+            head_top = head_top * zf - oy
             face_h *= zf
 
     return cx, head_top, face_h

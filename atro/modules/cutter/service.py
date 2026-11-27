@@ -54,6 +54,8 @@ from atro.modules.cutter.jump_cut import (
     remap_words,
     trimmed_duration,
 )
+from atro.modules.cutter.sfx import list_all_sfx_names
+from atro.modules.analyzer.validator import build_heuristic_sfx_cues
 from atro.modules.cutter.opening_narrator import resolve_tts_prosody, synthesize_opening_voiceover
 from atro.modules.cutter.subtitle_burner import generate_clip_ass_file
 from atro.modules.cutter.viral_effects import build_viral_video_overlay_filters
@@ -259,6 +261,18 @@ def apply_initial_style_overrides(
         cfg.overlays.climax_effects.zoom_punch_repeat_sec = max(
             0.0, min(30.0, float(overrides["zoom_punch_repeat_sec"]))
         )
+
+    if overrides.get("zoom_curve") in ("step", "smooth_in_out", "snap_out"):
+        cfg.overlays.climax_effects.zoom_curve = overrides["zoom_curve"]
+
+    if "zoom_sync_sfx" in overrides and overrides["zoom_sync_sfx"] is not None:
+        cfg.overlays.climax_effects.zoom_sync_sfx = bool(overrides["zoom_sync_sfx"])
+
+    if overrides.get("zoom_target") in ("center", "auto_context", "facecam", "gameplay"):
+        cfg.overlays.climax_effects.zoom_target = overrides["zoom_target"]
+
+    if "interactive_reaction_cuts" in overrides and overrides["interactive_reaction_cuts"] is not None:
+        cfg.layout.interactive_reaction_cuts = bool(overrides["interactive_reaction_cuts"])
 
     if "silence_trim_enabled" in overrides and overrides["silence_trim_enabled"] is not None:
         cfg.timing.silence_trim_enabled = bool(overrides["silence_trim_enabled"])
@@ -790,6 +804,17 @@ class CutterService:
                     request.padding_sec,
                 )
                 clip_win_start = max(0.0, clip.start_time - request.padding_sec)
+                clip_win_end = clip.end_time + request.padding_sec
+                raw_cues = list(getattr(clip, "sfx_cues", None) or [])
+                if comp_cfg.audio.contextual_sfx_enabled and not raw_cues and transcript_segments:
+                    avail_sfx = list_all_sfx_names()
+                    raw_cues = build_heuristic_sfx_cues(
+                        transcript_segments,
+                        clip_win_start,
+                        clip_win_end,
+                        avail_sfx,
+                        edit_format=request.edit_format,
+                    )
                 comp_cfg.audio.sfx_cues = [
                     ComposerSfxCue(
                         time_sec=max(0.0, round(c.t_sec - clip_win_start, 3)),
@@ -797,7 +822,7 @@ class CutterService:
                         volume=c.volume,
                         reason=c.reason,
                     )
-                    for c in (getattr(clip, "sfx_cues", None) or [])
+                    for c in raw_cues
                     if c.t_sec >= clip_win_start
                 ]
                 rendered_item = await self.render_clip_with_composer_config(
@@ -1246,6 +1271,37 @@ class CutterService:
                 padded_start, padded_end = 0.0, config.timing.end_time
                 main_dur = max(0.5, round(padded_end - padded_start, 3))
 
+        # Auto-populate contextual SFX if template enabled it without preset cues yet
+        if config.audio.contextual_sfx_enabled and not config.audio.sfx_cues and transcript_segments:
+            avail_sfx = list_all_sfx_names()
+            inferred_fmt = (
+                "game"
+                if (
+                    "gaming" in (config.preset_id or "").lower()
+                    or config.layout.mode in ("pip_facecam", "split_screen")
+                    or config.layout.interactive_reaction_cuts
+                )
+                else "podcast"
+            )
+            heur = build_heuristic_sfx_cues(
+                transcript_segments,
+                padded_start,
+                padded_end,
+                avail_sfx,
+                edit_format=inferred_fmt,
+            )
+            if heur:
+                config.audio.sfx_cues = [
+                    ComposerSfxCue(
+                        time_sec=max(0.0, round(c.t_sec - padded_start, 3)),
+                        sfx_name=c.sfx_name,
+                        volume=c.volume,
+                        reason=c.reason,
+                    )
+                    for c in heur
+                    if c.t_sec >= padded_start
+                ]
+
         # Auto-detect face & camera-angle crops when requested and not yet populated
         if (
             config.layout.framing_tracking_mode == "auto_face"
@@ -1263,6 +1319,7 @@ class CutterService:
                 job_dir=None if trim_tmp is not None else job_dir,
                 focus_hints=focus_hints,
                 transcript_segments=transcript_segments,
+                sfx_cues=config.audio.sfx_cues,
             )
             logger.info(
                 "cutter",
@@ -1350,15 +1407,20 @@ class CutterService:
 
             sfx_paths: list[Path] = []
             sfx_idx_by_path: dict[Path, int] = {}
-            sfx_chain_events: list[tuple[float, int, float]] = []
-            for ev_t, ev_path, ev_vol in plan.sfx_events:
+            sfx_chain_events: list[tuple[float, int, float, Optional[float]]] = []
+            for ev_i, (ev_t, ev_path, ev_vol) in enumerate(plan.sfx_events):
                 if not ev_path.is_file():
                     continue
                 if ev_path not in sfx_idx_by_path:
                     sfx_idx_by_path[ev_path] = next_audio_idx
                     sfx_paths.append(ev_path)
                     next_audio_idx += 1
-                sfx_chain_events.append((ev_t, sfx_idx_by_path[ev_path], ev_vol))
+                max_dur = (
+                    plan.sfx_max_durations[ev_i]
+                    if ev_i < len(plan.sfx_max_durations)
+                    else None
+                )
+                sfx_chain_events.append((ev_t, sfx_idx_by_path[ev_path], ev_vol, max_dur))
 
             audio_lines, audio_label = build_audio_filter_chain(
                 has_source_audio=download.has_audio,

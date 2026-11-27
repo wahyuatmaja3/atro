@@ -191,7 +191,13 @@ class ShotCropSegment(BaseModel):
     t_end: float = Field(default=30.0, gt=0.0)
     top_crop: CropBoxConfig = Field(default_factory=CropBoxConfig)
     bottom_crop: Optional[CropBoxConfig] = None
-    shot_mode: Literal["single_focus", "multi_speaker_split", "blurred_frame"] = "single_focus"
+    shot_mode: Literal[
+        "single_focus",
+        "multi_speaker_split",
+        "blurred_frame",
+        "pip_facecam",
+        "split_screen",
+    ] = "single_focus"
     speaker_id: Optional[str] = None
     face_id: Optional[str] = None
     reason: ShotReason = "legacy"
@@ -264,6 +270,7 @@ class LayoutLayerConfig(BaseModel):
     focus_strategy: FocusStrategy = "auto_topic"
     group_mode: GroupMode = "fit_all_blur"
     min_shot_sec: float = Field(default=1.2, ge=0.3, le=5.0)
+    interactive_reaction_cuts: bool = False
     pinned_speaker_id: Optional[str] = None
     speaker_aliases: dict[str, str] = Field(default_factory=dict)
 
@@ -488,6 +495,10 @@ class WatermarkConfig(BaseModel):
     scale: float = Field(default=1.0, ge=0.25, le=3.0)
 
 
+ZoomCurveMode = Literal["step", "smooth_in_out", "snap_out"]
+ZoomTargetMode = Literal["center", "auto_context", "facecam", "gameplay"]
+
+
 class ClimaxEffectsConfig(BaseModel):
     """Visual punch effects (zoom punch, subtle contrast boost, progress bar)."""
 
@@ -501,6 +512,9 @@ class ClimaxEffectsConfig(BaseModel):
     zoom_punch_factor: float = Field(default=1.12, ge=1.02, le=1.40)
     # >0 repeats the punch every N seconds after `zoom_punch_start_sec` (0 = single punch)
     zoom_punch_repeat_sec: float = Field(default=0.0, ge=0.0, le=30.0)
+    zoom_curve: ZoomCurveMode = "step"
+    zoom_sync_sfx: bool = False
+    zoom_target: ZoomTargetMode = "center"
     progress_bar_enabled: bool = True
     progress_bar_color_hex: str = "#FACC15"
     vignette_enabled: bool = False

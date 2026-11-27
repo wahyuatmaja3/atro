@@ -40,6 +40,7 @@ from atro.core.composer_schema import (
     HookBannerConfig,
     LayoutLayerConfig,
     ShotCropSegment,
+    TransitionConfig,
     WatermarkConfig,
 )
 from atro.core.schemas import TranscriptSegment
@@ -51,13 +52,16 @@ from atro.modules.cutter.framing.face_tracking import (
     _make_even,
 )
 from atro.modules.cutter.framing.game_layout import _detect_streamer_face_sync
-from atro.modules.cutter.sfx import resolve_transition_sfx_path
+from atro.modules.cutter.sfx import get_sfx_context, resolve_transition_sfx_path
 from atro.modules.cutter.subtitle_anchors import (
     SplitGeometry,
+    build_ffmpeg_zoom_filter_exprs,
     compute_pip_rect,
     compute_pixel_crop_rect,
     compute_split_geometry,
+    evaluate_zoom_at_time,
     resolve_chunks_anchor_positions,
+    resolve_interactive_zoom_windows,
     zoom_punch_windows,
 )
 from atro.modules.cutter.subtitle_burner import (
@@ -132,6 +136,209 @@ def _shot_to_crop_boxes(
     )
 
 
+def _resolve_shot_effective_mode(
+    layout_mode: str,
+    shot_mode: Optional[str],
+    interactive_reaction_cuts: bool = False,
+) -> Optional[str]:
+    """Return shot-level mode override for reaction cutaways or blurred_frame fallback."""
+    if not shot_mode:
+        return None
+    if layout_mode == "single_focus" and shot_mode == "blurred_frame":
+        return "blurred_frame"
+    if interactive_reaction_cuts and shot_mode != layout_mode:
+        return shot_mode
+    return None
+
+
+def _plan_interactive_gaming_shots(
+    duration: float,
+    base_mode: str,
+    face_box: Optional[FaceBox],
+    cam_top_box: CropBoxConfig,
+    gameplay_box: CropBoxConfig,
+    speaker_faces: dict[str, FaceAnchorBox],
+    start_sec: float = 0.0,
+    transcript_segments: Optional[list[TranscriptSegment]] = None,
+    sfx_cues: Optional[list] = None,
+) -> list[ShotCropSegment]:
+    """Create alternating gameplay + full-screen reaction cutaway shots for interactive gaming Shorts."""
+    eff_base_mode = base_mode if face_box is not None else "blurred_frame"
+    base_top = cam_top_box if face_box is not None else CropBoxConfig(
+        auto_detect=True, x=0.05, y=0.0, w=0.90, h=1.0, label="Gameplay Penuh"
+    )
+    if duration < 3.2:
+        return [
+            ShotCropSegment(
+                t_start=0.0,
+                t_end=duration,
+                top_crop=base_top,
+                bottom_crop=gameplay_box,
+                shot_mode=eff_base_mode,  # type: ignore[arg-type]
+                reason="speaker_match" if face_box is not None else "fallback",
+                confidence=0.85 if face_box is not None else 0.70,
+                speaker_faces=speaker_faces,
+            )
+        ]
+
+    # Collect candidate reaction timestamps relative to clip start
+    candidates: list[float] = []
+    if sfx_cues:
+        face_times: list[float] = []
+        both_times: list[float] = []
+        for cue in sfx_cues:
+            ct = float(getattr(cue, "time_sec", -1.0))
+            if ct < 0.9 or ct > duration - 1.4:
+                continue
+            spec = get_sfx_context(str(getattr(cue, "sfx_name", "") or ""))
+            role = spec.zoom_role if spec is not None else "both"
+            if role == "facecam":
+                face_times.append(ct)
+            elif role == "both":
+                both_times.append(ct)
+        candidates.extend(face_times if face_times else both_times)
+
+    if len(candidates) < 2 and transcript_segments:
+        rx_tokens = (
+            "haha", "wkwk", "anjir", "anjing", "gila", "astaga", "kaget",
+            "buset", "waduh", "mampus", "clutch", "mati", "kalah", "menang",
+            "what", "bro", "gg", "?!", "?", "!",
+        )
+        for seg in transcript_segments:
+            rel_t = float(seg.start) - float(start_sec)
+            if rel_t < 0.9 or rel_t > duration - 1.4:
+                continue
+            low = (seg.text or "").lower()
+            if any(tok in low for tok in rx_tokens):
+                candidates.append(round(rel_t + 0.15, 3))
+
+    if not candidates and duration >= 5.0:
+        candidates = [round(duration * 0.28, 3)]
+        if duration >= 11.0:
+            candidates.append(round(duration * 0.64, 3))
+
+    # Filter into non-overlapping [start, end] reaction windows (max 4 per clip)
+    cut_windows: list[tuple[float, float]] = []
+    min_gap = 4.2
+    last_end = 0.0
+    for ct in sorted(candidates):
+        ws = max(0.9, round(ct - 0.15, 3))
+        if ws - last_end < 1.1:
+            ws = round(last_end + 1.1, 3)
+        if cut_windows and ws < cut_windows[-1][0] + min_gap:
+            continue
+        cut_len = 1.65 if duration >= 10.0 else 1.35
+        we = round(ws + cut_len, 3)
+        if duration - we < 1.0:
+            continue
+        cut_windows.append((ws, we))
+        last_end = we
+        if len(cut_windows) >= 4:
+            break
+
+    if not cut_windows:
+        return [
+            ShotCropSegment(
+                t_start=0.0,
+                t_end=duration,
+                top_crop=base_top,
+                bottom_crop=gameplay_box,
+                shot_mode=eff_base_mode,  # type: ignore[arg-type]
+                reason="speaker_match" if face_box is not None else "fallback",
+                confidence=0.85 if face_box is not None else 0.70,
+                speaker_faces=speaker_faces,
+            )
+        ]
+
+    if face_box is not None:
+        rx_w = max(0.24, min(0.42, face_box.w * 2.5))
+        rx_h = max(0.40, min(0.85, rx_w * 1.45))
+        rx_x = max(0.0, min(1.0 - rx_w, face_box.cx - rx_w * 0.5))
+        rx_y = max(0.0, min(1.0 - rx_h, face_box.cy - rx_h * 0.38))
+        rx_top = CropBoxConfig(
+            auto_detect=True,
+            x=round(rx_x, 4),
+            y=round(rx_y, 4),
+            w=round(rx_w, 4),
+            h=round(rx_h, 4),
+            label="Reaksi Facecam Full",
+        )
+    else:
+        rx_top = CropBoxConfig(
+            auto_detect=True,
+            x=0.22,
+            y=0.06,
+            w=0.56,
+            h=0.88,
+            label="Zoom Aksi Gameplay",
+        )
+
+    segs: list[ShotCropSegment] = []
+    cur_t = 0.0
+    after_cut = False
+    for ws, we in cut_windows:
+        if ws - cur_t >= 0.5:
+            segs.append(
+                ShotCropSegment(
+                    t_start=round(cur_t, 3),
+                    t_end=round(ws, 3),
+                    top_crop=base_top.model_copy(deep=True),
+                    bottom_crop=gameplay_box.model_copy(deep=True),
+                    shot_mode=eff_base_mode,  # type: ignore[arg-type]
+                    reason="speaker_match" if face_box is not None else "fallback",
+                    confidence=0.85 if face_box is not None else 0.72,
+                    transition_in=(
+                        TransitionConfig(type="zoom_out", mode="fixed", duration_sec=0.20, easing="ease_in_out")
+                        if after_cut
+                        else None
+                    ),
+                    speaker_faces=speaker_faces,
+                )
+            )
+        segs.append(
+            ShotCropSegment(
+                t_start=round(ws, 3),
+                t_end=round(we, 3),
+                top_crop=rx_top.model_copy(deep=True),
+                bottom_crop=gameplay_box.model_copy(deep=True),
+                shot_mode="single_focus",
+                reason="reaction",
+                confidence=0.88,
+                transition_in=TransitionConfig(
+                    type="zoom_in", mode="fixed", duration_sec=0.18, easing="ease_out"
+                ),
+                speaker_faces=speaker_faces,
+            )
+        )
+        cur_t = we
+        after_cut = True
+
+    if duration - cur_t >= 0.45:
+        segs.append(
+            ShotCropSegment(
+                t_start=round(cur_t, 3),
+                t_end=round(duration, 3),
+                top_crop=base_top.model_copy(deep=True),
+                bottom_crop=gameplay_box.model_copy(deep=True),
+                shot_mode=eff_base_mode,  # type: ignore[arg-type]
+                reason="speaker_match" if face_box is not None else "fallback",
+                confidence=0.85 if face_box is not None else 0.72,
+                transition_in=TransitionConfig(
+                    type="zoom_out", mode="fixed", duration_sec=0.20, easing="ease_in_out"
+                ),
+                speaker_faces=speaker_faces,
+            )
+        )
+    elif segs:
+        segs[-1].t_end = round(duration, 3)
+
+    if segs:
+        segs[0].t_start = 0.0
+        segs[0].transition_in = None
+        segs[-1].t_end = round(duration, 3)
+    return segs
+
+
 def detect_composer_shot_crops_sync(
     source_path: Path,
     start_sec: float,
@@ -144,6 +351,7 @@ def detect_composer_shot_crops_sync(
     job_dir: Optional[Path] = None,
     focus_hints: Optional[list] = None,
     transcript_segments: Optional[list[TranscriptSegment]] = None,
+    sfx_cues: Optional[list] = None,
 ) -> list[ShotCropSegment]:
     """Detect all camera angles, speakers, and POI face crops across `[start_sec, end_sec]`."""
     duration = max(0.5, round(float(end_sec) - float(start_sec), 3))
@@ -156,9 +364,18 @@ def detect_composer_shot_crops_sync(
         end_sec=max(start_sec + 0.5, end_sec),
         aspect_ratio="9:16",
     )
+    interactive_cuts = bool(layout is not None and getattr(layout, "interactive_reaction_cuts", False))
 
     if mode in ("split_screen", "pip_facecam"):
         face: Optional[FaceBox] = _detect_streamer_face_sync(ctx)
+        bot_box = CropBoxConfig(
+            auto_detect=True,
+            x=0.22,
+            y=0.0,
+            w=0.56,
+            h=1.0,
+            label="Gameplay / Layar",
+        )
         if face is not None:
             cam_h = max(0.26, min(0.50, face.h * 2.8))
             cam_w = max(0.24, min(0.55, cam_h * (src_h / max(1, src_w)) * 1.35))
@@ -172,14 +389,27 @@ def detect_composer_shot_crops_sync(
                 h=round(cam_h, 4),
                 label="Facecam / Subjek",
             )
-            bot_box = CropBoxConfig(
-                auto_detect=True,
-                x=0.22,
-                y=0.0,
-                w=0.56,
-                h=1.0,
-                label="Gameplay / Layar",
-            )
+            spk_faces = {
+                "SPK_1": FaceAnchorBox(
+                    x=max(0.0, min(0.98, face.x)),
+                    y=max(0.0, min(0.98, face.y)),
+                    w=max(0.02, min(1.0, face.w)),
+                    h=max(0.02, min(1.0, face.h)),
+                    confidence=max(0.1, min(1.0, face.conf)),
+                )
+            }
+            if interactive_cuts:
+                return _plan_interactive_gaming_shots(
+                    duration=duration,
+                    base_mode=mode,
+                    face_box=face,
+                    cam_top_box=top_box,
+                    gameplay_box=bot_box,
+                    speaker_faces=spk_faces,
+                    start_sec=start_sec,
+                    transcript_segments=transcript_segments,
+                    sfx_cues=sfx_cues,
+                )
             return [
                 ShotCropSegment(
                     t_start=0.0,
@@ -189,17 +419,51 @@ def detect_composer_shot_crops_sync(
                     shot_mode="single_focus",
                     reason="speaker_match",
                     confidence=0.85,
-                    speaker_faces={
-                        "SPK_1": FaceAnchorBox(
-                            x=max(0.0, min(0.98, face.x)),
-                            y=max(0.0, min(0.98, face.y)),
-                            w=max(0.02, min(1.0, face.w)),
-                            h=max(0.02, min(1.0, face.h)),
-                            confidence=max(0.1, min(1.0, face.conf)),
-                        )
-                    },
+                    speaker_faces=spk_faces,
                 )
             ]
+        elif interactive_cuts:
+            return _plan_interactive_gaming_shots(
+                duration=duration,
+                base_mode="blurred_frame",
+                face_box=None,
+                cam_top_box=CropBoxConfig(
+                    auto_detect=True, x=0.05, y=0.0, w=0.90, h=1.0, label="Gameplay Penuh"
+                ),
+                gameplay_box=bot_box,
+                speaker_faces={},
+                start_sec=start_sec,
+                transcript_segments=transcript_segments,
+                sfx_cues=sfx_cues,
+            )
+
+    if interactive_cuts and mode == "blurred_frame":
+        face = _detect_streamer_face_sync(ctx)
+        bot_box = CropBoxConfig(
+            auto_detect=True, x=0.22, y=0.0, w=0.56, h=1.0, label="Gameplay / Layar"
+        )
+        spk_faces: dict[str, FaceAnchorBox] = {}
+        if face is not None:
+            spk_faces["SPK_1"] = FaceAnchorBox(
+                x=max(0.0, min(0.98, face.x)),
+                y=max(0.0, min(0.98, face.y)),
+                w=max(0.02, min(1.0, face.w)),
+                h=max(0.02, min(1.0, face.h)),
+                confidence=max(0.1, min(1.0, face.conf)),
+            )
+        return _plan_interactive_gaming_shots(
+            duration=duration,
+            base_mode="blurred_frame",
+            face_box=face,
+            cam_top_box=CropBoxConfig(
+                auto_detect=True, x=0.05, y=0.0, w=0.90, h=1.0, label="Gameplay Penuh"
+            ),
+            gameplay_box=bot_box,
+            speaker_faces=spk_faces,
+            start_sec=start_sec,
+            transcript_segments=transcript_segments,
+            sfx_cues=sfx_cues,
+        )
 
     # V2 Podcast / Multi-Angle / Multi-Speaker ShotPlanner (diarization + SFace + POI)
     try:
@@ -296,6 +560,7 @@ def apply_auto_detect_to_layout_sync(
     job_dir: Optional[Path] = None,
     focus_hints: Optional[list] = None,
     transcript_segments: Optional[list[TranscriptSegment]] = None,
+    sfx_cues: Optional[list] = None,
 ) -> list[ShotCropSegment]:
     """Detect all angle/face crops in `[start_sec, end_sec]` and populate `layout`."""
     segs = detect_composer_shot_crops_sync(
@@ -310,6 +575,7 @@ def apply_auto_detect_to_layout_sync(
         job_dir=job_dir,
         focus_hints=focus_hints,
         transcript_segments=transcript_segments,
+        sfx_cues=sfx_cues,
     )
     if segs:
         layout.shot_crops = segs
@@ -331,6 +597,7 @@ async def apply_auto_detect_to_layout(
     job_dir: Optional[Path] = None,
     focus_hints: Optional[list] = None,
     transcript_segments: Optional[list[TranscriptSegment]] = None,
+    sfx_cues: Optional[list] = None,
 ) -> list[ShotCropSegment]:
     """Async wrapper around apply_auto_detect_to_layout_sync."""
     return await asyncio.to_thread(
@@ -345,6 +612,7 @@ async def apply_auto_detect_to_layout(
         job_dir,
         focus_hints,
         transcript_segments,
+        sfx_cues,
     )
 
 
@@ -1595,6 +1863,7 @@ def _apply_climax_cv(
     canvas_bgr: np.ndarray,
     config: ClipComposerConfig,
     rel_t: float,
+    apply_zoom: bool = False,
 ) -> np.ndarray:
     climax = config.overlays.climax_effects
     out = canvas_bgr
@@ -1607,19 +1876,51 @@ def _apply_climax_cv(
             hsv[:, :, 1] = np.clip(hsv[:, :, 1] * float(climax.saturation), 0, 255)
             out = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
 
-    if climax.zoom_punch_enabled:
-        in_punch = any(
-            ws <= rel_t <= we
-            for ws, we in zoom_punch_windows(climax, max(float(config.clip_duration_sec()), rel_t + 1.0))
-        )
-        if in_punch:
-            zf = max(1.01, float(climax.zoom_punch_factor))
+    if apply_zoom and climax.zoom_punch_enabled:
+        wins = resolve_interactive_zoom_windows(config, max(float(config.clip_duration_sec()), rel_t + 1.0))
+        zf, ax, ay = evaluate_zoom_at_time(wins, rel_t)
+        if zf > 1.002:
             h, w = out.shape[:2]
             cw = max(2, int(round(w / zf)))
             ch = max(2, int(round(h / zf)))
-            cx = max(0, (w - cw) // 2)
-            cy = max(0, (h - ch) // 2)
+            cx = max(0, min(w - cw, int(round(w * ax - cw * 0.5))))
+            cy = max(0, min(h - ch, int(round(h * ay - ch * 0.5))))
             out = cv2.resize(out[cy : cy + ch, cx : cx + cw], (w, h), interpolation=cv2.INTER_LINEAR)
+    return out
+
+
+def _apply_canvas_zoom_qimage(
+    canvas_img: QImage,
+    config: ClipComposerConfig,
+    rel_t: float,
+) -> QImage:
+    """Apply interactive 1:1 canvas-level zoom matching FFmpeg scale+crop math."""
+    climax = config.overlays.climax_effects
+    if not climax.zoom_punch_enabled:
+        return canvas_img
+    total_dur = max(float(config.clip_duration_sec()), float(rel_t) + 0.5)
+    wins = resolve_interactive_zoom_windows(config, total_dur, shift=0.0)
+    if not wins:
+        return canvas_img
+    zf, ax, ay = evaluate_zoom_at_time(wins, rel_t)
+    if zf <= 1.002:
+        return canvas_img
+    cw = canvas_img.width()
+    ch = canvas_img.height()
+    crop_w = max(2.0, min(float(cw), float(cw) / zf))
+    crop_h = max(2.0, min(float(ch), float(ch) / zf))
+    src_x = max(0.0, min(float(cw) - crop_w, float(cw) * ax - crop_w * 0.5))
+    src_y = max(0.0, min(float(ch) - crop_h, float(ch) * ay - crop_h * 0.5))
+    out = QImage(cw, ch, QImage.Format.Format_RGBA8888)
+    out.fill(Qt.GlobalColor.black)
+    p = QPainter(out)
+    p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+    p.drawImage(
+        QRectF(0.0, 0.0, float(cw), float(ch)),
+        canvas_img,
+        QRectF(src_x, src_y, crop_w, crop_h),
+    )
+    p.end()
     return out
 
 
@@ -1645,8 +1946,9 @@ def _render_base_canvas_qimage(
 
     if config.aspect_ratio == "16:9" or mode == "single_focus":
         base_bgr = _crop_and_resize_bgr(source_frame_bgr, active_top_crop, cw, ch)
-        base_bgr = _apply_climax_cv(base_bgr, config, rel_time_sec)
-        return _bgr_to_qimage(base_bgr).convertToFormat(QImage.Format.Format_RGBA8888)
+        base_bgr = _apply_climax_cv(base_bgr, config, rel_time_sec, apply_zoom=False)
+        canvas_img = _bgr_to_qimage(base_bgr).convertToFormat(QImage.Format.Format_RGBA8888)
+        return _apply_canvas_zoom_qimage(canvas_img, config, rel_time_sec)
 
     if mode == "blurred_frame":
         bg_bgr = _crop_and_resize_bgr(source_frame_bgr, active_bot_crop, cw, ch)
@@ -1663,8 +1965,8 @@ def _render_base_canvas_qimage(
         fg_bgr = _crop_and_resize_bgr(source_frame_bgr, active_top_crop, fg_w, fg_h)
         y_off = max(0, (ch - fg_h) // 2)
 
-        bg_bgr = _apply_climax_cv(bg_bgr, config, rel_time_sec)
-        fg_bgr = _apply_climax_cv(fg_bgr, config, rel_time_sec)
+        bg_bgr = _apply_climax_cv(bg_bgr, config, rel_time_sec, apply_zoom=False)
+        fg_bgr = _apply_climax_cv(fg_bgr, config, rel_time_sec, apply_zoom=False)
         canvas_img = _bgr_to_qimage(bg_bgr).convertToFormat(QImage.Format.Format_RGBA8888)
         fg_qimg = _bgr_to_qimage(fg_bgr)
         p = QPainter(canvas_img)
@@ -1686,16 +1988,16 @@ def _render_base_canvas_qimage(
             p.drawPath(stroke_path)
             p.restore()
         p.end()
-        return canvas_img
+        return _apply_canvas_zoom_qimage(canvas_img, config, rel_time_sec)
 
     if mode == "pip_facecam":
         bg_bgr = _crop_and_resize_bgr(source_frame_bgr, active_bot_crop, cw, ch)
-        bg_bgr = _apply_climax_cv(bg_bgr, config, rel_time_sec)
+        bg_bgr = _apply_climax_cv(bg_bgr, config, rel_time_sec, apply_zoom=False)
         canvas_img = _bgr_to_qimage(bg_bgr).convertToFormat(QImage.Format.Format_RGBA8888)
 
         px, py, pip_w, pip_h = compute_pip_rect(cw, ch, layout)
         pip_bgr = _crop_and_resize_bgr(source_frame_bgr, active_top_crop, pip_w, pip_h)
-        pip_bgr = _apply_climax_cv(pip_bgr, config, rel_time_sec)
+        pip_bgr = _apply_climax_cv(pip_bgr, config, rel_time_sec, apply_zoom=False)
         pip_qimg = _bgr_to_qimage(pip_bgr)
 
         p = QPainter(canvas_img)
@@ -1717,7 +2019,7 @@ def _render_base_canvas_qimage(
             p.drawPath(stroke_path)
             p.restore()
         p.end()
-        return canvas_img
+        return _apply_canvas_zoom_qimage(canvas_img, config, rel_time_sec)
 
     # split_screen or multi_speaker_split
     geom = compute_split_geometry(cw, ch, layout.split_ratio_top, layout.divider.angle_deg)
@@ -1726,16 +2028,16 @@ def _render_base_canvas_qimage(
 
     if not geom.is_angled:
         combined = np.vstack([top_bgr, bot_bgr])
-        combined = _apply_climax_cv(combined, config, rel_time_sec)
+        combined = _apply_climax_cv(combined, config, rel_time_sec, apply_zoom=False)
         canvas_img = _bgr_to_qimage(combined).convertToFormat(QImage.Format.Format_RGBA8888)
         p = QPainter(canvas_img)
     else:
         bot_full = np.zeros((ch, cw, 3), dtype=np.uint8)
         bot_full[geom.bot_panel_y : geom.bot_panel_y + geom.bot_panel_h, 0:cw] = bot_bgr
-        bot_full = _apply_climax_cv(bot_full, config, rel_time_sec)
+        bot_full = _apply_climax_cv(bot_full, config, rel_time_sec, apply_zoom=False)
         canvas_img = _bgr_to_qimage(bot_full).convertToFormat(QImage.Format.Format_RGBA8888)
 
-        top_bgr = _apply_climax_cv(top_bgr, config, rel_time_sec)
+        top_bgr = _apply_climax_cv(top_bgr, config, rel_time_sec, apply_zoom=False)
         top_qimg = _bgr_to_qimage(top_bgr)
 
         p = QPainter(canvas_img)
@@ -1756,7 +2058,7 @@ def _render_base_canvas_qimage(
 
     draw_divider_on_painter(p, cw, ch, layout.split_ratio_top, layout.divider)
     p.end()
-    return canvas_img
+    return _apply_canvas_zoom_qimage(canvas_img, config, rel_time_sec)
 
 
 def render_preview_frame(
@@ -1789,6 +2091,7 @@ def render_preview_frame(
             if (layout.framing_tracking_mode == "auto_face" and len(layout.shot_crops) > 1 and config.aspect_ratio != "16:9")
             else None
         )
+        ir_cuts = bool(getattr(layout, "interactive_reaction_cuts", False))
         if tr_win is not None:
             idx_a, idx_b, tr_res, prog = tr_win
             seg_a = layout.shot_crops[idx_a]
@@ -1798,8 +2101,8 @@ def render_preview_frame(
                 if (prev_source_frame_bgr is not None and prev_source_frame_bgr.size > 0)
                 else source_frame_bgr
             )
-            m_a = seg_a.shot_mode if (layout.mode == "single_focus" and seg_a.shot_mode == "blurred_frame") else None
-            m_b = seg_b.shot_mode if (layout.mode == "single_focus" and seg_b.shot_mode == "blurred_frame") else None
+            m_a = _resolve_shot_effective_mode(layout.mode, seg_a.shot_mode, ir_cuts)
+            m_b = _resolve_shot_effective_mode(layout.mode, seg_b.shot_mode, ir_cuts)
             img_a = _render_base_canvas_qimage(
                 frame_a,
                 config,
@@ -1824,11 +2127,10 @@ def render_preview_frame(
         else:
             active_top_crop, active_bot_crop = layout.resolve_crops_at_time(rel_time_sec)
             m_cur = None
-            if layout.mode == "single_focus" and layout.shot_crops:
+            if layout.shot_crops:
                 for sc_seg in layout.shot_crops:
                     if sc_seg.t_start <= rel_time_sec < sc_seg.t_end:
-                        if sc_seg.shot_mode == "blurred_frame":
-                            m_cur = "blurred_frame"
+                        m_cur = _resolve_shot_effective_mode(layout.mode, sc_seg.shot_mode, ir_cuts)
                         break
             canvas_img = _render_base_canvas_qimage(
                 source_frame_bgr,
@@ -1942,6 +2244,7 @@ class ComposerFFmpegPlan:
     temp_fonts_dir: Optional[Path] = None
     temp_asset_paths: list[Path] = field(default_factory=list)
     sfx_events: list[tuple[float, Path, float]] = field(default_factory=list)
+    sfx_max_durations: list[Optional[float]] = field(default_factory=list)
     video_output_label: str = "vout"
     output_width: int = 1080
     output_height: int = 1920
@@ -1954,14 +2257,14 @@ def _escape_filter_val(val: str) -> str:
 
 @dataclass
 class _StaticMaskIndices:
-    """Shared split labels or single PNG input indices for shape masks/borders across shots."""
+    """Shared split labels or single PNG input indices mapped per consuming shot index."""
 
-    bf_mask_lbls: list[str] = field(default_factory=list)
-    bf_border_lbls: list[str] = field(default_factory=list)
-    pip_mask_lbls: list[str] = field(default_factory=list)
-    pip_border_lbls: list[str] = field(default_factory=list)
-    ang_mask_lbls: list[str] = field(default_factory=list)
-    ang_div_lbls: list[str] = field(default_factory=list)
+    bf_mask_lbls: dict[int, str] = field(default_factory=dict)
+    bf_border_lbls: dict[int, str] = field(default_factory=dict)
+    pip_mask_lbls: dict[int, str] = field(default_factory=dict)
+    pip_border_lbls: dict[int, str] = field(default_factory=dict)
+    ang_mask_lbls: dict[int, str] = field(default_factory=dict)
+    ang_div_lbls: dict[int, str] = field(default_factory=dict)
 
 
 def _prepare_static_masks(
@@ -1977,31 +2280,37 @@ def _prepare_static_masks(
     extra_inputs: list[tuple[Path, bool]],
     temp_assets: list[Path],
     next_idx: int,
+    shot_modes: Optional[list[str]] = None,
 ) -> tuple[_StaticMaskIndices, int]:
-    """Generate shared PNG masks/borders once and split them across N shots when needed."""
+    """Generate shared PNG masks/borders once and split only across shots that consume them."""
     masks = _StaticMaskIndices()
     if aspect_ratio == "16:9":
         return masks, next_idx
 
+    modes = shot_modes if shot_modes else [layout.mode] * max(1, n_shots)
     loop_flag = n_shots > 1
 
-    def _register_png(path: Path, fmt: str, tag: str) -> list[str]:
+    def _register_png(path: Path, fmt: str, tag: str, target_shots: list[int]) -> dict[int, str]:
         nonlocal next_idx
+        if not target_shots:
+            return {}
         in_idx = next_idx
         next_idx += 1
         extra_inputs.append((path, loop_flag))
         temp_assets.append(path)
-        if n_shots == 1:
-            lbl = f"{prefix}_{tag}_s0"
-            lines.append(f"[{in_idx}:v]format={fmt}[{lbl}]")
-            return [lbl]
-        lbls = [f"{prefix}_{tag}_s{i}" for i in range(n_shots)]
-        split_str = "".join(f"[{l}]" for l in lbls)
-        lines.append(f"[{in_idx}:v]fps={fps_safe:.3f},format={fmt},split={n_shots}{split_str}")
+        if len(target_shots) == 1:
+            s_i = target_shots[0]
+            lbl = f"{prefix}_{tag}_s{s_i}"
+            fps_pfx = f"fps={fps_safe:.3f}," if loop_flag else ""
+            lines.append(f"[{in_idx}:v]{fps_pfx}format={fmt}[{lbl}]")
+            return {s_i: lbl}
+        lbls = {s_i: f"{prefix}_{tag}_s{s_i}" for s_i in target_shots}
+        split_str = "".join(f"[{lbls[s_i]}]" for s_i in target_shots)
+        lines.append(f"[{in_idx}:v]fps={fps_safe:.3f},format={fmt},split={len(target_shots)}{split_str}")
         return lbls
 
-    mode = layout.mode
-    if mode == "blurred_frame" and (layout.frame_corner_radius_px > 0 or layout.frame_border_width_px > 0):
+    bf_shots = [i for i, m in enumerate(modes) if m == "blurred_frame"]
+    if bf_shots and (layout.frame_corner_radius_px > 0 or layout.frame_border_width_px > 0):
         fg_ratio_map = {"1:1": (cw, cw), "4:3": (cw, int(round(cw * 0.75))), "16:9": (cw, int(round(cw * 9.0 / 16.0)))}
         fg_w, fg_h = fg_ratio_map.get(layout.blurred_frame_aspect, (cw, int(round(cw * 0.75))))
         fg_h = min(ch, _make_even(fg_h, 2, ch))
@@ -2015,10 +2324,12 @@ def _prepare_static_masks(
             out_dir=work_dir,
             prefix=f"{prefix}_bf",
         )
-        masks.bf_mask_lbls = _register_png(fg_mask, "gray", "bf_m")
+        masks.bf_mask_lbls = _register_png(fg_mask, "gray", "bf_m", bf_shots)
         if fg_border is not None:
-            masks.bf_border_lbls = _register_png(fg_border, "rgba", "bf_b")
-    elif mode == "pip_facecam":
+            masks.bf_border_lbls = _register_png(fg_border, "rgba", "bf_b", bf_shots)
+
+    pip_shots = [i for i, m in enumerate(modes) if m == "pip_facecam"]
+    if pip_shots:
         _, _, pip_w, pip_h = compute_pip_rect(cw, ch, layout)
         pip_mask, pip_border = render_frame_shape_assets(
             width=pip_w,
@@ -2030,18 +2341,20 @@ def _prepare_static_masks(
             out_dir=work_dir,
             prefix=f"{prefix}_pip",
         )
-        masks.pip_mask_lbls = _register_png(pip_mask, "gray", "pip_m")
+        masks.pip_mask_lbls = _register_png(pip_mask, "gray", "pip_m", pip_shots)
         if pip_border is not None:
-            masks.pip_border_lbls = _register_png(pip_border, "rgba", "pip_b")
-    elif mode not in ("single_focus", "blurred_frame", "pip_facecam"):
+            masks.pip_border_lbls = _register_png(pip_border, "rgba", "pip_b", pip_shots)
+
+    ang_shots = [i for i, m in enumerate(modes) if m not in ("single_focus", "blurred_frame", "pip_facecam")]
+    if ang_shots:
         geom = compute_split_geometry(cw, ch, layout.split_ratio_top, layout.divider.angle_deg)
         if geom.is_angled:
             ang_mask, ang_div = render_angled_split_assets(
                 cw, ch, layout.split_ratio_top, layout.divider, work_dir, prefix=prefix
             )
-            masks.ang_mask_lbls = _register_png(ang_mask, "gray", "ang_m")
+            masks.ang_mask_lbls = _register_png(ang_mask, "gray", "ang_m", ang_shots)
             if ang_div is not None:
-                masks.ang_div_lbls = _register_png(ang_div, "rgba", "ang_d")
+                masks.ang_div_lbls = _register_png(ang_div, "rgba", "ang_d", ang_shots)
 
     return masks, next_idx
 
@@ -2106,7 +2419,7 @@ def _emit_layout_for_stream(
                 ),
             ]
         )
-        if masks.bf_mask_lbls:
+        if shot_idx in masks.bf_mask_lbls:
             m_lbl = _bound_mask(masks.bf_mask_lbls[shot_idx], "bfm")
             lines.extend(
                 [
@@ -2114,7 +2427,7 @@ def _emit_layout_for_stream(
                     f"[{seg_prefix}_fg][{m_lbl}]alphamerge[{seg_prefix}_fg_a]",
                 ]
             )
-            if masks.bf_border_lbls:
+            if shot_idx in masks.bf_border_lbls:
                 b_lbl = _bound_mask(masks.bf_border_lbls[shot_idx], "bfb")
                 lines.append(f"[{seg_prefix}_bg][{seg_prefix}_fg_a]overlay=x=0:y={y_off}:shortest=0[{seg_prefix}_bf_cmp]")
                 lines.append(f"[{seg_prefix}_bf_cmp][{b_lbl}]overlay=x=0:y={y_off}:shortest=0,format=yuv420p,setsar=1[{out_lbl}]")
@@ -2143,7 +2456,7 @@ def _emit_layout_for_stream(
                 f"[{seg_prefix}_pip_fg][{m_lbl}]alphamerge[{seg_prefix}_pip_a]",
             ]
         )
-        if masks.pip_border_lbls:
+        if shot_idx in masks.pip_border_lbls:
             b_lbl = _bound_mask(masks.pip_border_lbls[shot_idx], "pb")
             lines.append(f"[{seg_prefix}_bg][{seg_prefix}_pip_a]overlay=x={px}:y={py}:shortest=0[{seg_prefix}_pip_cmp]")
             lines.append(f"[{seg_prefix}_pip_cmp][{b_lbl}]overlay=x={px}:y={py}:shortest=0,format=yuv420p,setsar=1[{out_lbl}]")
@@ -2191,7 +2504,7 @@ def _emit_layout_for_stream(
             f"[{seg_prefix}_bot]pad={cw}:{ch}:0:{geom.bot_panel_y}:black,format=rgba[{seg_prefix}_b_pad]",
         ]
     )
-    if masks.ang_div_lbls:
+    if shot_idx in masks.ang_div_lbls:
         d_lbl = _bound_mask(masks.ang_div_lbls[shot_idx], "ad")
         lines.append(f"[{seg_prefix}_b_pad][{seg_prefix}_t_alpha]overlay=0:0:shortest=0[{seg_prefix}_ang_cmp]")
         lines.append(f"[{seg_prefix}_ang_cmp][{d_lbl}]overlay=0:0:shortest=0,format=yuv420p,setsar=1[{out_lbl}]")
@@ -2254,6 +2567,7 @@ def compile_composer_ffmpeg_plan(
     extra_inputs: list[tuple[Path, bool]] = []
     temp_assets: list[Path] = []
     sfx_events: list[tuple[float, Path, float]] = []
+    sfx_max_durations: list[Optional[float]] = []
     next_idx = int(base_extra_input_idx)
 
     layout = config.layout
@@ -2263,6 +2577,17 @@ def compile_composer_ffmpeg_plan(
     fps_safe = max(10.0, min(120.0, float(fps or 30.0)))
     valid_shots = _normalize_shots_for_compile(layout, main_dur, config.aspect_ratio)
     n_shots = max(1, len(valid_shots))
+    ir_cuts = bool(getattr(layout, "interactive_reaction_cuts", False))
+    if len(valid_shots) <= 1:
+        single_override: Optional[str] = None
+        if layout.shot_crops:
+            single_override = _resolve_shot_effective_mode(layout.mode, layout.shot_crops[0].shot_mode, ir_cuts)
+        shot_modes = [single_override or layout.mode]
+    else:
+        shot_modes = [
+            _resolve_shot_effective_mode(layout.mode, seg.shot_mode, ir_cuts) or layout.mode
+            for seg in valid_shots
+        ]
 
     masks, next_idx = _prepare_static_masks(
         layout=layout,
@@ -2277,17 +2602,11 @@ def compile_composer_ffmpeg_plan(
         extra_inputs=extra_inputs,
         temp_assets=temp_assets,
         next_idx=next_idx,
+        shot_modes=shot_modes,
     )
 
     if len(valid_shots) <= 1:
         active_top, active_bot = layout.resolve_crops_at_time(0.0)
-        single_override = None
-        if (
-            layout.mode == "single_focus"
-            and layout.shot_crops
-            and layout.shot_crops[0].shot_mode == "blurred_frame"
-        ):
-            single_override = "blurred_frame"
         summary = _emit_layout_for_stream(
             in_lbl=src_v,
             out_lbl="framed",
@@ -2304,7 +2623,7 @@ def compile_composer_ffmpeg_plan(
             ch=ch,
             masks=masks,
             lines=lines,
-            mode_override=single_override,
+            mode_override=(shot_modes[0] if shot_modes[0] != layout.mode else None),
         )
     else:
         resolved_trs = resolve_shot_transitions(valid_shots, layout.transition)
@@ -2325,7 +2644,7 @@ def compile_composer_ffmpeg_plan(
             lines.append(f"[{prefix}_s{i}]trim=start={seg.t_start:.3f}:end={seg.t_end:.3f},setpts=PTS-STARTPTS[{trim_lbl}]")
 
             comp_lbl = f"{prefix}_sf{i}"
-            seg_mode_ov = "blurred_frame" if (layout.mode == "single_focus" and seg.shot_mode == "blurred_frame") else None
+            seg_mode_ov = shot_modes[i] if shot_modes[i] != layout.mode else None
             base_summary = _emit_layout_for_stream(
                 in_lbl=trim_lbl,
                 out_lbl=comp_lbl,
@@ -2389,6 +2708,7 @@ def compile_composer_ffmpeg_plan(
                     wav_path = resolve_transition_sfx_path(tr.sfx)
                     if wav_path is not None:
                         sfx_events.append((round(intro_shift + tr.cut_time_sec, 3), wav_path, tr.sfx_volume))
+                        sfx_max_durations.append(None)
                 j += 1
             run_outputs.append(cur_run_lbl)
             idx = j
@@ -2461,16 +2781,14 @@ def compile_composer_ffmpeg_plan(
         cur_lbl = next_lbl
 
     if climax.zoom_punch_enabled:
-        wins = zoom_punch_windows(climax, total_dur, intro_shift)
+        wins = resolve_interactive_zoom_windows(config, total_dur, intro_shift)
         if wins:
-            zw = _make_even(cw * float(climax.zoom_punch_factor), 2)
-            zh = _make_even(ch * float(climax.zoom_punch_factor), 2)
+            w_expr, h_expr, x_expr, y_expr = build_ffmpeg_zoom_filter_exprs(wins, cw, ch)
             next_lbl = f"{prefix}_zoom"
-            cond = "+".join(f"between(t,{a:.3f},{b:.3f})" for a, b in wins)
             lines.append(
-                f"[{cur_lbl}]scale=w='if(gt({cond},0),{zw},{cw})':"
-                f"h='if(gt({cond},0),{zh},{ch})':eval=frame,"
-                f"crop={cw}:{ch}:(iw-{cw})/2:(ih-{ch})/2[{next_lbl}]"
+                f"[{cur_lbl}]scale=w='{w_expr}':"
+                f"h='{h_expr}':eval=frame,"
+                f"crop={cw}:{ch}:'{x_expr}':'{y_expr}'[{next_lbl}]"
             )
             cur_lbl = next_lbl
 
@@ -2594,7 +2912,9 @@ def compile_composer_ffmpeg_plan(
             if 0.0 <= cue_t < total_dur:
                 cue_path = resolve_transition_sfx_path(cue.sfx_name)
                 if cue_path is not None:
+                    spec = get_sfx_context(cue.sfx_name)
                     sfx_events.append((cue_t, cue_path, max(0.05, min(1.0, float(cue.volume)))))
+                    sfx_max_durations.append(spec.max_stinger_sec if spec is not None else 3.8)
 
     # Custom font staging + ASS burn-in
     temp_fonts_dir: Optional[Path] = None
@@ -2633,6 +2953,7 @@ def compile_composer_ffmpeg_plan(
         temp_fonts_dir=temp_fonts_dir,
         temp_asset_paths=temp_assets,
         sfx_events=sfx_events,
+        sfx_max_durations=sfx_max_durations,
         video_output_label="vout",
         output_width=cw,
         output_height=ch,
